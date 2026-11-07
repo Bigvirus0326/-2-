@@ -31,6 +31,7 @@ import preview as PV
 from winpos import center_window
 import uxkit as UX
 import cardframe as CF
+import updater as UP
 
 try:
     import ingame
@@ -3888,8 +3889,8 @@ class App(tk.Tk):
         self.ui = max(min(1.0, self.ui_scale), self.winfo_fpixels("1i") / 96)  # 고해상도 화면 배율
         if "--selftest" in sys.argv:
             self.attributes("-alpha", 0.0)   # 점검 중에는 화면에 보이지 않게
-        self.title(APP_TITLE)
-        ico = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "app.ico")
+        self.title(f"{APP_TITLE} v{UP.VERSION}")
+        ico =os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "app.ico")
         if sys.platform == "win32" and os.path.isfile(ico):
             try:
                 self.iconbitmap(default=ico)   # 모든 창에 같은 아이콘
@@ -4095,6 +4096,13 @@ class App(tk.Tk):
         hm.add_command(label="사용 방법", command=self.show_help)
         hm.add_command(label="BaseLib (GitHub)", command=lambda: webbrowser.open(BASELIB_URL))
         hm.add_command(label="StS2 모딩 튜토리얼", command=lambda: webbrowser.open("https://tutorials.sts2modding.com/en/"))
+        hm.add_separator()
+        hm.add_command(label="🔔 업데이트 확인…", command=lambda: UP.check(self, manual=True))
+        self.update_check_var = tk.BooleanVar(value=bool(self.settings.get("update_check", True)))
+        hm.add_checkbutton(label="켤 때 새 버전 알려 주기", variable=self.update_check_var,
+                           command=self._toggle_update_check)
+        hm.add_command(label="모드 메이커 깃허브 (릴리스)", command=lambda: webbrowser.open(UP.RELEASES_PAGE))
+        hm.add_command(label=f"버전 v{UP.VERSION}", state="disabled")
         mb.add_cascade(label="도움말", menu=hm)
         self.config(menu=mb)
         self.bind_all("<Control-s>", lambda _e: self.save())
@@ -4106,7 +4114,7 @@ class App(tk.Tk):
 
     def update_title(self):
         name = os.path.basename(self.project_path) if self.project_path else "새 프로젝트"
-        self.title(f"{'*' if self.dirty else ''}{name} - {APP_TITLE}")
+        self.title(f"{'*' if self.dirty else ''}{name} - {APP_TITLE} v{UP.VERSION}")
 
     def mark_dirty(self):
         if not self.dirty:
@@ -4322,6 +4330,13 @@ class App(tk.Tk):
             self.after_cancel(job)
         self._scale_job = self.after(450, lambda: self.set_scale(self._pending_scale))
         return "break"
+
+    def persist_settings(self):
+        return save_settings(self.settings)
+
+    def _toggle_update_check(self):
+        self.settings["update_check"] = bool(self.update_check_var.get())
+        save_settings(self.settings)
 
     def set_scale(self, v):
         self._pending_scale = None
@@ -5174,6 +5189,7 @@ def main():
     state = None
     while True:   # 화면 배율을 바꾸면 창을 새 배율로 다시 만든다 (작업 내용은 그대로)
         app = App(state)
+        app.after(2500, lambda a=app: UP.auto_check(a))   # 깃허브에 새 버전이 있으면 알림 (켤 때 한 번)
         app.mainloop()
         state = getattr(app, "_restart_state", None)
         if not state:
