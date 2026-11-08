@@ -1637,6 +1637,8 @@ def gen_clone(project, item, kind):
     return "\n".join(L) + "\n"
 
 
+CARD_EVENTS = {"draw":"AfterCardDrawn", "discard":"AfterCardDiscarded", "exhaust":"AfterCardExhausted"}
+
 def gen_card(project, card):
     if card.get("clone"):
         return gen_clone(project, card, "card")
@@ -1694,6 +1696,20 @@ def gen_card(project, card):
     if card.get("upgrade_remove_keyword") and card["upgrade_remove_keyword"] in card["keywords"]:
         lines.append(f"        RemoveKeyword(CardKeyword.{card['upgrade_remove_keyword']});")
     lines.append("    }")
+    import blockcode
+    for event, method in CARD_EVENTS.items():
+        blocks = card.get("event_blocks", {}).get(event)
+        if not blocks:
+            continue
+        ctx = _Ctx("card", card)
+        ctx.single = ctx.other = None
+        ctx.play = "null"
+        statements, errors = blockcode.compile_blocks(blocks, project, ctx, prefix=pascal(card["id"])+event)
+        if errors:
+            raise ValueError(f"{card['id']} {event}: " + ", ".join(errors))
+        flag = "" if event == "discard" else ", bool flag"
+        lines.extend([f"    public override async Task {method}(PlayerChoiceContext choiceContext, CardModel card{flag})",
+                      "    {", "        if (card != this) return;", *statements, "    }"])
     lines += _extra_code(card)
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -2039,6 +2055,26 @@ def card_pool_for_character(project, character_class):
         return ""
     return next(("global::" + c["card_pool_full"] for c in card_characters(project)
                  if c["class"] == character_class and c.get("card_pool_full")), "")
+
+
+def transform_pools(project):
+    pools = {"": ("전체 카드 풀", "")}
+    for cls, label in (("Ironclad","아이언클래드"), ("Silent","사일런트"), ("Defect","디펙트"),
+                       ("Regent","리젠트"), ("Necrobinder","네크로바인더")):
+        pools["game:"+cls] = (label, "global::MegaCrit.Sts2.Core.Models.CardPools."+cls+"CardPool")
+    ch = project["character"]
+    if ch.get("enabled"):
+        pools["mine"] = (text(ch,"name","ko") or ch["id"], _pool_type(project,"card","mine"))
+    for c in card_characters(project):
+        if c["card_pool_full"]:
+            pools["mod:"+c["class"]] = (c["name"], "global::"+c["card_pool_full"])
+    return pools
+
+
+def effective_card_pool(project, card):
+    clone = card.get("clone") or {}
+    return card_pool_for_character(project, card.get("pool_character")) or _pool_type(
+        project, "card", clone.get("pool","mine"), clone.get("their_pool",""))
 
 
 def ichar_stem(ich):

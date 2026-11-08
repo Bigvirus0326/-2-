@@ -30,6 +30,7 @@ SPECS = {
     "source_amount": {"cat":"action", "ko":"가져온 효과 수치 {amount}", "args":{"amount":("value", {"t":"num","v":1})}},
     "source_step": {"cat":"action", "ko":"직접 코드 {source}", "args":{"source":("source", "")}},
     "source_hit": {"cat":"action", "ko":"{target}에게 피해 {stat} · {hits}회", "args":{"target":("who_one","target"), "stat":("raw_stat","V0"), "hits":("int",1)}},
+    "no_effect": {"cat": "flow", "ko": "사용 시 효과 없음", "args": {}},
     "original_play": {"cat": "action", "ko": "원본 카드 사용 효과 실행", "args": {}},
     # 네이티브 블록으로 바꾸지 못한 호출·반복 (csblocks). 칸 이름·종류는 블록마다 다르다.
     "src_call": {"cat": "action", "ko": "직접 호출", "args": {}},
@@ -206,14 +207,16 @@ SPECS = {
                         "opt3": ("label", {"ko": "", "en": ""})},
                "body": True, "else": True, "third": True,
                "sections": [("else", "② {opt2}"), ("third", "③ {opt3}  (이름을 비우면 둘 중 고르기)")]},
+    "shared_call": {"cat":"flow", "ko":"내 블록 {name} · 입력1 {first} · 입력2 {second}",
+                    "args":{"name":("shared_name",""), "first":("value",{"t":"num","v":1}), "second":("value",{"t":"num","v":1})}},
     "pick_each": {"cat": "gimmick", "ko": "{pile}에서 {ctype} {count}장 골라 한 장마다 실행",
                   "args": {"pile": ("pick_pile", "Hand"), "ctype": ("card_filter", "Any"),
                            "count": ("value", {"t": "num", "v": 1})}, "body": True},
     "picked_action": {"cat": "gimmick", "ko": "고른 카드에 실행: {action}",
                       "args": {"action": ("pick_action", "upgrade")}},
-    "random_transform": {"cat": "gimmick", "ko": "{pile}의 {ctype} 중 무작위 {count}장을 {result_filter} 중 한 장으로 변화",
+    "random_transform": {"cat": "gimmick", "body": True, "ko": "{pile}의 {ctype} 중 무작위 {count}장을 {result_pool}의 {result_filter} 중 한 장으로 변화",
                          "args": {"pile": ("pick_pile", "Hand"), "ctype": ("card_filter", "Any"),
-                                  "result_filter": ("result_filter", "Any"), "count": ("value", {"t": "num", "v": 1})}},
+                                  "result_pool": ("result_pool", ""), "result_filter": ("result_filter", "Any"), "count": ("value", {"t": "num", "v": 1})}},
     "pick_transform": {"cat": "gimmick", "ko": "{pile}에서 {ctype} {count}장 골라 {card}로 변화시키기",
                        "args": {"pile": ("pick_pile", "Hand"), "ctype": ("card_filter", "Any"),
                                 "count": ("value", {"t": "num", "v": 1}), "card": ("card", "this")}},
@@ -343,7 +346,7 @@ PALETTE = [
                "draw_to", "shuffle_draw_pile", "autoplay_draw_pile", "potion_add_type", "potion_add_model", "potion_add_model_at", "potion_discard",
                "card_set_cost_until_played", "card_free_this_turn", "card_notify_cost_changed", "card_upgrade_internal",
                "card_finalize_upgrade_internal", "card_transform_to", "keyword_this", "keyword_cards"]),
-    ("flow", ["if", "if_else", "repeat", "each_enemy", "random_enemy", "wait", "wait_scaled"]),
+    ("flow", ["shared_call", "if", "if_else", "repeat", "each_enemy", "random_enemy", "wait", "wait_scaled"]),
     ("var", ["set_var", "change_var"]),
     ("gimmick", ["pay", "summon", "command", "unsummon", "choice", "pick", "random_transform", "pick_transform", "pick_each", "picked_action", "delayed"]),
     ("class", ["channel", "orb_channel_model", "orb_channel_type", "orb_passive_model", "evoke", "orb_passive_all", "orb_slots", "orb_slots_to", "orb_grow", "stars", "forge",
@@ -1155,6 +1158,9 @@ def _describe_one(b, project, owner_kind, lang, card):
                 pool = f"{name} 키워드가 있는 카드" if ko else f"cards with {name}"
             else:
                 pool = G.filter_word(project, result, lang, plural=True)
+            selected = M.transform_pools(project).get(a.get("result_pool"))
+            if a.get("result_pool") and selected:
+                pool = selected[0] + " " + pool
             if ko:
                 return f"{pile_ko}의 {G.filter_word(project, a.get('ctype'), 'ko')} 중 무작위 {V('count')}장을 {pool} 중 한 장으로 변화시킵니다."
             return f"Transform {V('count')} random {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en} into random {pool}."
@@ -1483,6 +1489,34 @@ class _Gen:
                          f"{ind}if ({hand} != null && {hand}.Count > 0)", f"{ind}{{",
                          f"{ind}    var {card} = {C.me}.CombatState!.RunState.Rng.CombatCardSelection.NextItem({hand});"]
                 return lines + self.stmt({**b, "args": {**a, key: card}}, ind + "    ") + [ind + "}"]
+        if op == "no_effect":
+            return [ind + "await Task.CompletedTask;"]
+        if op == "shared_call":
+            name = a.get("name", "")
+            definitions = self.project.get("shared_blocks", {})
+            active = getattr(self, "_active_shared", ())
+            if name not in definitions or name in active:
+                self.errors.append(f"내 블록을 찾지 못했거나 순환 호출합니다: {name}")
+                return []
+            def expand(node):
+                if isinstance(node, list):
+                    return [expand(v) for v in node]
+                if isinstance(node, dict):
+                    if node.get("t") == "var" and node.get("name") in ("input1", "input2"):
+                        return a["first" if node["name"] == "input1" else "second"]
+                    return {k: expand(v) for k,v in node.items()}
+                return node
+            self._active_shared = (*active, name)
+            try:
+                return self.stmts(expand(definitions[name]), ind)
+            finally:
+                self._active_shared = active
+        if a.get("card") == "@replacement":
+            replacement = getattr(self, "_replacement", None)
+            if not replacement:
+                self.errors.append("방금 변화한 카드는 변화 블록 안에서 사용하세요.")
+                return []
+            return self.stmt({**b, "args":{**a,"card":replacement}}, ind)
         if op in ("src_call", "src_loop"):
             if C.kind != "card" or not C.item.get("clone"):
                 self.errors.append("직접 코드 블록은 복제 카드에서만 사용할 수 있습니다.")
@@ -2320,7 +2354,15 @@ class _Gen:
                 setup = []
                 guard = ""
                 change = f"await CardCmd.TransformToRandom({cv}, {pv}.PlayerRng.Transformations);"
-                if result != "Any":
+                pool_key = a.get("result_pool", "")
+                source = "ModelDb.AllCards"
+                if pool_key:
+                    selected = M.transform_pools(self.project).get(pool_key)
+                    if not selected:
+                        self.errors.append("변화 결과 캐릭터의 카드 풀을 다시 선택하세요.")
+                        return []
+                    source = f"ModelDb.CardPool<{selected[1]}>().AllCards"
+                if result != "Any" or pool_key:
                     if result.startswith("kw:") and result[3:] in dict(M.CARD_KEYWORDS):
                         match = f"model.Keywords.Contains(CardKeyword.{result[3:]})"
                     elif result in dict(G.card_filters(self.project)):
@@ -2332,17 +2374,26 @@ class _Gen:
                         self.errors.append("변화 결과에 사용할 키워드 또는 태그를 다시 선택하세요.")
                         return []
                     pool = self.uid("results")
-                    setup = [f"{ind}    var {pool} = ModelDb.AllCards.Where(model => {match}).ToList();"]
+                    setup = [f"{ind}    var {pool} = {source}.Where(model => {match}).ToList();"]
                     guard = f" && {pool}.Count > 0"
                     chosen = f"{pv}.PlayerRng.Transformations.NextItem({pool})"
                     change = f"await CardCmd.Transform({cv}, {C.me}.CombatState!.CreateCard({chosen}, {pv}));"
+                after = []
+                if b.get("body"):
+                    previous = getattr(self, "_replacement", None)
+                    self._replacement = self.uid("replacement")
+                    change = f"var {self._replacement} = " + change
+                    try:
+                        after = self.stmts(b["body"], ind + "        ")
+                    finally:
+                        self._replacement = previous
                 return [f"{ind}if ({C.player} is {{ }} {pv})", f"{ind}{{",
                         f"{ind}    var {lst} = PileType.{pile}.GetPile({pv}).Cards.Where({cv} => {' && '.join(conds)}).ToList();",
                         f"{ind}    var {remaining} = (int)({self.val(a.get('count'))});",
                         *setup, f"{ind}    while ({remaining}-- > 0 && {lst}.Count > 0{guard})", f"{ind}    {{",
                         f"{ind}        var {cv} = {pv}.RunState.Rng.CombatCardSelection.NextItem({lst});",
                         f"{ind}        {lst}.Remove({cv});",
-                        f"{ind}        {change}",
+                        f"{ind}        {change}", *after,
                         f"{ind}    }}", f"{ind}}}"]
             act = picked_action(cv)
             if op == "pick_transform":

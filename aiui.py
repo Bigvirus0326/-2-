@@ -22,16 +22,15 @@ def _text(parent, height, **kw):
     return fr, t
 
 
-class AIGuideDialog(tk.Toplevel):
+class GuidePage(ttk.Frame):
     """요청을 적고 → 설명서(요청 포함)를 복사 → ChatGPT/Claude 에 붙여넣기."""
 
-    def __init__(self, app):
-        super().__init__(app)
+    def __init__(self, app, host):
+        super().__init__(host.tabs)
         self.app = app
-        self.title(f"{TITLE} — ① AI에게 시키기")
-        self.transient(app)
-        self.configure(padx=14, pady=12)
-        ttk.Label(self, text="ChatGPT · Claude · Gemini 같은 채팅 AI에게 카드·유물·물약·파워를 만들게 합니다.",
+        self.host = host
+        self.configure(padding=12)
+        ttk.Label(self, text="ChatGPT · Claude · Gemini 같은 채팅 AI에게 카드·유물·물약·파워·기믹을 만들게 합니다.",
                   style="Head.TLabel").pack(anchor="w")
         steps = ("1. 아래에 만들고 싶은 것을 적고 '설명서 복사'를 누릅니다.\n"
                  "2. AI 채팅창에 붙여넣고 보냅니다. (설명서에 형식·선택지·지금 프로젝트의 ID 가 다 들어 있습니다)\n"
@@ -59,12 +58,10 @@ class AIGuideDialog(tk.Toplevel):
         ttk.Button(bf, text="📋 설명서 복사", style="Accent.TButton", command=self.copy).pack(side="left")
         ttk.Button(bf, text="파일로 저장…", command=self.save).pack(side="left", padx=6)
         ttk.Button(bf, text="② AI 결과 붙여넣기 →", command=self.open_paste).pack(side="left", padx=6)
-        ttk.Button(bf, text="닫기", command=self.destroy).pack(side="right")
+        ttk.Button(bf, text="닫기", command=self.host.destroy).pack(side="right")
         self.status = ttk.Label(self, text="", foreground="#2d6a4f")
         self.status.pack(anchor="w", pady=(6, 0))
-        self.bind("<Escape>", lambda _e: self.destroy())
-        self.geometry(f"{int(760 * app.ui)}x{int(430 * app.ui)}")
-        center_window(self, app)
+        self.bind("<Escape>", lambda _e: self.host.destroy())
         self._size()
 
     def _clear_example(self, _e=None):
@@ -98,19 +95,17 @@ class AIGuideDialog(tk.Toplevel):
             self.status.configure(text=f"저장했습니다: {p}")
 
     def open_paste(self):
-        self.destroy()
-        AIPasteDialog(self.app)
+        self.host.tabs.select(self.host.paste)
 
 
-class AIPasteDialog(tk.Toplevel):
+class PastePage(ttk.Frame):
     """AI 답 붙여넣기 → 읽기·자동 고침 → 검사 → 미리보기 → 넣기."""
 
-    def __init__(self, app, text=""):
-        super().__init__(app)
+    def __init__(self, app, host, text=""):
+        super().__init__(host.tabs)
         self.app = app
-        self.title(f"{TITLE} — ② AI 결과 붙여넣기")
-        self.transient(app)
-        self.configure(padx=12, pady=10)
+        self.host = host
+        self.configure(padding=10)
         self.patch = None
         self.errors, self.warnings = [], []
         self._photo = None
@@ -120,7 +115,7 @@ class AIPasteDialog(tk.Toplevel):
         top.pack(fill="x")
         ttk.Label(top, text="AI 의 답을 통째로 붙여 넣으세요 (설명 글이 섞여 있어도 JSON 부분만 읽습니다).",
                   style="Head.TLabel").pack(side="left")
-        ttk.Button(top, text="① 설명서 다시 복사…", command=lambda: AIGuideDialog(app)).pack(side="right")
+        ttk.Button(top, text="① 설명서 다시 복사…", command=lambda:self.host.tabs.select(self.host.guide)).pack(side="right")
         fr, self.src = _text(self, 7, font=("Consolas", 10))
         fr.pack(fill="x", pady=(4, 4))
         self.src.bind("<<Modified>>", self._modified)
@@ -173,14 +168,13 @@ class AIPasteDialog(tk.Toplevel):
         self.fix_btn = UX.tip(ttk.Button(bot, text="✉ AI에게 보낼 수정 요청 복사", command=self.copy_fix),
                               "오류·경고를 AI 에게 그대로 보낼 문장으로 복사합니다. AI 채팅창에 붙여넣으면 고친 JSON 을 다시 줍니다.")
         self.fix_btn.pack(side="left")
+        self.dep_btn = ttk.Button(bot, text="필요한 항목 함께 선택", command=self.include_dependencies)
         self.summary = ttk.Label(bot, text="", style="Muted.TLabel")
         self.summary.pack(side="left", padx=10)
-        ttk.Button(bot, text="닫기", command=self.destroy).pack(side="right")
+        ttk.Button(bot, text="닫기", command=self.host.destroy).pack(side="right")
         self.ok_btn = ttk.Button(bot, text="✔ 프로젝트에 넣기", style="Accent.TButton", command=self.commit)
         self.ok_btn.pack(side="right", padx=6)
-        self.bind("<Escape>", lambda _e: self.destroy())
-        self.geometry(f"{int(1060 * app.ui)}x{int(760 * app.ui)}")
-        center_window(self, app)
+        self.bind("<Escape>", lambda _e: self.host.destroy())
         if text:
             self.src.insert("1.0", text)
             self.read()
@@ -226,7 +220,13 @@ class AIPasteDialog(tk.Toplevel):
         self._render()
 
     # ---- 그리기 ----
+    def include_dependencies(self):
+        for row in AP.missing_selections(self.patch):
+            row["take"] = True
+        self.recheck()
+
     def _render_empty(self):
+        self.dep_btn.pack_forget()
         self.tree.delete(*self.tree.get_children())
         self.msg.configure(state="normal")
         self.msg.delete("1.0", "end")
@@ -254,6 +254,12 @@ class AIPasteDialog(tk.Toplevel):
         m.configure(state="normal")
         m.delete("1.0", "end")
         errs = self._all_errors()
+        missing = AP.missing_selections(p)
+        if missing:
+            m.insert("end", "함께 필요한 항목: " + ", ".join(x["item"].get("name_ko") or x["item"]["id"] for x in missing) + "\n", "warn")
+            self.dep_btn.pack(side="left")
+        else:
+            self.dep_btn.pack_forget()
         if errs:
             m.insert("end", f"오류 {len(errs)}개 — 고쳐야 넣을 수 있습니다\n", ("head", "err"))
             for e in errs:
@@ -270,7 +276,7 @@ class AIPasteDialog(tk.Toplevel):
             m.insert("end", "문제 없음 ✔\n", ("head", "fix"))
         m.configure(state="disabled")
         n = sum(1 for x in p.items if x["take"])
-        self.ok_btn.configure(state="normal" if n and not errs else "disabled")
+        self.ok_btn.configure(state="normal" if n and not errs and not missing else "disabled")
         self.fix_btn.configure(state="normal" if errs or self.warnings else "disabled")
         cnt = {}
         for x in p.items:
@@ -306,7 +312,22 @@ class AIPasteDialog(tk.Toplevel):
             pass
         import re
         self.desc.configure(text=re.sub(r"\[/?[a-z]+\]", "", desc))
+        if getattr(self, "diff_widget", None):
+            self.diff_widget.destroy()
+            self.diff_widget = None
         self.canvas.delete("all")
+        if x["kind"] in AP.GIMMICKS:
+            if x["exists"] and not self.keep.get():
+                group = AP.GIMMICKS[x["kind"]][0]
+                old = next(row for row in self.app.project["gimmicks"][group] if row["id"] == item["id"])
+                lines = AP.change_lines(old, item)
+                self.canvas.create_text(8, 8, anchor="nw", text="변경 전 → 변경 후", fill="white")
+                diff = tk.Text(self.canvas, wrap="word", width=32, height=16)
+                diff.insert("1.0", "\n".join(lines) or "변경 없음")
+                diff.configure(state="disabled")
+                self.canvas.create_window(8, 36, anchor="nw", window=diff)
+                self.diff_widget = diff
+            return
         assets = self.app.game_assets()
         if assets is None:
             self.canvas.create_text(10, 10, anchor="nw", fill="#ccc", text="게임 파일이 있으면 게임 모습으로 보여 줍니다.",
@@ -345,8 +366,32 @@ class AIPasteDialog(tk.Toplevel):
         self.app.mark_dirty()
         self.app.load_all()
         self.app.log("AI 결과를 넣었습니다: " + ", ".join(f"{AP.NOUN[k]} {i}" for k, i in added))
-        self.destroy()
+        self.host.destroy()
         if added:   # 파워는 먼저 들어가므로, 카드·유물·물약이 있으면 그쪽으로 데려간다
             first = next(((k, i) for k, i in added if k != "power"), added[0])
             self.app.goto_any(*first)
         self.app.status(f"AI 결과 {len(added)}개를 넣었습니다 (Ctrl+Z 로 되돌리기)")
+
+class AIWorkflow(tk.Toplevel):
+    def __init__(self, app, paste=False, text=""):
+        super().__init__(app)
+        self.title("AI로 만들기")
+        self.transient(app)
+        self.tabs = ttk.Notebook(self)
+        self.tabs.pack(fill="both",expand=True)
+        self.guide = GuidePage(app,self)
+        self.paste = PastePage(app,self,text)
+        self.tabs.add(self.guide,text="① 요청 복사")
+        self.tabs.add(self.paste,text="② 답변 붙여넣기 · 변경 확인")
+        self.tabs.select(self.paste if paste else self.guide)
+        self.geometry(f"{min(self.winfo_screenwidth()-60,int(1060*app.ui))}x{min(self.winfo_screenheight()-100,int(760*app.ui))}")
+        center_window(self,app)
+        self.bind("<Escape>",lambda _:self.destroy())
+
+
+def AIGuideDialog(app):
+    return AIWorkflow(app)
+
+
+def AIPasteDialog(app,text=""):
+    return AIWorkflow(app,True,text)

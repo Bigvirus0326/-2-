@@ -16,9 +16,14 @@ import cardframe as CF
 import gimmick as G
 import modgen as M
 
+import fxbtn
+import pets
+
+GIMMICKS = {"tag": ("tags", "태그", G.new_tag), "summon": ("summons", "소환수", G.new_summon), "orb": ("orbs", "구체", G.new_orb), "pet": ("pets", "동료", pets.new_pet), "fx": ("effects", "이펙트", fxbtn.new_effect), "button": ("buttons", "버튼", fxbtn.new_button)}
 KINDS = ("card", "relic", "potion", "power")
 KEY = {"card": "cards", "relic": "relics", "potion": "potions", "power": "powers"}
 NOUN = {"card": "카드", "relic": "유물", "potion": "물약", "power": "파워"}
+NOUN.update({k: v[1] for k, v in GIMMICKS.items()})
 FACTORY = {"card": M.new_card, "relic": M.new_relic, "potion": M.new_potion, "power": M.new_power}
 EXTRA_KEYS = {"name_zh", "desc_zh", "flavor_zh", "frame_style"}
 ENUMS = {
@@ -138,7 +143,7 @@ def _guess_kind(it):
 
 def _items_from(obj, patch):
     out = []
-    if isinstance(obj, dict) and any(k in obj for k in ("cards", "relics", "potions", "powers", "card", "relic", "potion", "power")):
+    if isinstance(obj, dict) and ("gimmicks" in obj or any(k in obj for k in ("cards", "relics", "potions", "powers", "card", "relic", "potion", "power"))):
         for kind in KINDS:
             for key in (KEY[kind], kind):
                 v = obj.get(key)
@@ -149,7 +154,20 @@ def _items_from(obj, patch):
                         out.append((kind, it))
                     else:
                         patch.errors.append(f"'{key}' 안에 객체가 아닌 값이 있습니다: {str(it)[:60]}")
-        other = [k for k in obj if k not in ("format", "cards", "relics", "potions", "powers", "card", "relic", "potion", "power",
+        groups = obj.get("gimmicks", {})
+        if not isinstance(groups, dict):
+            patch.errors.append("gimmicks는 종류별 목록을 담은 객체여야 합니다.")
+        else:
+            for kind, (group, label, factory) in GIMMICKS.items():
+                rows = groups.get(group, [])
+                if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+                    patch.errors.append(f"{label}에는 항목 목록을 넣어 주세요.")
+                    continue
+                for row in rows:
+                    out.append((kind, row))
+            for group in groups.keys() - {v[0] for v in GIMMICKS.values()}:
+                patch.errors.append(f"지원하지 않는 기믹 종류: {group}")
+        other = [k for k in obj if k not in ("format", "gimmicks", "cards", "relics", "potions", "powers", "card", "relic", "potion", "power",
                                              "notes", "note", "description", "summary")]
         if other:
             patch.fixes.append(f"알 수 없는 최상위 칸은 무시했습니다: {', '.join(other)}")
@@ -449,21 +467,93 @@ def read_patch(text, project):
            "tags": [t["id"] for t in g.get("tags", [])],
            "frames": {s["id"] for s in CF.styles(project)},
            "project_view": project}
-    seen = set()
+    view = copy.deepcopy(project)
+    prepared = {}
     for kind, raw in pairs:
-        it = _fix_item(kind, raw, ctx, patch)
+        if kind not in GIMMICKS:
+            continue
+        group, label, factory = GIMMICKS[kind]
+        ident = _fix_id(raw.get("id"), label, patch)
+        if not ident:
+            patch.errors.append(f"{label}에 ID가 필요합니다.")
+        item = factory(ident)
+        for key in item.keys() & raw.keys() - {"id", "image"}:
+            if type(raw[key]) is type(item[key]):
+                item[key] = copy.deepcopy(raw[key])
+            else:
+                patch.errors.append(f"{label} {ident}: {key} 값 형식을 확인하세요.")
+        prepared[id(raw)] = item
+        view.setdefault("gimmicks", {}).setdefault(group, []).append(item)
+    ctx.update(project_view=view, tags=[t["id"] for t in G.tags(view)],
+               summons={t["id"] for t in view["gimmicks"].get("summons", [])} if "gimmicks" in view else set())
+    seen = {}
+    for kind, raw in pairs:
+        it = prepared[id(raw)] if kind in GIMMICKS else _fix_item(kind, raw, ctx, patch)
         if not it["id"]:
             continue
-        if (kind, it["id"]) in seen:
-            patch.errors.append(f"{NOUN[kind]} ID '{it['id']}' 가 답 안에서 두 번 나옵니다.")
+        if it["id"] in seen:
+            previous = seen[it["id"]]
+            patch.errors.append(f"AI 답변의 ID '{it['id']}' 중복 ({NOUN[previous]}, {NOUN[kind]}). 항목마다 다른 ID를 사용하세요.")
             continue
-        seen.add((kind, it["id"]))
-        exists = any(x["id"] == it["id"] for x in project.get(KEY[kind], []))
+        seen[it["id"]] = kind
+        existing = g.get(GIMMICKS[kind][0], []) if kind in GIMMICKS else project.get(KEY[kind], [])
+        exists = any(x["id"] == it["id"] for x in existing)
         other = not exists and it["id"] in _all_ids(project)
         if other:
             patch.errors.append(f"{NOUN[kind]} ID '{it['id']}' 가 다른 종류(카드·유물·기믹 등)의 ID 와 겹칩니다.")
         patch.items.append({"kind": kind, "item": it, "exists": exists, "take": True})
     return patch
+
+
+def missing_selections(patch):
+    """Walk dependencies of selected AI items, including nested block arguments."""
+    pending = [x for x in patch.items if x["take"]]
+    available = {(x["kind"], x["item"]["id"]): x for x in patch.items if not x["take"] and not x["exists"]}
+    needed = []
+    def refs(node):
+        if isinstance(node, list):
+            for child in node:
+                yield from refs(child)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if key == "gtags" and isinstance(value, list):
+                    yield from (("tag", t) for t in value if isinstance(t, str))
+                elif isinstance(value, str):
+                    if key in ("card", "summon", "orb", "pet", "button", "fx"):
+                        yield key, value
+                    if key in ("filter", "result_filter", "ctype", "played_filter") and value.startswith("tag:"):
+                        yield "tag", value[4:]
+                    if key in ("power", "scale_power", "cond_power", "res_power", "ref"):
+                        if value.startswith("c:"):
+                            yield "power", value[2:]
+                        elif value.startswith("s:"):
+                            yield "summon", value[2:]
+                else:
+                    yield from refs(value)
+    while pending:
+        for key in refs(pending.pop()["item"]):
+            match = available.pop(key, None)
+            if match:
+                needed.append(match)
+                pending.append(match)
+    return needed
+
+
+def change_lines(old, new):
+    labels = {"max_rank": "최대 단계", "timing": "발동 시점", "name_ko": "한국어 이름",
+              "blocks": "실행 블록", "amount": "수치", "v": "값", "passive_blocks": "지속 효과"}
+    def compare(a, b, path):
+        if a == b:
+            return
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in sorted(a.keys() | b.keys()):
+                yield from compare(a.get(k), b.get(k), path + [labels.get(k, k)])
+        elif isinstance(a, list) and isinstance(b, list):
+            for i in range(max(len(a), len(b))):
+                yield from compare(a[i] if i < len(a) else None, b[i] if i < len(b) else None, path + [f"{i+1}번째"])
+        else:
+            yield f"{' › '.join(path)}: {a if a is not None else '없음'} → {b if b is not None else '없음'}"
+    return list(compare(old, {**new, **({"image": old["image"]} if old.get("image") else {})}, []))
 
 
 def _all_ids(project):
@@ -496,6 +586,14 @@ def _rename_refs(obj, kind, old, new):
         for k, v in obj.items():
             if kind == "power" and v == "c:" + old:
                 obj[k] = "c:" + new
+            elif kind in GIMMICKS and k == kind and v == old:
+                obj[k] = new
+            elif kind == "tag" and k == "gtags" and isinstance(v, list):
+                obj[k] = [new if tag == old else tag for tag in v]
+            elif kind == "tag" and v == "tag:" + old:
+                obj[k] = "tag:" + new
+            elif kind == "summon" and v == "s:" + old:
+                obj[k] = "s:" + new
             elif kind == "card" and k == "card" and v == old:
                 obj[k] = new
             else:
@@ -520,7 +618,9 @@ def apply(project, patch, keep_existing=False):
                 x["exists"] = False
     # 파워 먼저 (다른 항목이 참조)
     for x in sorted(takes, key=lambda x: 0 if x["kind"] == "power" else 1):
-        lst = project.setdefault(KEY[x["kind"]], [])
+        kind = x["kind"]
+        lst = (project.setdefault("gimmicks", {}).setdefault(GIMMICKS[kind][0], [])
+               if kind in GIMMICKS else project.setdefault(KEY[kind], []))
         it = copy.deepcopy(x["item"])
         idx = next((i for i, y in enumerate(lst) if y["id"] == it["id"]), None)
         if idx is not None:
@@ -552,6 +652,8 @@ def check(project, patch, keep_existing=False):
 
 def describe(project, kind, it, lang="ko"):
     """미리보기용 설명 (자동 생성)."""
+    if kind in GIMMICKS:
+        return M.text(it, "desc", lang) or M.text(it, "name", lang), project, it
     tmp = copy.deepcopy(project)
     lst = tmp.setdefault(KEY[kind], [])
     lst[:] = [y for y in lst if y["id"] != it["id"]] + [copy.deepcopy(it)]

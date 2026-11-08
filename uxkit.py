@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from winpos import center_window
 
@@ -23,7 +23,8 @@ FONT = "Malgun Gothic"
 def apply_theme(root, size=10):
     """밝고 깔끔한 평면 테마 (clam 기반). tk 위젯 기본값도 맞춘다."""
     st = ttk.Style(root)
-    st.theme_use("clam")
+    if st.theme_use() != "clam":
+        st.theme_use("clam")
     f, fb, fs = (FONT, size), (FONT, size, "bold"), (FONT, size - 1)
     root.option_add("*Font", f)
     root.option_add("*Background", C["bg"])
@@ -595,6 +596,14 @@ class BulkEditDialog(tk.Toplevel):
                 getter = v.get
             self.rows.append((key, on, getter))
             r += 1
+        self.tags = tab.app.project.get("gimmicks", {}).get("tags", []) if tab.kind == "card" else []
+        self.tag_choice = ttk.Combobox(self, state="readonly", values=["태그 추가 안 함"] +
+                                      [t.get("name_ko") or t["id"] for t in self.tags])
+        if self.tags:
+            self.tag_choice.current(0)
+            self.tag_choice.grid(row=r, column=2)
+            ttk.Label(self, text="기믹 태그 추가").grid(row=r,column=1)
+            r += 1
         if not self.rows:
             ttk.Label(self, text="한꺼번에 바꿀 수 있는 칸이 없습니다.").grid(row=r, column=0, columnspan=3)
             r += 1
@@ -613,9 +622,28 @@ class BulkEditDialog(tk.Toplevel):
                 val = getter()
                 if val is not None:
                     changes[key] = val
-        self.destroy()
-        if changes:
-            self.tab.apply_bulk(self.indices, changes)
+        tag = self.tags[self.tag_choice.current()-1]["id"] if self.tag_choice.current() > 0 else None
+        updates = []
+        for i in self.indices:
+            card = self.tab.items[i]
+            diff = {k:v for k,v in changes.items() if card.get(k) != v}
+            if tag and tag not in card.get("gtags", []):
+                diff["gtags"] = card.get("gtags", []) + [tag]
+            if diff:
+                updates.append((i,diff))
+        if not updates:
+            self.destroy()
+            return
+        preview = "\n".join((self.tab.items[i].get("name_ko") or self.tab.items[i]["id"]) + ": " +
+                            ", ".join(f"{self.tab.var_labels.get(k,k)} {self.tab.items[i].get(k,'')} → {v}" for k,v in diff.items())
+                            for i,diff in updates)
+        if messagebox.askyesno("일괄 변경 미리보기", preview, parent=self):
+            for i,diff in updates:
+                self.tab.items[i].update(diff)
+            self.tab.app.mark_dirty()
+            self.tab.refresh_list(self.indices)
+            self.tab.app.on_items_changed()
+            self.destroy()
 
 
 # ---------------------------------------------------------------------------

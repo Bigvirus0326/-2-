@@ -2443,6 +2443,9 @@ def decompose(card, parents=(), class_names=(), project=None):
             pre = [f"var {nm} = {w};" for nm, w in zip(names, want) if nm != w]
         else:
             text = rename(text, {nm: w for nm, w in zip(names, want) if nm != w})
+    # No-op selection cards are successful analyses; an empty list is treated as a failed import by editors.
+    if not text.strip() or re.fullmatch(r"\s*return\s+(?:System\.Threading\.Tasks\.)?Task\.CompletedTask\s*;\s*", text):
+        return [{"op": "no_effect", "args": {}}], d.stats
     d.taken |= set(want) | idents(text)
     try:
         stmts = parse_stmts(text)

@@ -700,7 +700,7 @@ class EffectList(ttk.Frame):
             self.refresh()
             self.on_change()
 
-    def edit(self):
+    def edit(self, reanalyze=False):
         i = self._sel()
         if i is None:
             return
@@ -714,7 +714,8 @@ class EffectList(ttk.Frame):
             def decompose():
                 # 원본 모드 DLL 을 (한 번만) 풀어 그 안의 모든 클래스로 OnPlay -> 블록
                 orig_class = (draft["clone"].get("orig_class") or "").split(".")[-1]
-                classes = self.app.mod_classes(draft["clone"].get("mod"), required_class=orig_class)
+                classes = self.app.mod_classes(draft["clone"].get("mod"), required_class=orig_class,
+                                               saved_body=draft["clone"].get("body", ""))
                 source_class = classes.get(orig_class)
                 if source_class is not None:
                     source_body = MI.fix_decompiled(source_class.body)
@@ -726,7 +727,7 @@ class EffectList(ttk.Frame):
                 if got:
                     csblocks.merge_usings(draft, info.get("usings"))
                 return got, info
-            if [b.get("op") for b in blocks] == ["original_play"]:
+            if reanalyze or [b.get("op") for b in blocks] == ["original_play"]:
                 try:
                     got, info = decompose()
                     if got:
@@ -1823,12 +1824,17 @@ class ItemTab(ttk.Frame):
         self._drag = None
 
         pw = ttk.PanedWindow(self, orient="horizontal")
+        self.item_panes = pw
         pw.pack(fill="both", expand=True)
         left = ttk.Frame(pw, padding=(8, 8, 4, 8), width=300)
         pw.add(left, weight=0)
         head = ttk.Frame(left)
         head.pack(fill="x", pady=(0, 6))
         ttk.Label(head, text=f"{self.noun} 목록", style="Head.TLabel").pack(side="left")
+        if self.kind == "card":
+            ttk.Button(head,text="라이브러리",command=self.app.open_card_library).pack(side="right")
+            ttk.Button(head, text="사용처 보기", command=lambda: self.app.show_usages(
+                "card", self.items[self.cur]) if self.cur is not None else None).pack(side="right")
         self.count_lbl = ttk.Label(head, text="", style="Count.TLabel")
         self.count_lbl.pack(side="left", padx=6)
         self.search = UX.SearchEntry(left, f"{self.noun} 찾기 (이름·ID·초성)  Ctrl+F", self.set_query,
@@ -1870,6 +1876,7 @@ class ItemTab(ttk.Frame):
                   style="Muted.TLabel", justify="left").pack(anchor="w", pady=(6, 0))
 
         right = ScrollFrame(pw)
+        self.item_editor = right
         pw.add(right, weight=1)
         self.form = ttk.Frame(right.inner, padding=8)
         self.form.pack(fill="both", expand=True)
@@ -2377,6 +2384,10 @@ class CardTab(ItemTab):
         self.entry(f, 2, 0, "이름 (한국어)", "name_ko")
         self.entry(f, 2, 2, "이름 (영어)", "name_en")
         self.entry(f, 3, 0, "이름 (중국어 간체)", "name_zh")
+        evt = ttk.Frame(f)
+        evt.grid(row=0, column=2, columnspan=2)
+        for event, label in (("draw","뽑을 때"), ("discard","버릴 때"), ("exhaust","소멸할 때")):
+            ttk.Button(evt, text=label, command=lambda e=event,l=label:self.edit_event(e,l)).pack(side="left")
         self.combo(f, 4, 0, "종류", "type", M.CARD_TYPES)
         self.combo(f, 4, 2, "희귀도", "rarity", M.CARD_RARITIES)
         self.spin(f, 5, 0, "비용", "cost")
@@ -2495,6 +2506,21 @@ class CardTab(ItemTab):
             return "(없음) ✎"
         import blockui
         return blockui._plain(GM_cond_label(c, self.app.project))[:60] + "  ✎"
+
+    def edit_event(self, event, label):
+        if self.cur is None:
+            return
+        card = self.items[self.cur]
+        if card.get("clone"):
+            messagebox.showinfo(label, "이 편집기는 메이커 일반 카드에서 사용할 수 있습니다.", parent=self)
+            return
+        import blockui
+        dialog = blockui.BlockEditor(self, self.app.project, "card", card,
+                                     card.get("event_blocks", {}).get(event, []), where=label, show_text=False)
+        self.wait_window(dialog)
+        if dialog.result is not None:
+            card.setdefault("event_blocks", {})[event] = dialog.result["blocks"]
+            self.app.mark_dirty()
 
     def edit_cond(self, key):
         if self.cur is None:
@@ -2752,6 +2778,8 @@ class GimmickTab(ttk.Frame):
         tb.grid(row=1, column=0, columnspan=4, sticky="we", pady=4)
         ttk.Button(tb, text="새 태그", command=self.add_tag).pack(side="left")
         ttk.Button(tb, text="삭제", command=self.del_tag).pack(side="left", padx=4)
+        ttk.Button(tb, text="사용처 보기", command=lambda: app.show_usages(
+            "tag", self.g["tags"][self.tag_cur]) if self.tag_cur is not None else None).pack(side="left")
         self.tv = {}
         for r, (k, label) in enumerate((("id", "ID (영문 소문자_)"), ("name_ko", "이름 (한국어)"), ("name_en", "이름 (영어)"),
                                         ("desc_ko", "툴팁 설명 (한국어)"), ("desc_en", "툴팁 설명 (영어)")), start=2):
@@ -4161,6 +4189,8 @@ class App(tk.Tk):
         self.geometry(f"{min(1640, sw - 60)}x{min(980, sh - 90)}")
         center_window(self)  # 메인 창은 화면 가운데
         self.minsize(760, 480)   # 작아지면 탭마다 스크롤바가 생긴다
+        if sys.platform == "win32" and (not state or state.get("maximized")):
+            self.state("zoomed")
         UX.apply_theme(self)
 
         self.settings = load_settings()
@@ -4187,7 +4217,7 @@ class App(tk.Tk):
         self._tb, self._tb_short, self._tb_full_w = tb, False, None
         self._tb_texts, self._tb_hide = [], []   # 창이 좁을 때: (위젯, 원래 글자, 짧은 글자) / 숨길 위젯
         # 오른쪽(찾기·상태)을 먼저 넣어야 좁아져도 잘리지 않는다
-        self.status_lbl = ttk.Label(tb, text="", style="Toolbar.TLabel")
+        self.status_lbl = ttk.Label(tb, text="", width=12, anchor="e", style="Toolbar.TLabel")
         self.status_lbl.pack(side="right", padx=(10, 0))
         self.top_search = UX.SearchEntry(tb, "전체에서 찾기  Ctrl+P", None, width=24,
                                          on_enter=lambda: self.open_find(self.top_search.get()))
@@ -4237,6 +4267,15 @@ class App(tk.Tk):
                    "그림체 참고 그림이 있으면 첨부할 폴더도 열어 줍니다.")
         b.pack(side="left", padx=(2, 0))
         self._tb_hide.append(b)
+        self.more_tools = ttk.Menubutton(tb,text="더보기 ▾")
+        more = tk.Menu(self.more_tools,tearoff=0)
+        self.more_tools.configure(menu=more)
+        for w in self._tb_hide:
+            if isinstance(w,ttk.Button):
+                more.add_command(label=w.cget("text"),command=w.invoke)
+        more.add_separator()
+        for attr,label in (("card_tab","카드"),("char_tab","캐릭터"),("gallery_tab","도감"),("ext_tab","다른 모드")):
+            more.add_command(label=label,command=lambda a=attr:self.nb.select(getattr(self,a)))
         tb.bind("<Configure>", self._fit_toolbar, add="+")
         ttk.Separator(self, orient="horizontal").pack(fill="x")
         main = ttk.PanedWindow(self, orient="vertical")
@@ -4286,7 +4325,7 @@ class App(tk.Tk):
             self.update_title()
             try:
                 self.nb.select(state["tab"])
-                if state.get("geometry"):
+                if state.get("geometry") and not state.get("maximized"):
                     self.geometry(state["geometry"])
             except tk.TclError:
                 pass
@@ -4295,6 +4334,8 @@ class App(tk.Tk):
         else:
             self.load_all()
             self.reset_history()
+        self.after_idle(self._fit_toolbar)
+        self.after_idle(self._fit_tabs)
         self.mod_tab.run_checks()
         self.log("슬더스2 모드 메이커를 시작했습니다. 카드/유물/물약/캐릭터를 만든 뒤 '모드 / 빌드' 탭에서 ②→③→④ 순서로 진행하세요.")
 
@@ -4302,11 +4343,19 @@ class App(tk.Tk):
     def open_card_library(self):
         from card_library import CardLibrary
         library = getattr(self, "_card_library", None)
+        tab = self.card_tab
+        self.nb.select(tab)
         if library is None or not library.winfo_exists():
-            self._card_library = CardLibrary(self, _resolve_project_image_paths, ingame)
-        else:
-            library.deiconify()
-            library.lift()
+            library = self._card_library = CardLibrary(self, _resolve_project_image_paths, ingame)
+        if str(library) not in tab.item_panes.panes():
+            tab.item_panes.forget(tab.item_editor)
+            tab.item_panes.add(library,weight=1)
+        library.show_card()
+
+    def close_card_library(self):
+        tab = self.card_tab
+        tab.item_panes.forget(self._card_library)
+        tab.item_panes.add(tab.item_editor,weight=1)
 
     def build_menu(self):
         mb = tk.Menu(self)
@@ -4331,6 +4380,9 @@ class App(tk.Tk):
         em.add_separator()
         em.add_command(label="목록에서 찾기", command=self.focus_list_search, accelerator="Ctrl+F")
         em.add_command(label="전체에서 찾기…", command=self.open_find, accelerator="Ctrl+P")
+        import project_review
+        em.add_command(label="카드 풀 밸런스 · 설명 검사", command=lambda: project_review.balance(self))
+        em.add_command(label="가져온 모드 미연결 호출", command=lambda: project_review.unresolved(self))
         mb.add_cascade(label="편집", menu=em)
         self.edit_menu = em
         am = tk.Menu(mb, tearoff=0)
@@ -4551,6 +4603,10 @@ class App(tk.Tk):
         if short == self._tb_short:
             return
         self._tb_short = short
+        if short:
+            self.more_tools.pack(side="right", before=self.status_lbl)
+        else:
+            self.more_tools.pack_forget()
         for w, full, sh in self._tb_texts:
             w.configure(text=sh if short else full)
         for w in self._tb_hide:
@@ -4607,6 +4663,8 @@ class App(tk.Tk):
         save_settings(self.settings)
 
     def set_scale(self, v):
+        if getattr(self, "_scale_job", None):
+            self.after_cancel(self._scale_job)
         self._pending_scale = None
         self._scale_job = None
         v = min(max(float(v), UI_SCALES[0]), UI_SCALES[-1])
@@ -4615,26 +4673,37 @@ class App(tk.Tk):
             return
         self.settings["ui_scale"] = v
         save_settings(self.settings)
-        if self._snap_job:
-            self.after_cancel(self._snap_job)
-            self.commit_snapshot()
-        self._restart_state = {"project": self.project, "path": self.project_path, "dirty": self.dirty,
-                               "history": self.history, "saved": self._saved_state,
-                               "tab": self.nb.index(self.nb.select()), "geometry": self.geometry()}
-        for job in self.tk.splitlist(self.tk.call("after", "info")):   # 이전 창의 예약 작업 정리
-            try:
-                self.after_cancel(job)
-            except tk.TclError:
-                pass
-        self.destroy()
+        self.ui_scale = v
+        self.tk.call("tk", "scaling", _BASE_SCALING * v)
+        self.ui = max(min(1.0, v), self.winfo_fpixels("1i") / 96)
+        self.scale_var.set(round(v * 100))
+        # Notify existing widgets that font metrics and layout have changed.
+        for name in self.tk.splitlist(self.tk.call("font", "names")):
+            size = self.tk.call("font", "configure", name, "-size")
+            self.tk.call("font", "configure", name, "-size", size)
+        UX.apply_theme(self)
+        self.char_tab.pv_canvas.configure(width=int(310*self.ui), height=int(570*self.ui))
+        for tab in (self.card_tab, self.relic_tab, self.potion_tab, self.power_tab):
+            for row in tab.tree.get_children():
+                tab.tree.item(row, image=UX.item_icon(tab.kind, tab.items[int(row)], self.ui))
+        self.refresh_previews()
+        self.status(f"화면 배율 {round(v*100)}%")
 
     def open_ai_guide(self):
-        import aiui
-        aiui.AIGuideDialog(self)
+        self._open_ai_workflow(False)
 
     def open_ai_paste(self):
+        self._open_ai_workflow(True)
+
+    def _open_ai_workflow(self, paste):
         import aiui
-        aiui.AIPasteDialog(self)
+        window = getattr(self, "_ai_workflow", None)
+        if window is None or not window.winfo_exists():
+            self._ai_workflow = aiui.AIWorkflow(self, paste)
+        else:
+            window.tabs.select(window.paste if paste else window.guide)
+            window.deiconify()
+            window.lift()
 
     def open_art_guide(self):
         import artui
@@ -5126,7 +5195,8 @@ class App(tk.Tk):
                   "  원래 모드가 필요하면 빌드 전에 따로 복사해 두세요.",
                   "• 원래 코드·그림·번역은 이 컴퓨터의 작업 폴더에 보관됩니다. 지우지 마세요.",
                   "• 먼저 '파일 → 다른 이름으로 저장' 으로 프로젝트를 저장하세요."]
-        messagebox.showinfo(APP_TITLE, "\n".join(lines))
+        import project_review
+        project_review.import_results(self, lines)
 
     def merge_dialog(self):
         p = filedialog.askopenfilename(title="합칠 프로젝트",
@@ -5198,6 +5268,63 @@ class App(tk.Tk):
         self.nb.select(tab)
         tab.select_index(idx)
 
+    def show_usages(self, kind, selected):
+        ident = selected["id"]
+        def scan(node, path=()):
+            if isinstance(node, list):
+                for index, value in enumerate(node):
+                    yield from scan(value, path + (index,))
+            elif isinstance(node, dict):
+                for key, value in node.items():
+                    if kind == "tag" and key == "gtags" and isinstance(value, list) and ident in value:
+                        yield "붙어 있는 태그", path + (key,)
+                    elif kind == "tag" and key in ("filter", "ctype", "played_filter", "result_filter") and value == "tag:" + ident:
+                        yield "태그 조건", path + (key,)
+                    elif kind == "card" and key == "card" and value == ident:
+                        yield "카드 참조", path + (key,)
+                    elif isinstance(value, (list, dict)):
+                        yield from scan(value, path + (key,))
+
+        win = tk.Toplevel(self)
+        win.title(f"{M.text(selected, 'name', 'ko')} ({ident}) · 사용처")
+        listing = tk.Listbox(win, width=88, height=16, exportselection=False)
+        listing.pack(fill="both", expand=True)
+        destinations = []
+        groups = [(k, self.project.get(g, [])) for k, g in
+                  (("card","cards"), ("relic","relics"), ("potion","potions"), ("power","powers"))]
+        groups.append(("character", [self.project["character"]]))
+        groups.extend((k, self.project.get("gimmicks", {}).get(g, [])) for k, g in
+                      (("summon","summons"), ("orb","orbs"), ("pet","pets"), ("button","buttons"), ("fx","effects")))
+        for owner, rows in groups:
+            for row in rows:
+                for role, path in scan(row):
+                    location = " › ".join(str(part+1) if isinstance(part,int) else part for part in path)
+                    listing.insert("end", f"{role} · {M.text(row,'name','ko')} ({row.get('id','')}) · {location}")
+                    destinations.append((owner, row.get("id"), path))
+        def jump(*_):
+            if not listing.curselection() or not destinations:
+                return
+            owner, iid, path = destinations[listing.curselection()[0]]
+            win.destroy()
+            self.goto_any(owner, iid)
+            if owner in ("orb", "pet", "summon"):
+                group = owner + "s"
+                index = next(i for i, row in enumerate(self.project["gimmicks"][group]) if row["id"] == iid)
+                getattr(self.gimmick_tab, "refresh_" + group)(index)
+            if owner in ("card","power","relic","potion") and path[:1] == ("effects",) and isinstance(path[1], int):
+                tree = getattr(self, owner + "_tab").effects.tree
+                children = tree.get_children()
+                if path[1] < len(children):
+                    tree.selection_set(children[path[1]])
+                    tree.see(children[path[1]])
+        if destinations:
+            listing.selection_set(0)
+            listing.bind("<Double-1>", jump)
+            listing.bind("<Return>", jump)
+            ttk.Button(win, text="편집 위치로 이동", command=jump).pack()
+        else:
+            listing.insert("end", "현재 프로젝트에 이 항목을 참조하는 곳이 없습니다.")
+
     def goto_any(self, kind, iid):
         """전체 찾기에서 고른 항목으로 간다."""
         if kind in ("card", "relic", "potion", "power"):
@@ -5222,15 +5349,12 @@ class App(tk.Tk):
             if jump:
                 jump(kind, iid)
 
-    def mod_classes(self, mod_id, required_class=""):
+    def mod_classes(self, mod_id, required_class="", saved_body=""):
         """의존 모드의 모든 C# 클래스 {짧은 이름: CsClass} — 원본 코드를 블록으로 풀 때 부모·도우미를 찾는 데 쓴다.
         DLL 은 한 번만 디컴파일해 둔다. 필요한 클래스가 캐시에 없으면 캐시를 새로 만든다."""
         cache = self.__dict__.setdefault("_mod_class_cache", {})
         dep = next((d for d in self.project.get("dependencies", []) if d.get("id") == mod_id), None)
         dll = (dep or {}).get("dll") or ""
-        if not os.path.isfile(dll):
-            raise ValueError(f"원본 모드 '{mod_id}' 의 DLL 을 찾지 못했습니다: {dll or '(경로 없음)'}")
-
         def parse_folder(folder):
             classes = {}
             import glob as _glob
@@ -5239,6 +5363,35 @@ class App(tk.Tk):
                     classes.setdefault(c.name, c)
             return classes
 
+        if not os.path.isfile(dll):
+            from pathlib import Path
+            takeover = self.project.get("takeover") or {}
+            if takeover.get("mod") != mod_id:
+                takeover = {}
+            folders = []
+            if takeover.get("source"):
+                source = Path(takeover["source"])
+                folders.append(source if source.is_dir() else source.parent)
+            game = self.settings.get("sts2_path") or detect_sts2_path()
+            candidates = [Path(takeover["original_dll"])] if takeover.get("original_dll") else []
+            if mod_id and re.fullmatch(r"[\w.-]+", mod_id) and mod_id not in (".", ".."):
+                if game:
+                    folders.extend(Path(game) / sub / mod_id for sub in ("mods", "mods.disabled"))
+                candidates.extend(folder / (mod_id + ".dll") for folder in folders)
+                if game and not any(f.is_file() for f in candidates):
+                    workshop = Path(game).parent.parent / "workshop" / "content" / "2868840"
+                    candidates.extend(workshop.glob("*/" + mod_id + ".dll"))
+            dll = next((str(f) for f in candidates if f.is_file()), "")
+            if not dll:
+                src = takeover.get("src")
+                if src and os.path.isdir(src):
+                    classes = parse_folder(src)
+                    if classes and (not required_class or required_class in classes):
+                        return classes
+                if saved_body.strip():
+                    self.log(f"[안내] {required_class}: 프로젝트에 저장된 카드 코드로 분석합니다. 외부 도우미 코드는 생략될 수 있습니다.")
+                    return {}
+                raise ValueError(f"'{mod_id}' 원본 DLL과 저장된 카드 코드를 찾지 못했습니다. 게임 설치 경로를 확인하거나 원본 모드를 다시 불러오세요.")
         key = (dll, os.path.getmtime(dll), os.path.getsize(dll))
         classes = cache.get(key)
         refresh = classes is not None and bool(required_class) and required_class not in classes
@@ -5643,16 +5796,9 @@ def main():
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except (AttributeError, OSError):
             pass
-    state = None
-    while True:   # 화면 배율을 바꾸면 창을 새 배율로 다시 만든다 (작업 내용은 그대로)
-        app = App(state)
-        app.after(2500, lambda a=app: UP.auto_check(a))   # 깃허브에 새 버전이 있으면 알림 (켤 때 한 번)
-        app.mainloop()
-        state = getattr(app, "_restart_state", None)
-        if not state:
-            break
-        UX._ICONS.clear()       # 이전 창의 그림은 새 창에서 쓸 수 없다
-        PV.IMAGES.cache.clear()
+    app = App()
+    app.after(2500, lambda: UP.auto_check(app))
+    app.mainloop()
 
 
 if __name__ == "__main__":

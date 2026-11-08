@@ -249,6 +249,11 @@ cond 객체 (조건):
     if include_project:
         parts.append("## 지금 프로젝트에 있는 것 (ID 가 겹치지 않게, 참조할 때 사용)\n" + project_summary(project) + "\n")
     parts.append("## 사용자의 요청\n" + ((request or "").strip() or "(사용자가 이 아래에 요청을 적는다)") + "\n")
+    import aipaste as AP
+    examples = {group: [{k: v for k, v in factory().items() if k != "image"}]
+                for group, _, factory in AP.GIMMICKS.values()}
+    parts.append("기믹 생성: 최상위 gimmicks 객체에 필요한 종류만 넣는다. 같은 답의 카드와 블록에서도 새 ID를 참조할 수 있다. 종류별 형식:"
+                 + json.dumps({"gimmicks": examples}, ensure_ascii=False))
     return "\n".join(parts)
 
 

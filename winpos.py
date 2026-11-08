@@ -22,6 +22,7 @@ def _work_area(x, y):
         mon = user32.MonitorFromPoint(wintypes.POINT(int(x), int(y)), 2)  # MONITOR_DEFAULTTONEAREST
         mi = MONITORINFO()
         mi.cbSize = ctypes.sizeof(MONITORINFO)
+        user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(MONITORINFO)]
         if not user32.GetMonitorInfoW(mon, ctypes.byref(mi)):
             return None
         r = mi.rcWork
@@ -60,6 +61,11 @@ def center_window(win, parent=None):
             dx, dy = round(7 * k), round(30 * k)
         cx, cy = px + pw // 2, py + ph // 2
         area = _work_area(cx, cy) or (0, 0, win.winfo_screenwidth(), win.winfo_screenheight())
+        max_w = max(1, area[2] - area[0] - 2*dx)
+        max_h = max(1, area[3] - area[1] - dy - dx)
+        if w > max_w or h > max_h:
+            w, h = min(w,max_w), min(h,max_h)
+            win.geometry(f"{w}x{h}")
         placed = (cx, cy, w, h, area)
         win.geometry(_pos(cx, cy, w, h, area, dx, dy))
     except Exception:

@@ -157,11 +157,9 @@ def item_sources(assets):
     return sources
 
 
-class CardLibrary(tk.Toplevel):
+class CardLibrary(ttk.Frame):
     def __init__(self, app, resolve_paths, game_module):
-        super().__init__(app)
-        self.title("캐릭터 카드 라이브러리")
-        self.geometry("965x570")
+        super().__init__(app.card_tab.item_panes)
         self.app, self.resolve_paths, self.game_module = app, resolve_paths, game_module
         self.reader = ThreadPoolExecutor(max_workers=1)
         self.reading = False
@@ -175,6 +173,7 @@ class CardLibrary(tk.Toplevel):
         top.pack(fill="x")
         ttk.Button(top, text="원작 캐릭터 열기", command=self.open_game).pack(side="left")
         ttk.Button(top, text="프로젝트 파일 열기…", command=self.open_projects).pack(side="left", padx=4)
+        ttk.Button(top,text="접기",command=app.close_card_library).pack(side="right")
         self.upgraded = tk.BooleanVar()
         ttk.Checkbutton(top, text="강화(+)", variable=self.upgraded, command=self.show_card).pack(side="right")
         self.search = tk.StringVar()
@@ -209,8 +208,8 @@ class CardLibrary(tk.Toplevel):
         self.info.pack(fill="both", expand=True)
         foot = ttk.Frame(self, padding=6)
         foot.pack(fill="x")
-        self.status = ttk.Label(foot, text="원작 또는 프로젝트 파일을 열고 카드를 선택하세요.")
-        self.status.pack(side="left")
+        self.status = ttk.Label(self, text="원작 또는 프로젝트 파일을 열고 카드를 선택하세요.")
+        self.status.pack(fill="x",before=foot)
         self.drop_zone = ttk.Label(self, text="↓ 여기로 카드를 끌어놓으면 프로젝트에 가져옵니다", anchor="center",
                                    padding=8, relief="groove")
         self.drop_zone.pack(fill="x", padx=6, pady=(0, 5), before=foot)
@@ -222,6 +221,7 @@ class CardLibrary(tk.Toplevel):
         self.remove_btn.pack(side="right")
         self.add_btn = ttk.Button(foot, text="선택한 카드 가져오기", command=self.add)
         self.add_btn.pack(side="right", padx=3)
+        app.card_tab.tree.bind("<<TreeviewSelect>>", lambda _: self.show_card(), add="+")
         self.show_card()
 
     def open_game(self):
@@ -320,11 +320,14 @@ class CardLibrary(tk.Toplevel):
         self.info.insert("1.0", "\n\n".join(lines))
         self.info.configure(state="disabled")
         self.add_btn.configure(state="normal" if card and (not imported or source.get("kind", "cards") == "cards") else "disabled",
-            text="프로젝트에 추가" if source.get("game") else "편집용 사본 가져오기")
-        can_apply = card and (not source.get("game") or source.get("kind", "cards") in ("cards", "card_keywords"))
+            text="＋ 새 카드로 가져오기" if source.get("kind","cards")=="cards" else "프로젝트에 추가")
+        tab = self.app.card_tab
+        current = tab.items[tab.cur] if tab.cur is not None and tab.cur < len(tab.items) else {}
+        name = M.text(current,"name","ko") if current else ""
+        can_apply = card and current and (not source.get("game") or source.get("kind")=="card_keywords")
         self.apply_btn.configure(state="normal" if can_apply else "disabled",
-                                 text="원작 카드 그대로 가져오기" if source.get("game") and source.get("kind", "cards") == "cards"
-                                 else "편집 중인 카드에 적용")
+                                 text=(f"‘{name}’에 키워드 적용" if source.get("kind")=="card_keywords" else
+                                       f"‘{name}’에 덮어쓰기…" if name else "덮어쓸 카드를 선택하세요"))
         self.code_btn.configure(state="normal" if card and source.get("game") and not source.get("kind") and not self.reading else "disabled")
         self.remove_btn.configure(state="normal" if imported else "disabled")
 
@@ -411,10 +414,18 @@ class CardLibrary(tk.Toplevel):
 
     def drag_move(self, event):
         if self._drag and abs(event.x_root - self._drag[1]) + abs(event.y_root - self._drag[2]) > 8:
-            self.status.configure(text="카드 탭에 놓으면 선택한 항목을 가져옵니다.")
+            tree = self.app.card_tab.tree
+            if not hasattr(self,"_tree_style"):
+                self._tree_style = tree.cget("style")
+            over = self.winfo_containing(event.x_root,event.y_root) == tree
+            ttk.Style(self).configure("LibraryDrop.Treeview",fieldbackground="#dcecff",background="#dcecff")
+            tree.configure(style="LibraryDrop.Treeview" if over else self._tree_style)
+            self.status.configure(text="여기에 놓으면 새 카드로 추가됩니다." if over else "왼쪽 카드 목록에 놓으세요.")
 
     def drag_end(self, event):
         drag, self._drag = self._drag, None
+        if hasattr(self,"_tree_style"):
+            self.app.card_tab.tree.configure(style=self._tree_style)
         try:
             if self.cards.grab_current() == self.cards:
                 self.cards.grab_release()

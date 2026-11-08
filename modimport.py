@@ -1775,7 +1775,7 @@ def takeover(em, sts2_path="", log=print, progress=None):
                      "extra_powers": extra_powers,
                      "patches_all": any(re.search(r"\.PatchAll\s*\(", t) for _r, t in files),
                      "characters": kept_chars,       # 원래 코드 그대로 둔 캐릭터 (아키텍트 기본 대사만 채움)
-                     "source": em.root, "kind": em.kind}
+                     "source": em.root, "kind": em.kind, "original_dll": em.dll}
     return P
 
 

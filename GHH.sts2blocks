@@ -1,0 +1,35 @@
+{
+  "format": "sts2blocks-1",
+  "blocks": [
+    {
+      "op": "damage",
+      "args": {
+        "who": "target",
+        "amount": {
+          "t": "num",
+          "v": 6
+        },
+        "hits": 1,
+        "powered": true
+      }
+    },
+    {
+      "op": "block",
+      "args": {
+        "amount": {
+          "t": "num",
+          "v": 5
+        }
+      }
+    },
+    {
+      "op": "energy",
+      "args": {
+        "amount": {
+          "t": "num",
+          "v": 1
+        }
+      }
+    }
+  ]
+}
