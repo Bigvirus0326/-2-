@@ -50,13 +50,50 @@ def _rotate(path, limit, keep=2):
         pass
 
 
+# Redact before writing and again when reading logs produced by older versions.
+_SECRET_FIELD = re.compile(
+    r"""(?ix)(?<![\w])(["']?(?:[\w.-]*?(?:token|api[_-]?key|password|passwd|secret)|pwd)["']?"""
+    r"""\s*(?:[:=]\s*|\s+))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&}\]]+)"""
+)
+_TOKEN = re.compile(r"(?i)\b(?:gh[pousr]_[\w]+|github_pat_[\w]+|sk-[\w-]{12,}|"
+                    r"xox[baprs]-[\w-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b")
+_PATH = re.compile(
+    r"""(?ix)(?:[a-z]:[\\/]+|\\\\[^\\/\s]+[\\/]+|/(?:home|users|private|root|mnt|volumes)/)"""
+    r"""[^\r\n"'<>|]*"""
+)
+
+
+def redact(text):
+    text = str(text)
+    text = re.sub(r"(?i)(\b(?:Bearer|Basic)\s+)[^\s,;\"']+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(https?://)[^/\s@]+:[^/\s@]+@", r"\1[REDACTED]@", text)
+    text = re.sub(r"(?i)(https://(?:[\w-]+\.)?discord(?:app)?\.com/api/webhooks/)[^\s\"'<>]+",
+                  r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?)(?!Bearer\b|Basic\b)[^\s,;\"']+", r"\1[REDACTED]", text)
+    text = _SECRET_FIELD.sub(r"\1[REDACTED]", text)
+    text = _TOKEN.sub("[REDACTED]", text)
+    def hide_path(match):
+        path = match.group().rstrip()
+        leaf = re.split(r"[\\/]", path)[-1]
+        # Keep only an unambiguous diagnostic filename.
+        if re.fullmatch(r"[\w.-]+\.(?:py|dll|exe|cs|log|pck|json)", leaf, re.I):
+            return "[PATH]/" + leaf
+        return "[PATH]"
+    text = _PATH.sub(hide_path, text)
+    users = {os.environ.get(k, "") for k in ("USERNAME", "USER", "LOGNAME")}
+    users.add(os.path.basename(os.path.expanduser("~")))
+    for user in sorted(filter(None, users), key=len, reverse=True):
+        text = re.sub(r"(?<!\w)" + re.escape(user) + r"(?!\w)", "[USER]", text, flags=re.I)
+    return text
+
+
 def _append(path, text, limit):
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with _LOCK:
             _rotate(path, limit)
             with open(path, "a", encoding="utf-8", newline="\n") as stream:
-                stream.write(text.rstrip() + "\n")
+                stream.write(redact(text).rstrip() + "\n")
                 stream.flush()
     except (OSError, UnicodeError):
         # Logging must not prevent the app from continuing to run.
@@ -127,9 +164,15 @@ def _tail(path, limit=_REPORT_LOG_LIMIT):
         with open(path, "rb") as stream:
             stream.seek(0, os.SEEK_END)
             size = stream.tell()
-            stream.seek(max(0, size - limit), os.SEEK_SET)
+            start = max(0, size - limit)
+            if start:
+                stream.seek(start - 1)
+                if stream.read(1) != b"\n":
+                    stream.readline()
+            else:
+                stream.seek(0)
             data = stream.read()
-        return data.decode("utf-8", errors="replace")
+        return redact(data.decode("utf-8", errors="replace"))
     except OSError:
         return ""
 

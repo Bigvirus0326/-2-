@@ -8,6 +8,8 @@
 그러면 이전 버전 사용자가 프로그램을 켤 때 알림 창이 뜨고, [지금 업데이트] 한 번으로
 새 zip 을 받아 프로그램 파일을 바꾸고 다시 켠다 (설정·출력 폴더는 그대로).
 """
+import release_signature
+import hashlib
 import json
 import os
 import re
@@ -20,7 +22,7 @@ import urllib.request
 import webbrowser
 import zipfile
 
-VERSION = "0.7"
+VERSION = "0.8"
 REPO = "Bigvirus0326/-2-"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -96,7 +98,7 @@ def fetch_latest(timeout=6, prerelease=False):
         "prerelease": bool(rel.get("prerelease")),
         "body": rel.get("body") or "",
         "assets": [{"name": a.get("name", ""), "url": a.get("browser_download_url", ""),
-                    "size": int(a.get("size") or 0)} for a in rel.get("assets") or []],
+                    "digest": a.get("digest"), "size": int(a.get("size") or 0)} for a in rel.get("assets") or []],
     }
 
 
@@ -146,7 +148,10 @@ def pick_asset(assets, frozen=None):
     return cands[0] if cands else None
 
 
-def download(url, dest, expected=0, progress=None, cancel=None, timeout=20):
+def download(url, dest, expected=0, progress=None, cancel=None, timeout=20, *, digest=None):
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest or ""):
+        raise ValueError("릴리스에 유효한 SHA-256 검증값이 없어 자동 업데이트를 중단했습니다.")
+    checksum = hashlib.sha256()
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     done = 0
     with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
@@ -157,12 +162,15 @@ def download(url, dest, expected=0, progress=None, cancel=None, timeout=20):
             chunk = r.read(256 * 1024)
             if not chunk:
                 break
+            checksum.update(chunk)
             f.write(chunk)
             done += len(chunk)
             if progress:
                 progress(done, total)
     if expected and done != expected:
         raise OSError(f"받은 크기가 다릅니다 ({done} / {expected} 바이트). 다시 시도해 주세요.")
+    if checksum.hexdigest() != digest[7:].lower():
+        raise ValueError("업데이트 파일의 SHA-256이 릴리스와 일치하지 않습니다.")
     return dest
 
 
@@ -423,8 +431,16 @@ class UpdateDialog:
         def run():
             try:
                 zp = os.path.join(self.work, "update.zip")
+                name = self.asset["name"] + ".sig"
+                signatures = [a for a in self.rel["assets"] if a["name"] == name]
+                if len(signatures) != 1 or signatures[0]["size"] != 384:
+                    raise ValueError("이 업데이트의 배포자 서명 파일이 없거나 올바르지 않습니다.")
+                req = urllib.request.Request(signatures[0]["url"], headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=20) as response:
+                    signature = response.read(385)
                 download(self.asset["url"], zp, self.asset.get("size", 0),
-                         progress=lambda d, t: st.update(done=d, total=t), cancel=self.cancel_ev)
+                         progress=lambda d, t: st.update(done=d, total=t), cancel=self.cancel_ev, digest=self.asset.get("digest"))
+                release_signature.verify(zp, signature)
                 st["phase"] = "stage"
                 st["src"] = stage(zp, self.work)
                 os.remove(zp)

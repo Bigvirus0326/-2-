@@ -493,7 +493,7 @@ API 키나 설치 없이, 쓰고 있는 채팅 AI(무료 웹 ChatGPT·Claude·Ge
 
 ## 배포판 직접 빌드 (빌드.bat)
 
-소스 폴더의 **빌드.bat** 을 더블클릭하면 배포용 zip 이 `배포` 폴더에 만들어지고, 끝나면 그 폴더가 열립니다.
+소스 폴더의 **빌드.bat** 을 더블클릭하면 배포용 ZIP에 현재 Windows 사용자의 배포자 키로 자동 서명합니다. 검증된 ZIP과 `.zip.sig`가 `배포` 폴더에 만들어지고, 끝나면 그 폴더가 열립니다.
 
 1. 처음 한 번만 빌드 도구(PyInstaller·Pillow)를 `.build_env` 폴더에 설치합니다 (인터넷 필요, 1~2분).
 2. `StS2ModMaker.exe` 를 만듭니다.
@@ -525,7 +525,7 @@ Python 3.14 가 필요합니다. `배포`, `.build_env`, `.build_tmp` 폴더는 
 1. `updater.py` 맨 위의 `VERSION = "0.4"` 을 올립니다 (예: `"0.5"`).
 2. 빌드.bat 을 더블클릭합니다. `StS2ModMaker_v0.5.zip` 이 만들어지고,
    깃허브에 이미 같거나 높은 버전이 있으면 경고해 줍니다.
-3. 깃허브 **Releases → Draft a new release** 에서 태그를 `v0.5` 로 정하고, 바뀐 내용을 적고, zip 을 첨부해 Publish 합니다.
+3. 깃허브 **Releases → Draft a new release** 에서 태그를 `v0.5` 로 정하고, 바뀐 내용을 적고, ZIP과 같은 이름의 `.zip.sig`를 함께 첨부해 Publish 합니다.
    바뀐 내용은 이전 버전 사용자의 알림 창에 그대로 보입니다. 첨부 zip 이름에 `source` 나 `소스` 를 넣지만 않으면 됩니다.
 
 **시험판으로 먼저 확인하기 (v0.5 부터):** 깃허브에서 릴리스를 올릴 때 **Set as a pre-release** 를 체크하면 일반 사용자에게는 알림이 가지 않습니다.

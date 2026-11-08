@@ -644,22 +644,30 @@ class ExtMod:
         """그림 참조(pck 경로 또는 파일 경로) -> 로컬 PNG 경로 (pck 는 꺼내서 캐시)."""
         if not ref:
             return ""
-        if os.path.isfile(ref):
-            return ref
         if self.pck is None:
+            return ref if os.path.isfile(ref) else ""
+        # Archive entry names never become local path components.
+        import ntpath
+        parts = ref.replace("\\", "/").split("/")
+        if ntpath.splitdrive(ref)[0] or any(part in ("", ".", "..") or ":" in part for part in parts):
             return ""
-        out = os.path.join(self.cache, "images", ref)
+        root = os.path.realpath(os.path.join(cache_root(), "imports"))
+        folder = os.path.realpath(os.path.join(self.cache, "images"))
+        if not folder.startswith(root + os.sep):
+            return ""
+        ext = os.path.splitext(ref)[1].lower()
+        ext = ext if ext in (".png", ".jpg", ".jpeg", ".webp") else ".png"
+        out = os.path.join(folder, hashlib.sha256(ref.encode("utf8")).hexdigest() + ext)
+        if os.path.realpath(out) != out:
+            return ""
         if os.path.isfile(out):
             return out
-        if os.path.isfile(out + ".png"):
-            return out + ".png"
         try:
             if ref.endswith(".res") and ref in self.pck:
                 img = decode_res_image(ingame.rscc_decompress(self.pck.read(ref)))
                 if img is None:
                     return ""
                 os.makedirs(os.path.dirname(out), exist_ok=True)
-                out = out + ".png"
                 img.save(out)
                 return out
             if ref + ".import" in self.pck:
@@ -809,7 +817,8 @@ def load_mod(path, sts2_path="", log=print):
     else:
         raise ValueError("모드 폴더, .dll, .pck, .json 중 하나를 고르세요.")
 
-    em.cache = os.path.join(cache_root(), "imports", re.sub(r"[^\w.-]", "_", em.id or "mod"))
+    cache_key = hashlib.sha256((em.id or "mod").encode("utf8")).hexdigest()
+    em.cache = os.path.join(cache_root(), "imports", cache_key)
     if em.pck_path:
         em.pck = ingame.Pck(em.pck_path)
         names = list(em.pck.files)

@@ -74,7 +74,7 @@ class FeedbackDialog(tk.Toplevel):
         if not description:
             messagebox.showwarning("건의 / 오류 보고", "내용을 적어 주세요.", parent=self)
             return None
-        return {"kind": self.kind.get(), "title": title, "description": description}
+        return {"kind": self.kind.get(), "title": FB.redact(title), "description": FB.redact(description)}
 
     def _payload_preview(self, report):
         include_logs = bool(self.include_logs.get())
@@ -130,12 +130,6 @@ class FeedbackDialog(tk.Toplevel):
         report = self._collect()
         if report is None:
             return
-        prompt = "GitHub 이슈 작성 초안을 엽니다. 제출한 이슈와 첨부 파일은 공개될 수 있습니다.\n\n"
-        if self.include_logs.get():
-            prompt += "보고서 ZIP에 최근 로그가 포함됩니다. 로그에 PC 사용자 이름이나 파일 경로가 있을 수 있습니다.\n"
-        prompt += "프로젝트와 그림 파일은 포함하지 않습니다. 내용을 확인한 뒤 초안을 열까요?"
-        if not messagebox.askyesno("GitHub 이슈 작성", prompt, parent=self):
-            return
         path, payload = self._make_bundle(report)
         title = f"[{report['kind']}] {report['title']}"
         body = FB.issue_body(payload, path)
@@ -144,6 +138,25 @@ class FeedbackDialog(tk.Toplevel):
         if len(url) > 7000:
             body = FB.issue_body({**payload, "description": report["description"][:1800] + "\n\n자세한 내용은 첨부 ZIP의 report.json을 확인해 주세요."}, path)
             url = f"https://github.com/{UP.REPO}/issues/new?{urlencode({'title': title, 'body': body})}"
+        preview = tk.Toplevel(self)
+        preview.title("GitHub로 보낼 내용 확인")
+        preview.transient(self)
+        view = tk.Text(preview, wrap="word", width=76, height=24)
+        view.pack(fill="both", expand=True)
+        view.insert("1.0", title + "\n\n" + body)
+        view.configure(state="disabled")
+        ttk.Label(preview, text="초안을 열면 위 내용이 GitHub로 전달됩니다. ZIP은 직접 첨부합니다.").pack()
+        actions = ttk.Frame(preview)
+        actions.pack(pady=6)
+        def proceed():
+            preview.destroy()
+            self._open_reviewed_issue(url, body, path)
+        ttk.Button(actions, text="취소", command=preview.destroy).pack(side="left")
+        ttk.Button(actions, text="확인하고 GitHub 초안 열기", command=proceed).pack(side="left")
+        center_window(preview, self)
+        preview.grab_set()
+
+    def _open_reviewed_issue(self, url, body, path):
         try:
             self.app.clipboard_clear()
             self.app.clipboard_append(body)
