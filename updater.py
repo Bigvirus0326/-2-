@@ -4,7 +4,7 @@
 새 버전을 배포할 때:
   1) 아래 VERSION 을 올린다 (예: "0.4" → "0.5")
   2) 빌드.bat 으로 zip 을 만든다
-  3) 깃허브 Releases 에 태그 v0.5 로 올리고 zip 두 개(exe 판·소스판)를 첨부한다
+  3) 깃허브 Releases 에 태그 v0.5 로 올리고 exe 판 zip 을 첨부한다
 그러면 이전 버전 사용자가 프로그램을 켤 때 알림 창이 뜨고, [지금 업데이트] 한 번으로
 새 zip 을 받아 프로그램 파일을 바꾸고 다시 켠다 (설정·출력 폴더는 그대로).
 """
@@ -20,7 +20,7 @@ import urllib.request
 import webbrowser
 import zipfile
 
-VERSION = "0.4"
+VERSION = "0.6"
 REPO = "Bigvirus0326/-2-"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -29,7 +29,7 @@ EXE_NAME = "StS2ModMaker.exe"
 MAIN_PY = "sts2_mod_maker.py"
 # 업데이트할 때 건드리지 않는 것 (사용자 파일)
 KEEP_FILES = ("settings.json", "selftest.json")
-KEEP_DIRS = ("output", "ai_requests", ".git", ".build_env", ".build_tmp", "배포")
+KEEP_DIRS = ("output", "ai_requests", "logs", ".git", ".build_env", ".build_tmp", "배포")
 LOG_PATH = os.path.join(tempfile.gettempdir(), "sts2mm_update.log")
 
 _auto_done = False
@@ -70,10 +70,22 @@ def release_version(rel):
     return None
 
 
-def fetch_latest(timeout=6):
-    req = urllib.request.Request(LATEST_API, headers={"User-Agent": UA, "Accept": "application/vnd.github+json"})
+def _get_json(url, timeout):
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        rel = json.loads(r.read().decode("utf-8"))
+        return json.loads(r.read().decode("utf-8"))
+
+
+def fetch_latest(timeout=6, prerelease=False):
+    """최신 릴리스. prerelease=True 면 깃허브에서 'Pre-release' 로 표시한 시험판까지 포함해 가장 높은 버전."""
+    if prerelease:
+        rels = [x for x in _get_json(LATEST_API.rsplit("/", 1)[0] + "?per_page=20", timeout)
+                if not x.get("draft") and release_version(x)]
+        if not rels:
+            raise OSError("릴리스가 없습니다.")
+        rel = max(rels, key=lambda x: _norm(release_version(x)))
+    else:
+        rel = _get_json(LATEST_API, timeout)
     v = release_version(rel)
     return {
         "version": v,
@@ -81,6 +93,7 @@ def fetch_latest(timeout=6):
         "tag": rel.get("tag_name") or "",
         "name": rel.get("name") or rel.get("tag_name") or "",
         "url": rel.get("html_url") or RELEASES_PAGE,
+        "prerelease": bool(rel.get("prerelease")),
         "body": rel.get("body") or "",
         "assets": [{"name": a.get("name", ""), "url": a.get("browser_download_url", ""),
                     "size": int(a.get("size") or 0)} for a in rel.get("assets") or []],
@@ -105,8 +118,8 @@ def self_update_block_reason(dst=None):
     dst = dst or install_dir()
     if sys.platform != "win32":
         return "자동 업데이트는 Windows 에서만 됩니다."
-    if not is_frozen() and os.path.isdir(os.path.join(dst, ".git")):
-        return "개발용 폴더(깃 저장소)라서 자동 업데이트를 하지 않습니다."
+    if not is_frozen():
+        return "소스(실행.bat)로 실행 중이라 자동 업데이트를 하지 않습니다 (exe 판에서만 됩니다)."
     try:
         probe = os.path.join(dst, ".update_write_test")
         with open(probe, "w", encoding="utf-8") as f:
@@ -250,7 +263,7 @@ def check(app, manual=False):
 
     def work():
         try:
-            box["rel"] = fetch_latest()
+            box["rel"] = fetch_latest(prerelease=bool(app.settings.get("update_prerelease")))
         except Exception as e:  # noqa: BLE001 — 인터넷 없음·차단 등은 조용히 넘어간다
             box["err"] = e
 
@@ -325,7 +338,7 @@ class UpdateDialog:
         w.protocol("WM_DELETE_WINDOW", self.close)
         f = ttk.Frame(w, padding=14)
         f.pack(fill="both", expand=True)
-        ttk.Label(f, text=f"새 버전 v{rel['version_text']} 이 나왔습니다", font=("", 13, "bold")).pack(anchor="w")
+        ttk.Label(f, text=f"새 {'시험판' if rel.get('prerelease') else '버전'} v{rel['version_text']} 이 나왔습니다", font=("", 13, "bold")).pack(anchor="w")
         ttk.Label(f, text=f"지금 쓰는 버전: v{VERSION}    ·    {rel['name']}", foreground="#666").pack(anchor="w", pady=(2, 8))
         body = rel["body"].strip()
         if body:

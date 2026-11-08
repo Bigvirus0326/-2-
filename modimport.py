@@ -366,7 +366,21 @@ def fix_decompiled(code):
         else:
             rep_ = "[.. " + inner + "]"
         out = out[:m.start()] + rep_ + out[c + 1:]
-    return out
+    return fix_out_ref(out)
+
+
+def fix_out_ref(code):
+    """ILSpy 가 out 매개변수를 'ref T x = ref outParam;' 로 받아 두는 코드는 그대로 컴파일되지 않는다 (CS0269).
+    그 앞에서 out 매개변수를 기본값으로 먼저 채운다 (out 은 원래 읽기 전에 반드시 채우므로 동작은 같다)."""
+    outs = set(re.findall(r"\bout\s+[\w.<>\[\]?,\s]+?\s+(\w+)\s*[,)]", code))
+    if not outs:
+        return code
+
+    def rep(m):
+        if m.group(4) not in outs:
+            return m.group(0)
+        return f"{m.group(1)}{m.group(4)} = default!;{m.group(1)}{m.group(2)}"
+    return re.sub(r"(\n[ \t]*)(ref\s+([\w.<>\[\]?]+)\s+\w+\s*=\s*ref\s+(\w+)\s*;)", rep, code)
 
 
 # ---------------------------------------------------------------------------
@@ -1022,9 +1036,12 @@ def _extract_items(em):
         if kind == "character":
             if "abstract" not in c.mods:
                 hp = re.search(r"(\d+)", _prop_value(c.body, "StartingHp") or "")
-                pool = re.search(r"CardPool<(?:[\w.]+\.)?(\w+)>", member_text(c.body, "CardPool"))
+                pool_text, _pool_owner = _inherited_member(em, c, "CardPool")
+                pool = re.search(r"CardPool<(?:[\w.]+\.)?(\w+)>|CardPool<(?:global::)?(?:[\w.]+\.)?(\w+)>\s*\(", pool_text)
+                pool_class = next((name for name in pool.groups() if name), "") if pool else ""
                 em.characters.append({"class": c.name, "full": c.full, "hp": int(hp.group(1)) if hp else 0,
-                                      "pool": pool.group(1) if pool else ""})
+                                      "pool": pool_class,
+                                      "pool_full": em.classes[pool_class].full if pool_class in em.classes else ""})
             continue
         if kind not in ("card", "relic", "potion", "power") or "abstract" in c.mods or "static" in c.mods:
             continue
@@ -1237,7 +1254,7 @@ def clone_item(em, item, project, target_pool="mine"):
             # 원본 OnPlay 를 블록 하나하나로 풀어 둔다 (도우미 메서드·부모 클래스까지 펼침). 실패하면 '원본 실행' 블록 하나.
             import csblocks
             try:
-                expanded, _info = csblocks.decompose_with_classes(new, em.classes)
+                expanded, _info = csblocks.decompose_with_classes(new, em.classes, project)
             except Exception as exc:   # 풀기 실패는 가져오기를 막지 않는다
                 expanded = None
                 log_fn = getattr(em, "log", None)
@@ -1271,6 +1288,333 @@ def external_keywords(em):
                 row["keyword_member"] = candidates[0]
             rows.append(row)
     return rows
+
+
+# ---------------------------------------------------------------------------
+# 모드를 통째로 내 프로젝트로 (원래 코드·리소스는 그대로 두고, 카드·유물·물약·파워를 편집 가능하게)
+# ---------------------------------------------------------------------------
+TAKEOVER_ORIG_NS = "Orig"       # 원본 코드가 {id}.{id}Code 를 쓰면 {id}.{id}Orig 로 옮겨 생성 코드와 겹치지 않게
+
+
+def _top_level_types(text):
+    """파일 안의 최상위 형식 이름들 (class/record/struct/interface/enum/delegate)."""
+    src = strip_comments(text)
+    src = re.sub(r'@?"(?:[^"\\\n]|\\.)*"', '""', src)          # 문자열 안의 { } 는 세지 않는다
+    block_ns = re.search(r"\bnamespace\s+[\w.]+\s*\{", src)
+    top = 1 if block_ns else 0
+    names, depth = [], 0
+    for m in re.finditer(r"[{}]|\b(class|record|struct|interface|enum|delegate)\s+(?:\w+\s+)?(\w+)", src):
+        tok = m.group(0)
+        if tok == "{":
+            depth += 1
+        elif tok == "}":
+            depth -= 1
+        elif depth == top:
+            names.append(m.group(2))
+    return names
+
+
+def _dep_entries(em, sts2_path):
+    """원본 매니페스트의 필수 모드 (BaseLib 제외) → 참조 항목."""
+    out = []
+    for d in em.manifest.get("dependencies") or []:
+        did = d.get("id") if isinstance(d, dict) else str(d)
+        if not did or did.lower() == "baselib" or did == em.id:
+            continue
+        dll = ""
+        for sub in ("mods", "mods.disabled"):
+            for cand in (os.path.join(sts2_path or "", sub, did, f"{did}.dll"),):
+                if os.path.isfile(cand):
+                    dll = cand
+        out.append({"id": did, "name": did, "version": (d.get("min_version") if isinstance(d, dict) else "") or "",
+                    "dll": dll, "powers": []})
+    return out
+
+
+CHAR_IMAGE_PROPS = {     # 내 그림 칸 -> 원래 클래스에서 바꿀 속성
+    "select_image": ["CustomCharacterSelectIconPath"],
+    "select_locked_image": ["CustomCharacterSelectLockedIconPath"],
+    "icon_image": ["CustomIconTexturePath", "CustomIconOutlineTexturePath", "CustomIcon", "CustomIconPath"],
+    "map_marker_image": ["CustomMapMarkerPath"],
+    "select_bg_image": ["CustomCharacterSelectBg"],
+    "combat_image": ["CreateCustomVisuals"],
+}
+CHAR_REGEN = ["StartingHp", "StartingGold", "StartingDeck", "StartingRelics"]
+
+
+def _model_list(text, kind):
+    """'ModelDb.Card<X>()' 들 → [(형식 이름, 개수)] (순서 유지). 목록 식이 아니면 None."""
+    found = re.findall(r"ModelDb\s*\.\s*" + kind + r"\s*<\s*(?:global::)?([\w.]+)\s*>\s*\(\s*\)", text)
+    if not found:
+        return None
+    if re.search(r"\b(for|foreach|while|if|switch|Enumerable\.Repeat|Concat|Select)\b", text):
+        return None        # 반복·조건으로 만드는 목록은 그대로 둔다
+    out = []
+    for name in found:
+        if out and out[-1][0] == name:
+            out[-1] = (name, out[-1][1] + 1)
+        else:
+            out.append((name, 1))
+    return out
+
+
+def import_character(em, c, project, lid):
+    """원래 캐릭터 클래스 → 편집할 수 있는 캐릭터 항목. 고친 값만 다시 만들고 나머지는 원래 코드 그대로."""
+    body = c.body
+    pool_text, _pool_owner = _inherited_member(em, c, "CardPool")
+    pool_match = re.search(r"CardPool<(?:[\w.]+\.)?(\w+)>|CardPool<(?:global::)?(?:[\w.]+\.)?(\w+)>\s*\(", pool_text)
+    pool_class = next((name for name in pool_match.groups() if name), "") if pool_match else ""
+    pool_info = em.classes.get(pool_class)
+    by_class = {}
+    for kind, key in (("card", "cards"), ("relic", "relics")):
+        for it in project[key]:
+            cl = it.get("clone") or {}
+            if cl.get("keep_name"):
+                by_class[(kind, cl["class_name"])] = it["id"]
+                if cl.get("namespace"):
+                    by_class[(kind, cl["namespace"] + "." + cl["class_name"])] = it["id"]
+
+    def ref(kind, name):
+        if (kind, name) in by_class:
+            return by_class[(kind, name)]
+        short = name.split(".")[-1]
+        if (kind, short) in by_class:
+            return by_class[(kind, short)]
+        # 이 모드의 다른 클래스는 전체 이름, 게임·다른 모드의 것은 원래 코드에 쓰인 그대로 (원래 using 으로 찾음)
+        return "raw:" + ("global::" + em.classes[short].full if short in em.classes else name)
+    hp_m = re.search(r"(\d+)", _prop_value(body, "StartingHp") or "")
+    gold_m = re.search(r"(\d+)", _prop_value(body, "StartingGold") or "")
+    deck_l = _model_list(member_text(body, "StartingDeck"), "Card")
+    relic_l = _model_list(member_text(body, "StartingRelics"), "Relic")
+    texts = {lg: em.loc[lg].get("characters", {}) for lg in ("ko", "en", "zh")}
+    bases = ""
+    try:
+        src = strip_comments(_read_text(c.path))
+        mm = re.search(r"\bclass\s+" + re.escape(c.name) + r"\b\s*(?:<[^>{]*>)?\s*(?::\s*([^{]+?))?\s*(?:where\s[^{]*)?\{", src)
+        bases = re.sub(r"\s+", " ", mm.group(1)).strip() if mm and mm.group(1) else ""
+    except (OSError, TypeError):
+        pass
+    ich = {
+        "class": c.name, "namespace": c.namespace, "loc_id": lid, "base": c.base_full or c.base, "bases": bases,
+        "card_pool_class": pool_class, "card_pool_full": pool_info.full if pool_info else "",
+        "mods": c.mods, "attrs": c.attrs.strip(), "usings": c.usings, "body": body.strip("\n"),
+        "hp": int(hp_m.group(1)) if hp_m else 0, "gold": int(gold_m.group(1)) if gold_m else "",
+        "deck": [{"card": ref("card", n), "count": k} for n, k in (deck_l or [])],
+        "relics": [ref("relic", n) for n, _k in (relic_l or [])],
+        "deck_fixed": deck_l is None and bool(find_member(body, "StartingDeck")),
+        "relics_fixed": relic_l is None and bool(find_member(body, "StartingRelics")),
+        "architect_ko": "", "architect_en": "", "architect_zh": "",
+    }
+    for lg in ("ko", "en", "zh"):
+        ich[f"name_{lg}"] = texts[lg].get(f"{lid}.title", "")
+        ich[f"desc_{lg}"] = texts[lg].get(f"{lid}.description", "")
+    ich["orig"] = {k: ich[k] for k in ("hp", "gold", "name_ko", "name_en", "name_zh", "desc_ko", "desc_en", "desc_zh")}
+    ich["orig"]["deck"] = [dict(d) for d in ich["deck"]]
+    ich["orig"]["relics"] = list(ich["relics"])
+    for key in CHAR_IMAGE_PROPS:
+        ich[key] = ""
+    ich.update(combat_scale=100, combat_lift=0, combat_flip=False,
+               attack_frames=[], hit_frames=[], attack_frames_ms=120, hit_frames_ms=120)
+    # 미리보기용 원래 그림 (선택 화면 초상화)
+    sel = _str_lit(_prop_value(body, "CustomCharacterSelectIconPath"))
+    ich["orig_select_image"] = em.image_file(sel.replace("res://", "")) if sel else ""
+    return ich
+
+
+def takeover(em, sts2_path="", log=print, progress=None):
+    """불러온 모드 → 새 프로젝트 dict. 같은 모드 ID 로 만들어서 빌드하면 원래 모드를 대체한다.
+
+    - 원래 C# 코드는 그대로 포함하고(카드·유물·물약·파워 파일만 빼고), 원래 .pck 는 '<ID>_original.pck' 로 함께 넣는다.
+    - 카드·유물·물약·파워는 원래 클래스 이름 그대로 프로젝트 항목이 되어 이 프로그램에서 고칠 수 있다.
+    """
+    if not em.dll and em.kind != "source":
+        raise ValueError("이 모드는 dll 이 없어 통째로 가져올 수 없습니다 (코드가 필요합니다).")
+    if (not em.src_dir or not os.path.isdir(em.src_dir)) and em.dll:
+        # pck 안의 .cs 로 읽은 모드: 실제 빌드된 dll 과 다를 수 있으니 dll 을 풀어서 쓴다
+        em.src_dir = decompile(em.dll, sts2_path, log=log)
+    if not em.src_dir or not os.path.isdir(em.src_dir):
+        raise ValueError("이 모드의 C# 코드를 읽지 못했습니다.")
+    mid = em.id
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", mid or ""):
+        raise ValueError(f"모드 ID '{mid}' 는 C# 이름으로 쓸 수 없어 통째로 가져올 수 없습니다.")
+    srcp = os.path.normcase(os.path.abspath(em.dll or em.src_dir))
+    key = hashlib.sha1(f"{srcp}|{os.path.getmtime(srcp)}".encode()).hexdigest()[:8]
+    base = os.path.join(cache_root(), "takeover", f"{mid}-{key}")
+    src_out = os.path.join(base, "src")
+    shutil.rmtree(src_out, ignore_errors=True)
+    os.makedirs(src_out, exist_ok=True)
+
+    # ---- 원래 코드 복사 (네임스페이스가 생성 코드와 겹치면 옮긴다) ----
+    clash = f"{mid}.{mid}Code"
+    moved = f"{mid}.{mid}{TAKEOVER_ORIG_NS}"
+    files = []
+    for f in glob.glob(os.path.join(em.src_dir, "**", "*.cs"), recursive=True):
+        rel = os.path.relpath(f, em.src_dir)
+        if re.search(r"(^|[\\/])(bin|obj|\.godot|Properties)[\\/]", rel) or rel.lower().endswith("assemblyinfo.cs"):
+            continue
+        text = _read_text(f)
+        if em.kind == "source" and "<auto-generated" in text[:400]:
+            continue
+        if em.kind != "source":       # 디컴파일 결과의 컴파일 안 되는 모양 고치기
+            text = fix_out_ref(text)
+            # [GeneratedRegex] 가 만든 코드는 이미 풀려 있다 → 속성만 남으면 정규식 생성기가 다시 만들려다 오류
+            text = re.sub(r"(?m)^[ \t]*\[GeneratedRegex\(.*\)\][ \t]*\r?\n", "", text)
+        files.append((rel, text))
+    renamed = any(re.search(r"\bnamespace\s+" + re.escape(clash) + r"\b", t) for _r, t in files)
+    if renamed:
+        pat = re.compile(r"\b" + re.escape(clash) + r"\b")
+        files = [(r, pat.sub(moved, t)) for r, t in files]
+    for rel, text in files:
+        dst = os.path.join(src_out, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    # 바뀐 코드로 다시 읽는다 (클래스 이름·네임스페이스·부모가 생성 코드와 맞도록)
+    em.classes = {}
+    for rel, text in files:
+        for c in parse_cs(text, os.path.join(src_out, rel)):
+            em.classes.setdefault(c.name, c)
+    em.items = {"card": [], "relic": [], "potion": [], "power": []}
+    em.pools, em.characters = {}, []
+    _extract_items(em)
+
+    # ---- 리소스 ----
+    pck_copy = ""
+    if em.pck_path and os.path.isfile(em.pck_path):
+        pck_copy = os.path.join(base, "original.pck")
+        shutil.copy2(em.pck_path, pck_copy)
+    res_dir = ""
+    if em.kind == "source":
+        cand = os.path.join(em.root, mid)
+        if os.path.isdir(cand):
+            res_dir = cand
+    backup = os.path.join(base, "backup")
+    if em.kind == "installed" and os.path.isdir(em.root) and not os.path.isdir(backup):
+        shutil.copytree(em.root, backup, ignore=shutil.ignore_patterns("*.pdb"))
+    with open(os.path.join(base, "loc.json"), "w", encoding="utf-8") as fh:
+        json.dump(em.loc, fh, ensure_ascii=False)
+
+    # ---- 프로젝트 ----
+    P = M.default_project()
+    m = em.manifest
+    P["mod"].update({"id": mid, "name": em.name or mid, "author": em.author or P["mod"]["author"],
+                     "description": m.get("description", "") or P["mod"]["description"],
+                     "version": em.version or P["mod"]["version"]})
+    if m.get("min_game_version"):
+        P["mod"]["min_game_version"] = m["min_game_version"]
+    P["character"]["enabled"] = False
+    P["character"]["deck"], P["character"]["relics"] = [], []
+    P["cards"], P["relics"], P["potions"], P["powers"] = [], [], [], []
+    P["dependencies"] = _dep_entries(em, sts2_path)
+
+    # 파일 하나에 형식이 하나뿐인 항목만 가져온다 (나머지는 원래 코드로 남는다)
+    by_file = {}
+    for rel, text in files:
+        by_file[os.path.join(src_out, rel)] = (rel, _top_level_types(text))
+    exclude, kept = [], []
+    used = set()
+    total = sum(len(v) for v in em.items.values())
+    done = 0
+    for kind, key in (("power", "powers"), ("card", "cards"), ("relic", "relics"), ("potion", "potions")):
+        if kind == "card":
+            generated_power_classes = {it.get("class") for it in P["powers"]}
+            kept_power_classes = {entry.split(":", 1)[1] for entry in kept if entry.startswith("power:")}
+            P["takeover"] = {"mod": mid, "extra_powers": [
+                {"class": it.get("class"), "full": em.classes[it["class"]].full,
+                 "name_ko": it.get("name_ko", ""), "name_en": it.get("name_en", ""),
+                 "name_zh": it.get("name_zh", ""), "type": it.get("type", "Buff")}
+                for it in em.items.get("power", []) if it.get("class") in kept_power_classes and
+                it.get("class") not in generated_power_classes and it.get("class") in em.classes]}
+        for it in em.items[kind]:
+            done += 1
+            if progress:
+                progress(done, total, it.get("name_ko") or it["id"])
+            c = it.get("_cls")
+            info = by_file.get(getattr(c, "path", ""))
+            if c is None or info is None or info[1] != [c.name]:
+                kept.append(f"{kind}:{it['class']}")
+                continue
+            try:
+                new = clone_item(em, it, P, "theirs")
+            except Exception as exc:  # noqa: BLE001
+                log(f"  가져오지 못해 원래 코드로 둡니다: {it['class']} ({exc})")
+                kept.append(f"{kind}:{it['class']}")
+                continue
+            cl = new["clone"]
+            cl["keep_name"] = True
+            cl["class_name"] = c.name
+            cl["namespace"] = c.namespace
+            cl["src_file"] = info[0]
+            parent = em.classes.get(c.base)
+            if parent is not None and not cl.get("base"):
+                cl["base"] = parent.full
+            nid, n = new["id"], 2
+            while nid in used:
+                nid = f"{new['id']}_{n}"
+                n += 1
+            new["id"] = nid
+            used.add(nid)
+            P[key].append(new)
+            exclude.append(info[0])
+    # ---- 캐릭터 (여러 명이어도 전부) ----
+    imported_chars, kept_chars = [], []
+    for ec in em.characters:
+        c = em.classes.get(ec["class"])
+        info = by_file.get(getattr(c, "path", "")) if c else None
+        lid = f"{mid.upper()}-{M.game_snake(ec['class'])}"
+        names = {f"name_{lg}": em.loc[lg].get("characters", {}).get(f"{lid}.title", "") for lg in ("ko", "en", "zh")}
+        if c is None or info is None or info[1] != [c.name]:
+            kept_chars.append({"class": ec["class"], "loc_id": lid,
+                               "card_pool_class": ec.get("pool", ""), "card_pool_full": ec.get("pool_full", ""), **names})
+            continue
+        ich = import_character(em, c, P, lid)
+        ich["src_file"] = info[0]
+        imported_chars.append(ich)
+        exclude.append(info[0])
+    P["imported_characters"] = imported_chars
+    pool_owners = {}
+    for character in imported_chars + kept_chars:
+        pool_full = character.get("card_pool_full", "")
+        if pool_full:
+            pool_owners.setdefault(pool_full, character["class"])
+    for card in P["cards"]:
+        original_pool = (card.get("clone") or {}).get("their_pool", "")
+        if original_pool in pool_owners:
+            card["pool_character"] = pool_owners[original_pool]
+    def all_effect_blocks(blocks):
+        for block in blocks or []:
+            if not isinstance(block, dict):
+                continue
+            yield block
+            for key in ("body", "else", "third"):
+                yield from all_effect_blocks(block.get(key))
+
+    novel_monsters = sorted({str(b.get("args", {}).get("monster")) for it in P["cards"]
+                             for e in it.get("effects", []) if e.get("kind") == "code"
+                             for b in all_effect_blocks(e.get("blocks"))
+                             if b.get("op") == "manosaba_novel_summon" and
+                             isinstance(b.get("args", {}).get("monster"), str)})
+    generated_power_classes = {it.get("class") for it in P["powers"]}
+    kept_power_classes = {entry.split(":", 1)[1] for entry in kept if entry.startswith("power:")}
+    extra_powers = []
+    for it in em.items.get("power", []):
+        cls = it.get("class")
+        c = em.classes.get(cls)
+        if cls not in kept_power_classes or cls in generated_power_classes or c is None:
+            continue
+        extra_powers.append({"class": cls, "full": c.full,
+                             "name_ko": it.get("name_ko", ""), "name_en": it.get("name_en", ""),
+                             "name_zh": it.get("name_zh", ""), "type": it.get("type", "Buff")})
+    P["takeover"] = {"mod": mid, "dir": base, "src": src_out, "pck": pck_copy, "res_dir": res_dir,
+                     "loc": os.path.join(base, "loc.json"), "exclude": sorted(set(exclude)),
+                     "renamed_ns": moved if renamed else "", "kept": kept,
+                     "novel_monsters": novel_monsters,
+                     "extra_powers": extra_powers,
+                     "patches_all": any(re.search(r"\.PatchAll\s*\(", t) for _r, t in files),
+                     "characters": kept_chars,       # 원래 코드 그대로 둔 캐릭터 (아키텍트 기본 대사만 채움)
+                     "source": em.root, "kind": em.kind}
+    return P
 
 
 def dependency_entry(em):

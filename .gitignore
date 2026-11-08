@@ -10,5 +10,13 @@ settings.json
 selftest.json
 output/
 ai_requests/
+logs/
+
+# 다른 모드 가져오기 때 생기는 로컬 디컴파일·도구 캐시
+.manosaba-import/
+
+# 메이커에서 저장한 사용자 프로젝트와 백업
+*.sts2mod.json*
+
 build_release.py
 빌드.bat

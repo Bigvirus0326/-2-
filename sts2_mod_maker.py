@@ -32,6 +32,7 @@ from winpos import center_window
 import uxkit as UX
 import cardframe as CF
 import updater as UP
+import feedback as FB
 
 try:
     import ingame
@@ -712,7 +713,7 @@ class EffectList(ttk.Frame):
             def decompose():
                 # 원본 모드 DLL 을 (한 번만) 풀어 그 안의 모든 클래스로 OnPlay -> 블록
                 classes = self.app.mod_classes(draft["clone"].get("mod"))
-                got, info = csblocks.decompose_with_classes(draft, classes)
+                got, info = csblocks.decompose_with_classes(draft, classes, self.app.project)
                 if got:
                     csblocks.merge_usings(draft, info.get("usings"))
                 return got, info
@@ -1090,7 +1091,7 @@ class PreviewPanel(ttk.Frame):
                 PV.render_item(c, P, self.kind, item, 10 * u, 10 * u, u, lang, upgraded, stacks)
             except Exception as e:  # noqa: BLE001 - 미리보기 실패가 편집을 막지 않게
                 c.create_text(160, 200, text=f"미리보기 오류:\n{e}", fill="#f66", width=280)
-        gid = M.power_loc_id(P, item["id"]) if self.kind == "power" else M.loc_id(P, item["id"])
+        gid = M.item_loc_id(P, self.kind, item) if self.kind in M.KIND_KEY else M.loc_id(P, item["id"])
         lines = [f"게임 ID: {gid}"]
         rw, rh = IMAGE_RECOMMEND[self.kind]
         img = item.get("image")
@@ -1314,6 +1315,10 @@ class ClonePanel(ttk.Frame):
         if cl:
             self.info.configure(text=f"원본 효과 · {cl.get('orig_class')} ({cl.get('mod')})")
             self.pool.set_value(cl.get("pool", "mine"))
+            if self.tab.kind == "card" and item.get("pool_character"):
+                self.pool.pack_forget()
+            elif self.pool.winfo_manager() != "pack":
+                self.pool.pack(fill="x", pady=1)
         else:
             self.info.configure(text="불러온 항목 (코드 없음): 원본 텍스트를 그대로 씁니다.")
         self.tree.delete(*self.tree.get_children())
@@ -1334,8 +1339,13 @@ class ClonePanel(ttk.Frame):
 
     def _pool_changed(self):
         if self.item and self.item.get("clone"):
+            index = self.tab.cur
             self.item["clone"]["pool"] = self.pool.get_value()
+            if self.tab.kind == "card":
+                self.item["pool_character"] = ""
             self.tab.changed()
+            if self.tab.kind == "card":
+                self.tab.refresh_list(index)
 
     def show_code(self):
         if self.item and self.item.get("clone"):
@@ -1373,6 +1383,10 @@ class ExternalTab(ttk.Frame):
         self.listbox.bind("<<ListboxSelect>>", lambda _e: self.on_select())
         self.detail = ttk.Label(left, text="왼쪽 위 버튼으로 다른 모드를 불러오세요.", wraplength=300, justify="left")
         self.detail.pack(fill="x", pady=8)
+        self.take_btn = ttk.Button(left, text="📂 이 모드를 통째로 내 프로젝트로", command=self.take_over)
+        self.take_btn.pack(fill="x", pady=(0, 2))
+        ttk.Label(left, text="원래 코드·그림·번역을 그대로 담은 새 프로젝트를 만들고, 카드·유물·물약·파워를 여기서 고칠 수 있게 합니다.",
+                  foreground="#777", wraplength=300, justify="left").pack(fill="x", pady=(0, 8))
         self.dep_btn = ttk.Button(left, text="내 모드에서 참조하기", command=self.toggle_dep)
         self.dep_btn.pack(fill="x", pady=2)
         ttk.Button(left, text="이 모드의 키워드 보기…", command=self.pick_keyword).pack(fill="x", pady=2)
@@ -1553,7 +1567,12 @@ class ExternalTab(ttk.Frame):
         self.detail.configure(text="\n".join(txt))
         self.dep_btn.configure(text="참조 해제" if m.id in deps else "내 모드에서 참조하기",
                                state="normal" if m.dll else "disabled")
+        self.take_btn.configure(state="normal" if (m.dll or m.kind == "source") else "disabled")
         self.refresh()
+
+    def take_over(self):
+        if self.cur:
+            self.app.open_mod_as_project(self.cur.root)
 
     def close_mod(self):
         if self.cur in self.mods:
@@ -1777,6 +1796,7 @@ class ItemTab(ttk.Frame):
         self.search = UX.SearchEntry(left, f"{self.noun} 찾기 (이름·ID·초성)  Ctrl+F", self.set_query,
                                      on_down=self._search_down, on_enter=self._search_down)
         self.search.pack(fill="x", pady=(0, 6))
+        self.build_list_filters(left)
         lf = ttk.Frame(left)
         lf.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(lf, columns=("id",), show="tree", selectmode="extended")
@@ -1907,6 +1927,9 @@ class ItemTab(ttk.Frame):
     def extra_rows(self, f, row):
         pass
 
+    def build_list_filters(self, parent):
+        pass
+
     # ---- 데이터 ----
     @property
     def items(self):
@@ -1926,6 +1949,9 @@ class ItemTab(ttk.Frame):
     def _visible(self):
         return [i for i, it in enumerate(self.items) if UX.matches(self.query, *self.search_fields(it))]
 
+    def _extra_filter_active(self):
+        return False
+
     def refresh_list(self, select=None):
         """목록을 다시 그린다. select = 고를 항목 번호 (하나 또는 여러 개)."""
         self.tree.delete(*self.tree.get_children())
@@ -1935,7 +1961,8 @@ class ItemTab(ttk.Frame):
             self.tree.insert("", "end", iid=str(i), text=self.row_text(it), values=(it["id"],),
                              image=UX.item_icon(self.kind, it, self.app.ui), tags=("row",))
         total = len(self.items)
-        self.count_lbl.configure(text=f"{len(vis)} / {total}" if self.query else f"{total}개")
+        scoped = bool(self.query) or self._extra_filter_active()
+        self.count_lbl.configure(text=f"{len(vis)} / {total}" if scoped else f"{total}개")
         if vis:
             want = select if isinstance(select, (list, tuple)) else [select if select is not None else (self.cur or 0)]
             want = [w for w in want if w is not None]
@@ -1990,7 +2017,7 @@ class ItemTab(ttk.Frame):
 
     def _drag_move(self, e):
         d = self._drag
-        if not d or self.query:
+        if not d or self.query or self._extra_filter_active():
             return
         if not d["moved"] and abs(e.y - d["y"]) < 6:
             return
@@ -2227,6 +2254,86 @@ class CardTab(ItemTab):
     kind, key, noun = "card", "cards", "카드"
     image_hint = "250×190 권장"
 
+    def build_list_filters(self, parent):
+        self.pool_filter = LabeledCombo(parent, [("__all__", "모든 카드")], width=34)
+        self.pool_filter.pack(fill="x", before=self.search, pady=(0, 6))
+        self.pool_filter.bind("<<ComboboxSelected>>", lambda _e: self.refresh_list(self.cur))
+        self._card_characters = []
+
+    def _sync_character_controls(self):
+        self._card_characters = M.card_characters(self.app.project)
+        main = self.app.project["character"]
+        default_label = (f"메인 캐릭터 · {M.text(main, 'name', 'ko')}" if main.get("enabled")
+                         else "공용 풀 (캐릭터 미지정)")
+        filter_options = [("__all__", "모든 카드"), ("", default_label)]
+        filter_options += [(c["class"], f"{c['name']} ({c['class']})") for c in self._card_characters]
+        self.pool_filter.set_options(filter_options)
+        if self._card_characters:
+            if self.pool_filter.winfo_manager() != "pack":
+                self.pool_filter.pack(fill="x", before=self.search, pady=(0, 6))
+            self.pool_character_label.grid()
+            self.pool_character_combo.grid()
+        else:
+            self.pool_filter.pack_forget()
+            self.pool_character_label.grid_remove()
+            self.pool_character_combo.grid_remove()
+
+        targets = [("", default_label)]
+        targets += [(c["class"], f"{c['name']} ({c['class']})")
+                    for c in self._card_characters if c.get("card_pool_full")]
+        current = self.items[self.cur].get("pool_character", "") if self.cur is not None and self.cur < len(self.items) else ""
+        if current and current not in {v for v, _label in targets}:
+            targets.append((current, f"{current} (원래 카드 풀을 찾을 수 없음)"))
+        self.pool_character_combo.set_options(targets)
+
+    def refresh_list(self, select=None):
+        self._sync_character_controls()
+        super().refresh_list(select)
+
+    def load(self, idx):
+        self._sync_character_controls()
+        super().load(idx)
+
+    def _extra_filter_active(self):
+        return bool(self._card_characters) and self.pool_filter.get_value() != "__all__"
+
+    def _visible(self):
+        rows = super()._visible()
+        owner = self.pool_filter.get_value()
+        if owner == "__all__":
+            return rows
+        return [i for i in rows if self.items[i].get("pool_character", "") == owner]
+
+    def select_index(self, idx):
+        if 0 <= idx < len(self.items):
+            owner = self.items[idx].get("pool_character", "")
+            if self.pool_filter.get_value() not in ("__all__", owner):
+                self.pool_filter.set_value("__all__")
+        super().select_index(idx)
+
+    def new_item(self, iid):
+        it = M.new_card(iid)
+        owner = self.pool_filter.get_value()
+        if owner not in ("__all__", "") and M.card_pool_for_character(self.app.project, owner):
+            it["pool_character"] = owner
+        return it
+
+    def _pool_character_changed(self):
+        if self.cur is None:
+            return
+        it = self.items[self.cur]
+        previous = it.get("pool_character", "")
+        selected = self.pool_character_combo.get_value()
+        if previous == selected:
+            return
+        it["pool_character"] = selected
+        if not selected and previous and it.get("clone"):
+            it["clone"]["pool"] = "mine"
+        index = self.cur
+        self.app.mark_dirty()
+        self.refresh_list(index)
+        self.app.on_items_changed()
+
     def build_form(self, f):
         self.entry(f, 0, 0, "ID (영문 소문자_)", "id", hint="예: fire_ball")
         self.entry(f, 2, 0, "이름 (한국어)", "name_ko")
@@ -2238,9 +2345,15 @@ class CardTab(ItemTab):
         self.spin(f, 5, 2, "강화 후 비용", "upgrade_cost")
         self.combo(f, 6, 0, "대상", "target", M.CARD_TARGETS)
         self.combo(f, 6, 2, "태그", "tag", M.CARD_TAGS)
-        ttk.Label(f, text="키워드").grid(row=7, column=0, sticky="w", padx=4, pady=2)
+        self.pool_character_label = ttk.Label(f, text="카드 전용 캐릭터")
+        self.pool_character_label.grid(row=7, column=0, sticky="w", padx=4, pady=2)
+        self.pool_character_combo = LabeledCombo(f, [("", "기본 캐릭터 / 공용 풀")], width=32)
+        self.pool_character_combo.grid(row=7, column=1, columnspan=3, sticky="w", padx=4, pady=2)
+        UX.tip(self.pool_character_label, "이 카드를 특정 가져온 캐릭터의 카드 풀에만 넣습니다.")
+        self.pool_character_combo.bind("<<ComboboxSelected>>", lambda _e: self._pool_character_changed())
+        ttk.Label(f, text="키워드").grid(row=8, column=0, sticky="w", padx=4, pady=2)
         kf = ttk.Frame(f)
-        kf.grid(row=7, column=1, columnspan=3, sticky="w", padx=4)
+        kf.grid(row=8, column=1, columnspan=3, sticky="w", padx=4)
         self.kw_vars = {}
         for k, l in M.CARD_KEYWORDS:
             v = tk.BooleanVar()
@@ -2254,18 +2367,18 @@ class CardTab(ItemTab):
             UX.tip(ttk.Checkbutton(kf, text=text, variable=v, command=self.changed), tip).pack(side="left", padx=(0, 10))
             self.vars[key] = ("bool", v)
             self.var_labels[key] = text
-        self.combo(f, 8, 0, "강화 시 키워드 추가", "upgrade_add_keyword", [("", "없음")] + M.CARD_KEYWORDS)
-        self._field_label(f, "테두리 디자인", "frame_style", row=8, column=2, sticky="w", padx=4, pady=2)
+        self.combo(f, 9, 0, "강화 시 키워드 추가", "upgrade_add_keyword", [("", "없음")] + M.CARD_KEYWORDS)
+        self._field_label(f, "테두리 디자인", "frame_style", row=9, column=2, sticky="w", padx=4, pady=2)
         ff = ttk.Frame(f)
-        ff.grid(row=8, column=3, sticky="w", padx=4, pady=2)
+        ff.grid(row=9, column=3, sticky="w", padx=4, pady=2)
         self.frame_combo = LabeledCombo(ff, CF.options({"card_frames": []}), width=18)
         self.frame_combo.pack(side="left")
         self.frame_combo.bind("<<ComboboxSelected>>", lambda _e: self.changed())
         UX.tip(ttk.Button(ff, text="편집…", style="Small.TButton", command=self.edit_frames),
                "카드 틀·그림 테두리·제목 띠의 색이나 그림을 바꾸는 디자인을 만듭니다.").pack(side="left", padx=4)
         self.vars["frame_style"] = ("combo", self.frame_combo)
-        self.combo(f, 9, 0, "강화 시 키워드 제거", "upgrade_remove_keyword", [("", "없음")] + M.CARD_KEYWORDS)
-        self.common_bottom(f, 10)
+        self.combo(f, 10, 0, "강화 시 키워드 제거", "upgrade_remove_keyword", [("", "없음")] + M.CARD_KEYWORDS)
+        self.common_bottom(f, 11)
 
     def edit_frames(self):
         import cardframeui
@@ -2371,6 +2484,7 @@ class CardTab(ItemTab):
     def load_extra(self, it):
         for k, v in self.kw_vars.items():
             v.set(k in it.get("keywords", []))
+        self.pool_character_combo.set_value(it.get("pool_character", ""))
         self._build_tags(it)
         self.res_power.set_options([("", "없음")] + M.power_options(self.app.project))
         self.res_power.set_value(it.get("res_power", ""))
@@ -3249,12 +3363,15 @@ def rename_gimmick_ref(project, kind, old, new):
 class ArchitectDialog(tk.Toplevel):
     """3막을 깬 뒤 아키텍트와의 대화 (언어별). '아키텍트: …' / '나: …' 줄, '---' 로 대화 구분."""
 
-    def __init__(self, master, app):
+    def __init__(self, master, app, ch=None):
         super().__init__(master)
         self.app = app
         self.title("🗣 아키텍트 대사")
         self.transient(app)
-        ch = app.project["character"]
+        ch = self.ch = ch if ch is not None else app.project["character"]
+        # 가져온 캐릭터: 원래 모드에 있던 대사를 처음 내용으로 (그대로 두면 원래 대사 유지)
+        self.base = {lang: (M.architect_text(convs, lang) if (convs := M.architect_from_loc(app.project, ch.get("loc_id"), lang))
+                            else M.architect_text(M.default_architect(lang), lang)) for lang in ("ko", "en", "zh")}
         f = ttk.Frame(self, padding=10)
         f.pack(fill="both", expand=True)
         ttk.Label(f, text="한 줄에 한 마디: '아키텍트: …' 또는 '나: …' (캐릭터 이름도 됨). '---' 로 대화를 나눕니다.\n"
@@ -3271,7 +3388,7 @@ class ArchitectDialog(tk.Toplevel):
             t = tk.Text(fr, width=84, height=16, font=("Malgun Gothic", 10), wrap="word", undo=True)
             t.pack(fill="both", expand=True)
             cur = ch.get(f"architect_{lang}") or ""
-            t.insert("1.0", cur or M.architect_text(M.default_architect(lang), lang))
+            t.insert("1.0", cur or self.base[lang])
             t.edit_reset()
             self.texts[lang] = t
             st = ttk.Label(fr, text="", foreground="#555")
@@ -3300,10 +3417,10 @@ class ArchitectDialog(tk.Toplevel):
         t.insert("1.0", M.architect_text(M.default_architect(lang), lang))
 
     def ok(self):
-        ch = self.app.project["character"]
+        ch = self.ch
         for lang, t in self.texts.items():
             txt = t.get("1.0", "end").strip()
-            same_as_default = txt == M.architect_text(M.default_architect(lang), lang).strip()
+            same_as_default = txt == self.base[lang].strip()
             ch[f"architect_{lang}"] = "" if same_as_default else txt
         self.app.mark_dirty()
         self.destroy()
@@ -3333,8 +3450,18 @@ class CharacterTab(ttk.Frame):
         self.pv_canvas = tk.Canvas(pvf, width=int(310 * app.ui), height=int(570 * app.ui), background="#121318",
                                    highlightthickness=0)
         self.pv_canvas.pack(pady=(6, 0))
+        # 편집할 캐릭터 고르기 (통째로 가져온 모드의 캐릭터가 있을 때)
+        self.cur = None          # None = 내 캐릭터, 숫자 = 가져온 캐릭터 순번
+        self.selbar = ttk.Frame(sf.inner, padding=(10, 8, 10, 0))
+        ttk.Label(self.selbar, text="편집할 캐릭터", font=("Malgun Gothic", 10, "bold")).pack(side="left")
+        self.char_combo = LabeledCombo(self.selbar, [], width=40)
+        self.char_combo.pack(side="left", padx=8)
+        self.char_combo.bind("<<ComboboxSelected>>", lambda _e: self.select_char(self.char_combo.get_value()))
+        self.sel_note = ttk.Label(self.selbar, text="", foreground="#777", wraplength=520, justify="left")
+        self.sel_note.pack(side="left", padx=4)
         f = ttk.Frame(sf.inner, padding=10)
         f.pack(fill="both", expand=True)
+        self.form = f
         f.columnconfigure(1, weight=1)
         f.columnconfigure(3, weight=1)
         self.v = {}
@@ -3352,6 +3479,8 @@ class CharacterTab(ttk.Frame):
 
         ent(1, 0, "캐릭터 ID (영문 소문자_)", "id")
         ent(1, 2, "시작 체력", "hp", 8)
+        ent(1, 0, "시작 골드 (비우면 원래대로)", "gold", 8)      # 가져온 캐릭터 전용 (내 캐릭터일 땐 숨김)
+        self._gold_w = [w for w in f.grid_slaves(row=1) if int(w.grid_info()["column"]) < 2][:2]
         translations = ttk.Frame(f)
         translations.grid(row=2, column=0, columnspan=4, rowspan=2, sticky="we")
         translations.columnconfigure(1, weight=1)
@@ -3463,11 +3592,13 @@ class CharacterTab(ttk.Frame):
                   foreground="#777").grid(row=2, column=0, columnspan=3, sticky="w")
         r += 1
         vf = ttk.LabelFrame(f, text="전투 모습", padding=6)
+        self.combat_frame = vf
         vf.grid(row=r, column=0, columnspan=4, sticky="we", padx=4, pady=(8, 2))
         vf.columnconfigure(1, weight=1)
         self.combat_img = tk.StringVar()
         self.v["combat_image"] = self.combat_img
-        file_row(vf, 0, "전투 그림 (PNG)", self.combat_img, self.changed, hint="비우면 임시 외형 캐릭터의 애니메이션")
+        file_row(vf, 0, "전투 그림 (PNG)", self.combat_img, self.changed,
+                 hint="비우면 가져온 캐릭터는 원래 모습, 새 캐릭터는 임시 외형을 씁니다")
         tf = ttk.Frame(vf)
         tf.grid(row=1, column=1, columnspan=3, sticky="w", pady=2)
         self.combat_scale, self.combat_lift = tk.StringVar(value="100"), tk.StringVar(value="0")
@@ -3498,7 +3629,7 @@ class CharacterTab(ttk.Frame):
             spin = ttk.Spinbox(box, from_=16, to=5000, increment=10, width=5, textvariable=timing)
             spin.pack(side="left")
             timing.trace_add("write", lambda *_, k=key: self.motion_speed_changed(k))
-            spin.bind("<FocusOut>", lambda _, k=key: self.motion_times[k].set(str(frame_ms(self.app.project["character"], k))))
+            spin.bind("<FocusOut>", lambda _, k=key: self.motion_times[k].set(str(frame_ms(self.ch(), k))))
             for action, label in (("add", "PNG 추가"), ("remove", "선택 제거"), ("play", "재생")):
                 ttk.Button(box, text=label, command=lambda k=key, a=action: self.edit_motion(k, a)).pack(side="left", padx=2)
         self._combat_photo = None
@@ -3507,7 +3638,61 @@ class CharacterTab(ttk.Frame):
         self.status.grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=6)
 
     def edit_architect(self):
-        ArchitectDialog(self, self.app)
+        ArchitectDialog(self, self.app, self.ch())
+
+    # ---- 내 캐릭터 / 가져온 캐릭터 ----
+    def ch(self):
+        imp = M.imported_characters(self.app.project)
+        if self.cur is not None and 0 <= self.cur < len(imp):
+            return imp[self.cur]
+        return self.app.project["character"]
+
+    def imported(self):
+        return self.cur is not None and self.ch() is not self.app.project["character"]
+
+    def select_char(self, value):
+        self.cur = None if value in ("", "mine", None) else int(value)
+        self.load()
+
+    def _layout_for_kind(self):
+        """가져온 캐릭터면 원래 코드가 정하는 칸은 숨기고 직접 편집할 수 있는 그림 칸은 보인다."""
+        f = self.form
+        if not hasattr(self, "_mine_only"):
+            rows = {0, 4, 5}
+            mine = [w for w in f.grid_slaves() if int(w.grid_info()["row"]) in rows]
+            mine += [w for w in f.grid_slaves(row=1) if int(w.grid_info()["column"]) < 2 and w not in self._gold_w]
+            mine += f.grid_slaves(row=11) + f.grid_slaves(row=12)        # 에너지 아이콘 칸
+            mine += [w for w in f.grid_slaves() if isinstance(w, ttk.LabelFrame) and w is not self.combat_frame]
+            self._mine_only = mine
+            self._grid = {w: w.grid_info() for w in mine + self._gold_w}
+        imp = self.imported()
+        for w in f.grid_slaves(row=10):
+            if isinstance(w, ttk.Label):
+                w.configure(text="캐릭터 그림 (선택 사항, 비우면 원래 모드의 그림을 씀)" if imp else
+                            "캐릭터 그림 (선택 사항, 비우면 임시 외형 캐릭터의 그림을 씀)")
+        for w in self._mine_only:
+            if imp:
+                w.grid_remove()
+            else:
+                w.grid()
+        for w in self._gold_w:
+            if imp:
+                w.grid()
+            else:
+                w.grid_remove()
+        n = len(M.imported_characters(self.app.project))
+        if n:
+            self.selbar.pack(fill="x", before=self.form)
+            opts = [("mine", "내 캐릭터 (새로 만들기)" + (" — 꺼짐" if not self.app.project["character"].get("enabled") else ""))]
+            opts += [(str(i), f"가져온 캐릭터: {M.text(c, 'name', 'ko') or c['class']} ({c['class']})")
+                     for i, c in enumerate(M.imported_characters(self.app.project))]
+            self.char_combo.set_options(opts)
+            self.char_combo.set_value("mine" if not imp else str(self.cur))
+            self.sel_note.configure(text=("원래 모드의 캐릭터입니다. 이름·소개·체력·골드·시작 덱·시작 유물·선택 화면 그림·아이콘·전투 모습·모션·아키텍트 대사를 바꿀 수 있습니다. "
+                                          "전투 그림을 비우면 원래 모습이 유지됩니다. 색·카드 풀은 원래 설정을 씁니다.")
+                                    if imp else f"이 모드에는 가져온 캐릭터가 {n}명 있습니다. 위에서 골라 편집하세요.")
+        else:
+            self.selbar.pack_forget()
 
     def pick_color(self):
         cur = self.v["color"].get()
@@ -3516,10 +3701,14 @@ class CharacterTab(ttk.Frame):
             self.v["color"].set(res[1])
 
     def load(self):
-        ch = self.app.project["character"]
+        imp_list = M.imported_characters(self.app.project)
+        if self.cur is not None and self.cur >= len(imp_list):
+            self.cur = None
+        ch = self.ch()
+        self._layout_for_kind()
         self._loading = True
         try:
-            self.enabled.set(ch["enabled"])
+            self.enabled.set(bool(ch.get("enabled")))
             for k, var in self.v.items():
                 var.set(str(ch.get(k, "")))
             self.placeholder.set_value(ch.get("placeholder", "ironclad"))
@@ -3545,7 +3734,7 @@ class CharacterTab(ttk.Frame):
             return
         value = self.motion_times[key].get()
         if value.isascii() and value.isdigit() and len(value) <= 4 and 16 <= int(value) <= 5000:
-            character = self.app.project["character"]
+            character = self.ch()
             if frame_ms(character, key) != int(value):
                 character[key + "_ms"] = int(value)
                 self.app.mark_dirty()
@@ -3553,11 +3742,11 @@ class CharacterTab(ttk.Frame):
     def refresh_motion_lists(self):
         for key, listing in self.motion_lists.items():
             listing.delete(0, "end")
-            for i, frame in enumerate(self.app.project["character"].get(key, []), 1):
+            for i, frame in enumerate(self.ch().get(key, []), 1):
                 listing.insert("end", f"{i}. {os.path.basename(frame['image'])}")
 
     def edit_motion(self, key, action):
-        ch = self.app.project["character"]
+        ch = self.ch()
         frames = ch.get(key, [])
         if action == "play":
             if frames:
@@ -3590,7 +3779,7 @@ class CharacterTab(ttk.Frame):
         if self.motion_job is not None:
             self.after_cancel(self.motion_job)
             self.motion_job = None
-        ch = self.app.project["character"]
+        ch = self.ch()
         if ch.get("combat_image"):
             self._combat_photo = pet_preview(self.combat_canvas, self.app, ch.get("combat_image"), ch.get("combat_scale"),
                                              ch.get("combat_flip"), ch.get("combat_lift"), M.text(ch, "name", "ko"))
@@ -3602,17 +3791,27 @@ class CharacterTab(ttk.Frame):
         self.pv_canvas.delete("all")
         try:
             u = self.app.ui
-            PV.render_character(self.pv_canvas, self.app.project, 5 * u, 5 * u, self.preview_lang.get(), u)
+            P = self.app.project
+            if self.imported():
+                ich = self.ch()
+                fake = dict(P["character"])
+                fake.update({k: v for k, v in ich.items() if k.startswith(("name_", "desc_")) or k in ("hp", "deck", "relics")})
+                fake.update({"enabled": True, "color": "#8a8a8a",
+                             "select_image": ich.get("select_image") or ich.get("orig_select_image") or ""})
+                fake["deck"] = [d for d in ich.get("deck", []) if not d["card"].startswith("raw:")]
+                fake["relics"] = [r for r in ich.get("relics", []) if not r.startswith("raw:")]
+                P = dict(P, character=fake)
+            PV.render_character(self.pv_canvas, P, 5 * u, 5 * u, self.preview_lang.get(), u)
         except Exception as e:  # noqa: BLE001
             self.pv_canvas.create_text(150, 200, text=f"미리보기 오류:\n{e}", fill="#f66", width=280)
 
     def edit_frames(self):
         import cardframeui
-        cardframeui.FrameStyleDialog(self.app, self.app.project["character"].get("frame_style") or None,
+        cardframeui.FrameStyleDialog(self.app, self.ch().get("frame_style") or None,
                                      on_close=self.app.frames_changed)
 
     def refresh_refs(self):
-        ch = self.app.project["character"]
+        ch = self.ch()
         cards = list(self.app.project["cards"])
         cards.extend({"id": "game:" + entry, "name_ko": label + " · 원작"} for entry, label in ch.get("game_cards", {}).items())
         self.deck_card.set_options([(c["id"], f"{c.get('name_ko') or c['id']} ({c['id']})") for c in cards])
@@ -3620,7 +3819,9 @@ class CharacterTab(ttk.Frame):
         self.deck_tree.delete(*self.deck_tree.get_children())
         total = 0
         for i, d in enumerate(ch["deck"]):
-            self.deck_tree.insert("", "end", iid=str(i), values=(f"{names.get(d['card'], '⚠ 없음')} ({d['card']})", d["count"]))
+            label = (f"원래 코드: {d['card'][4:].split('.')[-1]}" if d["card"].startswith("raw:")
+                     else f"{names.get(d['card'], '⚠ 없음')} ({d['card']})")
+            self.deck_tree.insert("", "end", iid=str(i), values=(label, d["count"]))
             total += int(d["count"])
         self.deck_total.configure(text=f"총 {total}장")
         relics = self.app.project["relics"]
@@ -3633,10 +3834,10 @@ class CharacterTab(ttk.Frame):
     def refresh_start_relics(self):
         self.start_relic_list.delete(0, "end")
         relics = {r["id"]: r for r in self.app.project["relics"]}
-        for relic_id in self.app.project["character"].get("relics", []):
+        for relic_id in self.ch().get("relics", []):
             relic = relics.get(relic_id)
             if relic is None:
-                label = self.app.project["character"].get("game_relics", {}).get(relic_id[5:], f"⚠ 없음 ({relic_id})") if relic_id.startswith("game:") else f"⚠ 없음 ({relic_id})"
+                label = (f"원래 코드: {relic_id[4:].split('.')[-1]}" if relic_id.startswith("raw:") else self.ch().get("game_relics", {}).get(relic_id[5:], f"⚠ 없음 ({relic_id})") if relic_id.startswith("game:") else f"⚠ 없음 ({relic_id})")
             else:
                 label = f"{relic.get('name_ko') or relic_id} ({relic_id})"
             self.start_relic_list.insert("end", label)
@@ -3645,7 +3846,7 @@ class CharacterTab(ttk.Frame):
         relic_id = self.start_relic_combo.get_value()
         if not relic_id:
             return
-        relic_ids = self.app.project["character"].setdefault("relics", [])
+        relic_ids = self.ch().setdefault("relics", [])
         if relic_id in relic_ids:
             index = relic_ids.index(relic_id)
             self.start_relic_list.selection_clear(0, "end")
@@ -3663,7 +3864,7 @@ class CharacterTab(ttk.Frame):
         selected = set(self.start_relic_list.curselection())
         if not selected:
             return
-        character = self.app.project["character"]
+        character = self.ch()
         character["relics"] = [
             relic_id for index, relic_id in enumerate(character.get("relics", []))
             if index not in selected
@@ -3679,7 +3880,7 @@ class CharacterTab(ttk.Frame):
             n = max(1, int(self.deck_count.get()))
         except ValueError:
             n = 1
-        deck = self.app.project["character"]["deck"]
+        deck = self.ch()["deck"]
         for d in deck:
             if d["card"] == cid:
                 d["count"] = n
@@ -3693,7 +3894,7 @@ class CharacterTab(ttk.Frame):
         s = self.deck_tree.selection()
         if not s:
             return
-        del self.app.project["character"]["deck"][int(s[0])]
+        del self.ch()["deck"][int(s[0])]
         self.app.mark_dirty()
         self.refresh_refs()
 
@@ -3707,7 +3908,29 @@ class CharacterTab(ttk.Frame):
     def changed(self):
         if self._loading:
             return
-        ch = self.app.project["character"]
+        ch = self.ch()
+        if self.imported():
+            for k, var in self.v.items():
+                val = var.get().strip()
+                if k == "hp":
+                    try:
+                        ch[k] = int(val)
+                    except ValueError:
+                        pass
+                elif k == "gold":
+                    ch[k] = int(val) if val.isdigit() else ""
+                elif k.startswith(("name_", "desc_")) or k in M.ICHAR_FILES:
+                    ch[k] = val.strip('"') if k.endswith("_image") else val
+            for k_, var in (("combat_scale", self.combat_scale), ("combat_lift", self.combat_lift)):
+                try:
+                    ch[k_] = int(float(var.get()))
+                except ValueError:
+                    pass
+            ch["combat_flip"] = bool(self.combat_flip.get())
+            self.update_combat_preview()
+            self.update_preview()
+            self.app.mark_dirty()
+            return
         ch["enabled"] = self.enabled.get()
         for k, var in self.v.items():
             val = var.get().strip()
@@ -4057,6 +4280,7 @@ class App(tk.Tk):
         fm.add_command(label="캐릭터 카드 라이브러리…", command=self.open_card_library)
         fm.add_command(label="프로젝트 자산 모으기…", command=self.pack_project_assets)
         fm.add_separator()
+        fm.add_command(label="📂 다른 모드를 통째로 열기 (바로 작업)…", command=self.open_mod_as_project)
         fm.add_command(label="다른 모드 불러오기 (dll/pck/소스)…", command=self.open_external)
         fm.add_command(label="다른 프로젝트 합치기…", command=self.merge_dialog)
         fm.add_command(label="예시 기믹 추가 (해적·마법사 스타일)…", command=lambda: self.gimmick_tab.add_examples())
@@ -4094,12 +4318,17 @@ class App(tk.Tk):
             self.bind_all(seq, fn)
         hm = tk.Menu(mb, tearoff=0)
         hm.add_command(label="사용 방법", command=self.show_help)
+        hm.add_command(label="건의 / 오류 보내기…", command=self.open_feedback)
+        hm.add_command(label="로그 / 보고서 폴더 열기", command=self.open_feedback_folder)
         hm.add_command(label="BaseLib (GitHub)", command=lambda: webbrowser.open(BASELIB_URL))
         hm.add_command(label="StS2 모딩 튜토리얼", command=lambda: webbrowser.open("https://tutorials.sts2modding.com/en/"))
         hm.add_separator()
         hm.add_command(label="🔔 업데이트 확인…", command=lambda: UP.check(self, manual=True))
         self.update_check_var = tk.BooleanVar(value=bool(self.settings.get("update_check", True)))
         hm.add_checkbutton(label="켤 때 새 버전 알려 주기", variable=self.update_check_var,
+                           command=self._toggle_update_check)
+        self.update_pre_var = tk.BooleanVar(value=bool(self.settings.get("update_prerelease", False)))
+        hm.add_checkbutton(label="시험판(Pre-release)도 받기", variable=self.update_pre_var,
                            command=self._toggle_update_check)
         hm.add_command(label="모드 메이커 깃허브 (릴리스)", command=lambda: webbrowser.open(UP.RELEASES_PAGE))
         hm.add_command(label=f"버전 v{UP.VERSION}", state="disabled")
@@ -4336,6 +4565,7 @@ class App(tk.Tk):
 
     def _toggle_update_check(self):
         self.settings["update_check"] = bool(self.update_check_var.get())
+        self.settings["update_prerelease"] = bool(self.update_pre_var.get())
         save_settings(self.settings)
 
     def set_scale(self, v):
@@ -4722,6 +4952,144 @@ class App(tk.Tk):
         self.nb.select(self.ext_tab)
         self.ext_tab.open_file()
 
+    # ---- 다른 모드를 통째로 열기 ----
+    def open_mod_as_project(self, path=None):
+        """다른 모드(설치된 모드 폴더·dll·C# 소스)를 같은 ID 의 새 프로젝트로 바꿔 바로 작업할 수 있게 한다."""
+        if self.busy:
+            messagebox.showinfo(APP_TITLE, "빌드 중에는 열 수 없습니다.")
+            return
+        if path is None:
+            path = self._pick_mod_to_take()
+            if not path:
+                return
+        if not self.confirm_discard():
+            return
+        sts2 = self.settings.get("sts2_path", "")
+        w = tk.Toplevel(self)
+        w.title("다른 모드를 통째로 여는 중")
+        w.transient(self)
+        w.resizable(False, False)
+        w.protocol("WM_DELETE_WINDOW", lambda: None)
+        f = ttk.Frame(w, padding=16)
+        f.pack(fill="both", expand=True)
+        lbl = ttk.Label(f, text=f"불러오는 중: {os.path.basename(path)} …", width=60)
+        lbl.pack(anchor="w")
+        pv = tk.DoubleVar(value=0)
+        ttk.Progressbar(f, variable=pv, maximum=100, length=420).pack(fill="x", pady=(8, 0))
+        center_window(w)
+        st = {"phase": "load", "done": 0, "total": 0, "name": ""}
+
+        def prog(done, total, name):
+            st.update(done=done, total=total, name=name)
+
+        def work():
+            try:
+                em = MI.load_mod(path, sts2, log=self.log)
+                st["phase"] = "take"
+                st["project"] = MI.takeover(em, sts2, log=self.log, progress=prog)
+                st["em"] = em
+            except Exception as e:  # noqa: BLE001
+                st["err"] = e
+            st["phase"] = "end"
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+
+        def poll():
+            if st["phase"] == "take" and st["total"]:
+                pv.set(st["done"] * 100 / st["total"])
+                lbl.configure(text=f"카드·유물·물약·파워를 블록으로 푸는 중… {st['done']}/{st['total']}  {st['name']}")
+            elif st["phase"] == "load":
+                lbl.configure(text=f"모드 읽는 중 (처음엔 dll 을 푸느라 조금 걸립니다): {os.path.basename(path)} …")
+            if th.is_alive():
+                self.after(120, poll)
+                return
+            w.destroy()
+            if "err" in st:
+                self.log(f"[오류] 통째로 열기 실패: {st['err']}")
+                messagebox.showerror(APP_TITLE, f"이 모드를 통째로 열지 못했습니다:\n{st['err']}")
+                return
+            self._finish_takeover(st["project"], st["em"])
+        self.after(120, poll)
+
+    def _pick_mod_to_take(self):
+        """설치된 모드 목록에서 고르거나 폴더·dll 을 고른다. 고른 경로 (취소면 '')."""
+        mods = [m for m in MI.list_installed(self.settings.get("sts2_path", "")) if os.path.isdir(m[1])]
+        w = tk.Toplevel(self)
+        w.title("통째로 열 모드 고르기")
+        w.transient(self)
+        f = ttk.Frame(w, padding=12)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="고른 모드를 같은 모드 ID 의 새 프로젝트로 엽니다. 원래 코드·그림·번역은 그대로 들어가고,\n"
+                          "카드·유물·물약·파워는 이 프로그램에서 바로 고칠 수 있습니다.", justify="left").pack(anchor="w")
+        lb = tk.Listbox(f, width=64, height=min(14, max(4, len(mods))), exportselection=False)
+        lb.pack(fill="both", expand=True, pady=8)
+        for name, _p, on in mods:
+            lb.insert("end", f"{'●' if on else '○'} {name}" + ("" if on else "  (꺼짐)"))
+        if not mods:
+            lb.insert("end", "(게임 mods 폴더에 모드가 없습니다 — 아래 버튼으로 고르세요)")
+        res = {"p": ""}
+
+        def take():
+            s = lb.curselection()
+            if s and mods:
+                res["p"] = mods[s[0]][1]
+                w.destroy()
+
+        def folder():
+            p = filedialog.askdirectory(parent=w, title="모드 폴더 (설치된 모드 또는 C# 소스 프로젝트)")
+            if p:
+                res["p"] = p
+                w.destroy()
+
+        def dll():
+            p = filedialog.askopenfilename(parent=w, filetypes=[("모드 dll", "*.dll"), ("모든 파일", "*.*")])
+            if p:
+                res["p"] = p
+                w.destroy()
+        bf = ttk.Frame(f)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="통째로 열기", command=take).pack(side="left")
+        ttk.Button(bf, text="폴더에서…", command=folder).pack(side="left", padx=6)
+        ttk.Button(bf, text="dll 파일…", command=dll).pack(side="left")
+        ttk.Button(bf, text="취소", command=w.destroy).pack(side="right")
+        lb.bind("<Double-1>", lambda _e: take())
+        if mods:
+            lb.selection_set(0)
+        center_window(w)
+        w.grab_set()
+        self.wait_window(w)
+        return res["p"]
+
+    def _finish_takeover(self, project, em):
+        project = M.normalize(project)
+        self.project = project
+        self.project_path = ""
+        self.load_all()
+        self.reset_history()
+        self.dirty = True
+        self.update_title()
+        t = project["takeover"]
+        n = {k: len(project[k]) for k in ("cards", "relics", "potions", "powers")}
+        self.log(f"통째로 열었습니다: {em.name} ({em.id}) — 카드 {n['cards']} · 유물 {n['relics']} · 물약 {n['potions']} · 파워 {n['powers']}")
+        lines = [f"'{em.name}' ({em.id}) 을(를) 새 프로젝트로 열었습니다.",
+                 f"카드 {n['cards']} · 유물 {n['relics']} · 물약 {n['potions']} · 파워 {n['powers']} 를 여기서 고칠 수 있습니다."]
+        if t.get("kept"):
+            lines.append(f"그 밖에 {len(t['kept'])}개 항목은 파일 구조 때문에 원래 코드 그대로 둡니다 (동작은 같음).")
+        ichs = M.imported_characters(project)
+        if ichs:
+            lines.append(f"캐릭터 {len(ichs)}명(" + ", ".join(M.text(c, "name", "ko") or c["class"] for c in ichs) +
+                         ")도 가져왔습니다 — '캐릭터' 탭 위쪽에서 골라 이름·체력·시작 덱·유물·그림·대사를 고치고, "
+                         "'카드' 탭에서 캐릭터별 카드 목록과 전용 풀을 설정할 수 있습니다.")
+        if t.get("characters"):
+            lines.append("캐릭터(" + ", ".join(c["class"] for c in t["characters"]) + ")는 원래 코드 그대로 씁니다.")
+        lines += ["",
+                  f"• 모드 ID 가 원래와 같은 '{em.id}' 라서, 빌드하면 게임 mods 폴더의 원래 모드를 이 버전으로 바꿉니다.",
+                  f"  원래 모드 파일은 따로 백업해 두었습니다: {os.path.join(t['dir'], 'backup')}" if os.path.isdir(os.path.join(t['dir'], 'backup')) else
+                  "  원래 모드가 필요하면 빌드 전에 따로 복사해 두세요.",
+                  "• 원래 코드·그림·번역은 이 컴퓨터의 작업 폴더에 보관됩니다. 지우지 마세요.",
+                  "• 먼저 '파일 → 다른 이름으로 저장' 으로 프로젝트를 저장하세요."]
+        messagebox.showinfo(APP_TITLE, "\n".join(lines))
+
     def merge_dialog(self):
         p = filedialog.askopenfilename(title="합칠 프로젝트",
                                        filetypes=[("모드 메이커 프로젝트", "*.sts2mod.json *.json"), ("모든 파일", "*.*")])
@@ -4845,16 +5213,17 @@ class App(tk.Tk):
         return ids
 
     def rename_ref(self, kind, old, new):
-        ch = self.project["character"]
-        if kind == "card":
-            if new is None:
-                ch["deck"] = [d for d in ch["deck"] if d["card"] != old]
-            else:
-                for d in ch["deck"]:
-                    if d["card"] == old:
-                        d["card"] = new
-        elif kind == "relic":
-            ch["relics"] = [new if r == old else r for r in ch["relics"] if not (new is None and r == old)]
+        for ch in [self.project["character"]] + M.imported_characters(self.project):
+            if kind == "card":
+                if new is None:
+                    ch["deck"] = [d for d in ch.get("deck", []) if d["card"] != old]
+                else:
+                    for d in ch.get("deck", []):
+                        if d["card"] == old:
+                            d["card"] = new
+            elif kind == "relic":
+                ch["relics"] = [new if r == old else r for r in ch.get("relics", []) if not (new is None and r == old)]
+        if kind == "relic":
             for r in self.project["relics"]:
                 if r.get("upgrade_relic") == old:
                     r["upgrade_relic"] = new or ""
@@ -4874,7 +5243,30 @@ class App(tk.Tk):
 
     # ---- 로그 ----
     def log(self, msg):
+        FB.append_app_log(msg, APP_DIR)
         self.log_q.put(msg)
+
+    def report_callback_exception(self, exc, value, tb):
+        """Tkinter callbacks otherwise only print their errors to stderr."""
+        FB.record_exception(exc, value, tb, APP_DIR, "화면 동작 중 오류")
+        try:
+            messagebox.showerror(APP_TITLE, "화면 동작 중 오류가 발생했습니다.\n"
+                                 "오류 기록은 도움말 → 건의 / 오류 보내기에서 확인하고 전달할 수 있습니다.")
+        except tk.TclError:
+            pass
+        try:
+            super().report_callback_exception(exc, value, tb)
+        except Exception:
+            pass
+
+    def open_feedback(self, initial_kind="건의", initial_title="", initial_description=""):
+        from feedbackui import FeedbackDialog
+        return FeedbackDialog(self, APP_DIR, initial_kind, initial_title, initial_description)
+
+    def open_feedback_folder(self):
+        path = FB.log_dir(APP_DIR)
+        os.makedirs(path, exist_ok=True)
+        self._open(path)
 
     def pump_log(self):
         try:
@@ -4968,6 +5360,14 @@ class App(tk.Tk):
 
         footer = ttk.Frame(win, padding=(8, 0, 8, 8))
         footer.pack(fill="x")
+        if errors:
+            ttk.Button(footer, text="검사 오류 보고…",
+                       command=lambda: self.open_feedback(
+                           "오류", "검사 중 발견된 오류",
+                           "검사 결과에서 다음 오류가 발견되었습니다.\n\n" +
+                           "\n".join(f"- {error}" for error in errors[:40]) +
+                           (f"\n\n(그 밖의 오류 {len(errors) - 40}개는 앱 로그를 확인해 주세요.)" if len(errors) > 40 else "")
+                       )).pack(side="left")
         ttk.Button(footer, text="다시 검사", command=lambda: (win.destroy(), self.do_validate())).pack(side="left")
         ttk.Button(footer, text="닫기", command=win.destroy).pack(side="right")
 
@@ -5180,6 +5580,7 @@ def main():
         i = sys.argv.index("--selftest")
         out = sys.argv[i + 1] if len(sys.argv) > i + 1 else os.path.join(APP_DIR, "selftest.json")
         sys.exit(selftest(out))
+    FB.install_exception_hooks(APP_DIR)
     if sys.platform == "win32":
         try:  # 고해상도 화면에서 글자가 흐리지 않게
             import ctypes

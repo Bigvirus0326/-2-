@@ -96,10 +96,10 @@ class SlotDialog(tk.Toplevel):
             types = [t for t in types if t[0] not in ("star_x", "energy_x")]
         is_clone = editor.owner_kind == "card" and bool((editor.item or {}).get("clone"))
         if is_clone:
-            # 원본에서 풀어낸 칸: 원본 변수 / C# 식을 그대로 쓸 수 있다
+            # 가져온 효과 칸: 원본 변수 / 직접 수식을 그대로 쓸 수 있다
             types = ([("dynvar", "원본 변수 (DynamicVars · 강화 수치 포함)")] if kind == "value" and
                      (editor.item or {}).get("raw_vars") else []) + \
-                [("src", "C# 식 직접 쓰기" if kind == "value" else "C# 조건 직접 쓰기")] + list(types)
+                [("src", "직접 수식 입력" if kind == "value" else "직접 조건 입력")] + list(types)
         ttk.Label(outer, text="종류").grid(row=0, column=0, sticky="w")
         self.type = _Combo(outer, types, self.data.get("t"), width=28, command=self._type_changed)
         self.type.grid(row=0, column=1, sticky="w", pady=4)
@@ -196,8 +196,8 @@ class SlotDialog(tk.Toplevel):
                 d["code"] = v.get()
                 self._update_preview()
             v.trace_add("write", upd_src)
-            row(0, "C# 식", ttk.Entry(f, textvariable=v, width=56, font=("Consolas", 10)))
-            ttk.Label(f, text="원본 코드에 쓰인 이름 (t, Me, DynamicVars[\"V0\"].IntValue 등)을 그대로 쓸 수 있습니다.",
+            row(0, "직접 수식", ttk.Entry(f, textvariable=v, width=56, font=("Consolas", 10)))
+            ttk.Label(f, text="가져온 효과에 쓰인 이름 (t, Me, DynamicVars[\"V0\"].IntValue 등)을 그대로 쓸 수 있습니다.",
                       foreground="#777").grid(row=1, column=0, columnspan=2, sticky="w")
         elif t == "dynvar":
             raw = (ed.item or {}).get("raw_vars", [])
@@ -306,6 +306,238 @@ class SlotDialog(tk.Toplevel):
         self.destroy()
 
 
+def _source_call_slots(block):
+    """Recover argument positions for imported call slots, including older saved blocks."""
+    slots = {s.get("key"): s for s in block.get("slots", [])}
+    if block.get("call_signature") and all(s.get("source_segment") is not None and s.get("source_arg") is not None
+                                           for s in slots.values() if s.get("kind") in ("value", "code")):
+        return block.get("call_signature"), list(slots.values())
+    try:
+        import csblocks
+        parts = block.get("parts") or []
+        stitched, original = [], []
+        placeholders = {}
+        for index, part in enumerate(parts):
+            if index % 2:
+                key = part
+                token = f"__STS2_SLOT_{key}__"
+                placeholders[token] = key
+                stitched.append(token)
+                original.append(str(slots.get(key, {}).get("orig", token)))
+            else:
+                stitched.append(str(part))
+                original.append(str(part))
+        statement = "".join(stitched).strip().rstrip(";").strip()
+        original_statement = "".join(original).strip().rstrip(";").strip()
+        assign = re.match(r"^(?:(?:var|[\w.?<>\[\],]+)\s+)?[A-Za-z_]\w*(?:\.\w+|\[[^\]]*\])*\s*(?:\+=|-=|\*=|/=|=(?!=))\s*", statement)
+        rhs = statement[assign.end():] if assign else statement
+        original_assign = re.match(r"^(?:(?:var|[\w.?<>\[\],]+)\s+)?[A-Za-z_]\w*(?:\.\w+|\[[^\]]*\])*\s*(?:\+=|-=|\*=|/=|=(?!=))\s*", original_statement)
+        original_rhs = original_statement[original_assign.end():] if original_assign else original_statement
+        parsed = csblocks.Decomposer.__new__(csblocks.Decomposer).chain_parts(rhs)
+        if not parsed:
+            return block.get("call_signature"), list(slots.values())
+        sig_parsed = csblocks.Decomposer.__new__(csblocks.Decomposer).chain_parts(original_rhs) or parsed
+        sig_segs, sig_aw = sig_parsed
+        signature = csblocks.call_signature(sig_segs, original_rhs if sig_parsed is not parsed else rhs, sig_aw)
+        segs, _aw = parsed
+        for si, seg in enumerate(segs):
+            if seg.get("args") is None:
+                continue
+            a, b = seg["args"]
+            raw = rhs[a:b]
+            for ai, (x, y) in enumerate(csblocks.split_args(raw)):
+                arg = raw[x:y]
+                for token, key in placeholders.items():
+                    if token in arg:
+                        slots[key].update(source_segment=si, source_arg=ai)
+        block["call_signature"] = signature
+        return signature, list(slots.values())
+    except Exception:
+        return block.get("call_signature"), list(slots.values())
+
+
+class CallMappingDialog(tk.Toplevel):
+    """Connect an imported call to a native effect block, optionally saving an exact-call rule."""
+
+    def __init__(self, master, editor, block):
+        super().__init__(master)
+        self.editor, self.block = editor, block
+        self.title("가져온 호출을 블록에 연결")
+        self.resizable(False, False)
+        self.transient(master.winfo_toplevel())
+        self.result = None
+        self.signature, self.source_slots = _source_call_slots(block)
+        self.source_slots = [s for s in self.source_slots if s.get("source_segment") is not None and
+                             s.get("source_arg") is not None and s.get("kind") in ("value", "code")]
+        self.values = {}
+        self.widgets = {}
+        outer = ttk.Frame(self, padding=12)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text=(block.get("label") or "가져온 호출"), font=FONT_B,
+                  wraplength=520).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(outer, text="이 호출을 어떤 공용 효과 블록으로 바꿀지 정하세요. 수치와 코드 칸을 원본 인수에 연결하거나 직접 지정할 수 있습니다.",
+                  foreground="#555", wraplength=520).grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 8))
+        options = [(op, f"{B.CATS[B.SPECS[op]['cat']][0]} · {B.SPECS[op]['ko']}") for op in B.MANUAL_MAP_OPS
+                   if op != "flash" or editor.owner_kind in ("relic", "power", "summon", "button", "pet")]
+        ttk.Label(outer, text="연결할 블록").grid(row=2, column=0, sticky="w", padx=(0, 8))
+        self.op = _Combo(outer, options, "damage", width=42, command=self._build_fields)
+        self.op.grid(row=2, column=1, sticky="w")
+        self.fields = ttk.Frame(outer)
+        self.fields.grid(row=3, column=0, columnspan=2, sticky="we", pady=(8, 2))
+        self.keep = tk.BooleanVar(value=True)
+        ttk.Checkbutton(outer, text="이 모드에서 같은 호출을 계속 이 블록에 연결", variable=self.keep).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(8, 2))
+        ttk.Label(outer, text="규칙은 호출 형태가 정확히 같은 경우에만 다시 적용됩니다.", foreground="#777").grid(
+            row=5, column=0, columnspan=2, sticky="w")
+        buttons = ttk.Frame(outer)
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="확인", command=self.ok).pack(side="left", padx=4)
+        ttk.Button(buttons, text="취소", command=self.destroy).pack(side="left")
+        self._build_fields()
+        self.bind("<Escape>", lambda _e: self.destroy())
+        center_window(self)
+        self.grab_set()
+        self.wait_visibility()
+
+    def _build_fields(self, _op=None):
+        for child in self.fields.winfo_children():
+            child.destroy()
+        self.widgets = {}
+        op = self.op.get_value()
+        spec = B.SPECS[op].get("args", {})
+        who_opts = [x for x in B.who_options(self.editor.owner_kind, multi=True) if x[0] != "it"]
+        power_opts = M.power_options(self.editor.project)
+        source_opts = []
+        for source in self.source_slots:
+            key = source["key"]
+            shown = self.block.get("args", {}).get(key, source.get("orig", ""))
+            if source.get("kind") == "value" and isinstance(shown, dict):
+                description = B.value_label(shown, self.editor.project, card=self.editor.owner_kind == "card")
+            else:
+                description = str(shown or source.get("orig", ""))
+            source_opts.append((f"arg:{key}", f"원본 인수 · {source.get('name', key)} ({_plain(description)[:45]})"))
+        value_opts = [("fixed", "고정 수치 입력")] + source_opts
+        code_opts = [("fixed", "고정 코드 식 입력")] + source_opts
+
+        def row(r, label, widget):
+            ttk.Label(self.fields, text=label).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=3)
+            widget.grid(row=r, column=1, sticky="w", pady=3)
+
+        field_labels = {"who": "대상", "amount": "수치", "hits": "타격 횟수", "powered": "힘·약화 적용",
+                        "power": "파워", "keyword": "키워드", "action": "동작"}
+        for r, (field, (kind, default)) in enumerate(spec.items()):
+            if kind == "value":
+                default_num = default.get("v", 1) if isinstance(default, dict) and default.get("t") == "num" else 1
+                box = ttk.Frame(self.fields)
+                choice = _Combo(box, value_opts, "fixed", width=39)
+                choice.pack(side="left")
+                value = tk.StringVar(value=str(default_num))
+                entry = ttk.Entry(box, textvariable=value, width=9, font=FONT)
+                entry.pack(side="left", padx=(6, 0))
+
+                def changed(_event=None, c=choice, e=entry):
+                    e.configure(state="normal" if c.get_value() == "fixed" else "disabled")
+                choice.bind("<<ComboboxSelected>>", changed)
+                self.widgets[field] = {"kind": kind, "choice": choice, "value": value}
+                row(r, field_labels.get(field, field), box)
+            elif kind == "code":
+                box = ttk.Frame(self.fields)
+                choice = _Combo(box, code_opts, "fixed", width=39)
+                choice.pack(side="left")
+                value = tk.StringVar(value=str(default or ""))
+                entry = ttk.Entry(box, textvariable=value, width=24, font=FONT)
+                entry.pack(side="left", padx=(6, 0))
+
+                def changed(_event=None, c=choice, e=entry):
+                    e.configure(state="normal" if c.get_value() == "fixed" else "disabled")
+                choice.bind("<<ComboboxSelected>>", changed)
+                self.widgets[field] = {"kind": kind, "choice": choice, "value": value}
+                row(r, field_labels.get(field, field), box)
+            elif kind in ("who_multi", "power"):
+                opts = who_opts if kind == "who_multi" else power_opts
+                combo = _Combo(self.fields, opts, default, width=32 if kind == "power" else 20)
+                self.widgets[field] = {"kind": kind, "combo": combo}
+                row(r, field_labels.get(field, "대상" if kind == "who_multi" else "파워"), combo)
+            elif kind == "keyword":
+                combo = _Combo(self.fields, M.CARD_KEYWORDS, default, width=24)
+                self.widgets[field] = {"kind": kind, "combo": combo}
+                row(r, field_labels.get(field, field), combo)
+            elif kind == "kw_action":
+                combo = _Combo(self.fields, B.KW_ACTIONS, default, width=18)
+                self.widgets[field] = {"kind": kind, "combo": combo}
+                row(r, field_labels.get(field, field), combo)
+            elif kind == "bool":
+                combo = _Combo(self.fields, [(True, "적용"), (False, "적용 안 함")], bool(default), width=18)
+                self.widgets[field] = {"kind": kind, "combo": combo}
+                row(r, field_labels.get(field, field), combo)
+            elif kind == "int":
+                value = tk.StringVar(value=str(default))
+                entry = ttk.Entry(self.fields, textvariable=value, width=9, font=FONT)
+                self.widgets[field] = {"kind": kind, "value": value}
+                row(r, field_labels.get(field, field), entry)
+
+    def ok(self):
+        op = self.op.get_value()
+        block = B.new_block(op)
+        bindings = {}
+        for field, widget in self.widgets.items():
+            kind = widget["kind"]
+            if kind in ("value", "code"):
+                selected = widget["choice"].get_value()
+                if selected.startswith("arg:"):
+                    key = selected[4:]
+                    source = next((s for s in self.source_slots if s.get("key") == key), None)
+                    if not source:
+                        messagebox.showerror("호출 연결", "선택한 원본 인수를 찾을 수 없습니다.", parent=self)
+                        return
+                    current = self.block.get("args", {}).get(key, source.get("orig", ""))
+                    if kind == "code":
+                        if isinstance(current, dict) and current.get("t") == "src":
+                            code = current.get("code") or source.get("orig", "")
+                        elif isinstance(current, dict):
+                            try:
+                                code = B._Gen(self.editor.project, M._Ctx(self.editor.owner_kind, self.editor.item)).val(current)
+                            except Exception:
+                                code = source.get("orig", "")
+                        else:
+                            code = current or source.get("orig", "")
+                        block["args"][field] = str(code).strip()
+                    elif source.get("kind") == "value" and isinstance(current, dict):
+                        block["args"][field] = copy.deepcopy(current)
+                    else:
+                        block["args"][field] = {"t": "src", "code": str(current or source.get("orig", ""))}
+                    bindings[field] = {"kind": "arg", "segment": source["source_segment"], "index": source["source_arg"],
+                                       "initial_value": copy.deepcopy(block["args"][field])}
+                else:
+                    raw = widget["value"].get().strip()
+                    if kind == "code":
+                        value = raw
+                    else:
+                        try:
+                            number = float(raw) if "." in raw else int(raw)
+                        except ValueError:
+                            messagebox.showerror("호출 연결", f"{field}에 숫자를 입력해 주세요.", parent=self)
+                            return
+                        value = {"t": "num", "v": number}
+                    block["args"][field] = copy.deepcopy(value)
+                    bindings[field] = {"kind": "fixed", "value": value}
+            elif kind == "int":
+                try:
+                    value = max(1, int(widget["value"].get()))
+                except ValueError:
+                    messagebox.showerror("호출 연결", "타격 횟수는 정수로 입력해 주세요.", parent=self)
+                    return
+                block["args"][field] = value
+                bindings[field] = {"kind": "fixed", "value": value}
+            else:
+                value = widget["combo"].get_value()
+                block["args"][field] = value
+                bindings[field] = {"kind": "fixed", "value": value}
+        rule = {"signature": self.signature, "op": op, "bindings": bindings}
+        self.result = {"block": block, "rule": rule if self.keep.get() and self.signature else None}
+        self.destroy()
+
+
 def _first_pet(project):
     import pets as PT
     p = PT.pets(project or {})
@@ -370,6 +602,7 @@ class BlockEditor(tk.Toplevel):
         self.frames = []
         self.drag = None
         self.history = []
+        self.pending_call_mappings = []
         try:
             sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
             self.geometry(f"{min(1500, sw - 80)}x{min(980, sh - 120)}")
@@ -388,8 +621,8 @@ class BlockEditor(tk.Toplevel):
         ttk.Button(top, text="되돌리기 (Ctrl+Z)", command=self.undo).pack(side="right", padx=2)
         ttk.Button(top, text="모두 지우기", command=self.clear_all).pack(side="right", padx=2)
         if on_decompose:
-            ttk.Button(top, text="🔍 원본 C#을 블록으로 다시 풀기", command=self.redecompose).pack(side="right", padx=2)
-            ttk.Button(top, text="원본 실행 블록 하나로", command=self.collapse_original).pack(side="right", padx=2)
+            ttk.Button(top, text="🔍 다시 분석해 블록으로 풀기", command=self.redecompose).pack(side="right", padx=2)
+            ttk.Button(top, text="가져온 효과 하나로 접기", command=self.collapse_original).pack(side="right", padx=2)
 
         main = ttk.PanedWindow(self, orient="vertical")
         main.pack(fill="both", expand=True)
@@ -477,12 +710,20 @@ class BlockEditor(tk.Toplevel):
 
     # ---------------- 블록 모음 ----------------
     def _build_palette(self):
+        is_manosaba = (self.project.get("takeover") or {}).get("mod", "").casefold() == "manosaba"
         for cat, ops in B.PALETTE:
+            if cat == "mod_api" and not is_manosaba:
+                continue
             name, color = B.CATS[cat]
             tk.Label(self.palette, text=name, font=FONT_B, background="#f4f4f6", foreground=_darker(color, 0.8),
                      anchor="w").pack(fill="x", padx=6, pady=(10, 2))
             for op in ops:
                 spec = B.SPECS[op]
+                if op == "kotodama_gain" and self.owner_kind not in ("card", "relic", "potion", "power"):
+                    continue
+                if op in ("manosaba_ema_summon", "manosaba_novel_summon", "manosaba_ignite",
+                          "manosaba_attach_combust", "manosaba_gun_attack") and self.owner_kind != "card":
+                    continue
                 if op == "original_play" and not (self.owner_kind == "card" and (self.item.get("clone") or {}).get("editable_play")):
                     continue
                 if op == "source_step" and not (self.owner_kind == "card" and self.item.get("clone")):
@@ -490,6 +731,8 @@ class BlockEditor(tk.Toplevel):
                 if op == "flash" and self.owner_kind not in ("relic", "power", "summon", "button", "pet"):
                     continue
                 if op == "orb_grow" and self.owner_kind != "orb":
+                    continue
+                if op == "card_attack" and self.owner_kind != "card":
                     continue
                 text = re.sub(r"\{\w+\}", "▢", spec["ko"])
                 lab = tk.Label(self.palette, text=("⊓ " if spec.get("body") else "") + text, font=FONT,
@@ -499,7 +742,7 @@ class BlockEditor(tk.Toplevel):
                 lab.bind("<ButtonPress-1>", lambda e, o=op: self.start_drag(e, new=o))
                 lab.bind("<B1-Motion>", self.on_drag)
                 lab.bind("<ButtonRelease-1>", self.end_drag)
-        tk.Label(self.palette, text="\n블록을 여기로 다시 끌어오면 지워집니다.\n오른쪽 클릭: 복제 / 삭제",
+        tk.Label(self.palette, text="\n블록을 여기로 다시 끌어오면 지워집니다.\n오른쪽 클릭: 연결(가져온 호출) / 복제 / 삭제",
                  font=("Malgun Gothic", 9), background="#f4f4f6", foreground="#888", justify="left").pack(fill="x", padx=6)
 
     # ---------------- 그리기 ----------------
@@ -588,6 +831,9 @@ class BlockEditor(tk.Toplevel):
         if b["op"] == "src_call" and len(b.get("slots", [])) > 3:
             row = tk.Frame(inner, background=color)
             row.pack(anchor="w")
+        elif len(spec.get("args", {})) > 4:
+            row = tk.Frame(inner, background=color)
+            row.pack(anchor="w")
         count = 0
         for part in parts:
             if not part:
@@ -607,7 +853,7 @@ class BlockEditor(tk.Toplevel):
                 if b["op"] == "src_call" and part.strip() == (b.get("label") or "").strip():
                     try:
                         import uxkit
-                        uxkit.tip(lab, "원본 C# (지금 칸 값 반영):\n" + self._src_preview(b))
+                        uxkit.tip(lab, "현재 코드 결과:\n" + self._src_preview(b))
                     except Exception:
                         pass
         if b["op"] in ("src_call", "source_step", "src_loop"):
@@ -634,6 +880,16 @@ class BlockEditor(tk.Toplevel):
             s = B.slot_info(b, key)
             opts = [tuple(o) for o in s.get("options", [])] or [(a.get(key, ""), a.get(key, ""))]
             return _Combo(parent, opts, a.get(key), max(10, min(22, max(len(l) for _c, l in opts))), set_)
+        if kind == "manosaba_monster":
+            takeover = self.project.get("takeover") or {}
+            monsters = takeover.get("novel_monsters", []) or []
+            opts = [(x, x.rsplit(".", 1)[-1]) for x in monsters]
+            current = str(a.get(key) or "")
+            if current and all(code != current for code, _label in opts):
+                opts.insert(0, (current, current.rsplit(".", 1)[-1]))
+            if not opts:
+                opts = [("", "(가져온 몬스터를 불러올 수 없습니다)")]
+            return _Combo(parent, opts, current, 18, set_)
         if kind == "code":
             # 원본 식을 그대로 고쳐 쓰는 칸 (목록에서 자주 쓰는 값을 고를 수도 있음)
             s = B.slot_info(b, key)
@@ -724,7 +980,7 @@ class BlockEditor(tk.Toplevel):
             summary = tk.StringVar(value=a.get(key, "").strip().split("\n")[0][:64] or "편집")
             def edit_source():
                 window = tk.Toplevel(self)
-                window.title("원본 C# 단계 편집")
+                window.title("직접 코드 단계 편집")
                 t = tk.Text(window, width=80, height=12, undo=True)
                 t.pack(fill="both", expand=True)
                 t.insert("1.0", a.get(key, ""))
@@ -767,7 +1023,8 @@ class BlockEditor(tk.Toplevel):
             v.trace_add("write", upd)
             return ttk.Spinbox(parent, from_=1, to=50, textvariable=v, width=4, font=FONT)
         if kind == "bool":
-            v = tk.BooleanVar(value=bool(a.get(key, True)))
+            default = B.SPECS.get(b.get("op"), {}).get("args", {}).get(key, ("bool", False))[1]
+            v = tk.BooleanVar(value=bool(a.get(key, default)))
             return tk.Checkbutton(parent, variable=v, background=parent["background"], activebackground=parent["background"],
                                   command=lambda: set_(bool(v.get())))
         if kind == "varname":
@@ -882,9 +1139,31 @@ class BlockEditor(tk.Toplevel):
 
     def context_menu(self, e, b, lst):
         m = tk.Menu(self, tearoff=0)
+        if b.get("op") == "src_call":
+            m.add_command(label="효과 블록으로 연결…", command=lambda: self._map_call(b, lst))
+            m.add_separator()
         m.add_command(label="복제", command=lambda: self._dup(b, lst))
         m.add_command(label="삭제", command=lambda: self._del(b, lst))
         m.tk_popup(e.x_root, e.y_root)
+
+    def _map_call(self, block, lst):
+        _source_call_slots(block)
+        dialog = CallMappingDialog(self, self, block)
+        self.wait_window(dialog)
+        if not dialog.result:
+            return
+        self._push_history()
+        index = next((i for i, value in enumerate(lst) if value is block), None)
+        if index is None:
+            return
+        replacement = dialog.result["block"]
+        if dialog.result.get("rule"):
+            replacement["mapped_signature"] = dialog.result["rule"]["signature"]
+            replacement["mapped_rule"] = copy.deepcopy(dialog.result["rule"])
+            self.pending_call_mappings.append(copy.deepcopy(dialog.result["rule"]))
+        lst[index] = replacement
+        self.render()
+        self._changed()
 
     def _dup(self, b, lst):
         self._push_history()
@@ -911,13 +1190,22 @@ class BlockEditor(tk.Toplevel):
 
     def redecompose(self):
         """원본 OnPlay 를 다시 읽어 블록 하나하나로 푼다 (지금 블록은 되돌리기로 돌아올 수 있음)."""
+        previous_mappings = self.project.get("call_mappings")
+        had_mappings = "call_mappings" in self.project
+        if self.pending_call_mappings:
+            self.project["call_mappings"] = copy.deepcopy(previous_mappings or []) + copy.deepcopy(self.pending_call_mappings)
         try:
             blocks, info = self.on_decompose()
         except Exception as exc:
-            messagebox.showwarning("원본 블록 풀기", f"원본 코드를 블록으로 풀지 못했습니다.\n{exc}", parent=self)
+            messagebox.showwarning("블록 변환", f"코드를 블록으로 변환하지 못했습니다.\n{exc}", parent=self)
             return
+        finally:
+            if had_mappings:
+                self.project["call_mappings"] = previous_mappings
+            else:
+                self.project.pop("call_mappings", None)
         if not blocks:
-            messagebox.showinfo("원본 블록 풀기", f"블록으로 풀 수 있는 원본 코드가 없습니다.\n{info if isinstance(info, str) else ''}",
+            messagebox.showinfo("블록 변환", f"변환할 수 있는 코드가 없습니다.\n{info if isinstance(info, str) else ''}",
                                 parent=self)
             return
         self._push_history()
@@ -960,6 +1248,33 @@ class BlockEditor(tk.Toplevel):
         if errs and not messagebox.askyesno(TITLE, "블록에 문제가 있습니다:\n\n" + "\n".join(dict.fromkeys(errs)) +
                                             "\n\n그래도 저장할까요?", parent=self):
             return
+        active_rules = {}
+        known_rules = list(self.project.get("call_mappings") or []) + self.pending_call_mappings
+        for block in B.walk(self.blocks):
+            signature = block.get("mapped_signature")
+            if not signature:
+                continue
+            rule = copy.deepcopy(block.get("mapped_rule") or next(
+                (r for r in reversed(known_rules) if isinstance(r, dict) and r.get("signature") == signature and
+                 r.get("op") == block.get("op")), None))
+            if not rule:
+                continue
+            for field, binding in (rule.get("bindings") or {}).items():
+                if field not in (block.get("args") or {}):
+                    continue
+                current = copy.deepcopy(block["args"][field])
+                if binding.get("kind") == "arg" and current == binding.get("initial_value"):
+                    binding.pop("initial_value", None)
+                else:
+                    rule["bindings"][field] = {"kind": "fixed", "value": current}
+            active_rules[signature] = rule
+        if active_rules:
+            rules = self.project.setdefault("call_mappings", [])
+            if not isinstance(rules, list):
+                rules = self.project["call_mappings"] = []
+            for rule in active_rules.values():
+                rules[:] = [old for old in rules if not isinstance(old, dict) or old.get("signature") != rule.get("signature")]
+                rules.append(rule)
         self.result = {"blocks": self.blocks, "code": "\n".join(lines), "auto_text": bool(self.auto.get()),
                        "text_ko": self.desc_ko.get("1.0", "end").strip(),
                        "text_en": self.desc_en.get("1.0", "end").strip(),

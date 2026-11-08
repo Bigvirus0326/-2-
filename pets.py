@@ -178,15 +178,15 @@ def gen_runtime(project, extras):
     return "\n".join(L) + "\n"
 
 
-def character_members(project):
-    ch = project.get("character") or {}
+def character_members(project, character=None, image_prefix=""):
+    ch = character if character is not None else project.get("character") or {}
     if not ch.get("combat_image"):
         return []
     if any(ch.get(key) for key in ("attack_frames", "hit_frames")):
-        return motion_members(ch)
+        return motion_members(ch, image_prefix)
     return ["", "    // 전투 모습: 그림 한 장 (모드 메이커 '캐릭터 그림')",
             "    public override global::MegaCrit.Sts2.Core.Nodes.Combat.NCreatureVisuals? CreateCustomVisuals()", "    {",
-            '        var tex = ResourceLoader.Load<Texture2D>("combat.png".CharacterUiPath());',
+            f'        var tex = ResourceLoader.Load<Texture2D>("{image_prefix}combat.png".CharacterUiPath());',
             "        return tex == null ? null : NodeFactory<global::MegaCrit.Sts2.Core.Nodes.Combat.NCreatureVisuals>.CreateFromResource(tex);",
             "    }"]
 
@@ -198,9 +198,9 @@ def frame_ms(character, key):
         return 120
 
 
-def motion_members(ch):
+def motion_members(ch, image_prefix=""):
     def textures(key):
-        return ", ".join(f'ResourceLoader.Load<Texture2D>("{key}_{i}.png".CharacterUiPath())'
+        return ", ".join(f'ResourceLoader.Load<Texture2D>("{image_prefix}{key}_{i}.png".CharacterUiPath())'
                          for i in range(len(ch.get(key, []))))
     # Each visual owns its playback state. A new trigger interrupts the previous sequence.
     return ["""
@@ -209,7 +209,7 @@ def motion_members(ch):
 
     public override global::MegaCrit.Sts2.Core.Nodes.Combat.NCreatureVisuals? CreateCustomVisuals()
     {
-        var idle = ResourceLoader.Load<Texture2D>("combat.png".CharacterUiPath());
+        var idle = ResourceLoader.Load<Texture2D>("IMAGE_PREFIXcombat.png".CharacterUiPath());
         if (idle == null) return null;
         var visual = NodeFactory<global::MegaCrit.Sts2.Core.Nodes.Combat.NCreatureVisuals>.CreateFromResource(idle);
         if (visual != null)
@@ -255,7 +255,7 @@ def motion_members(ch):
                 motion.Play(sprite, __0);
         }
     }
-""".replace("ATTACK_FRAMES", textures("attack_frames")).replace("HIT_FRAMES", textures("hit_frames"))
+""".replace("IMAGE_PREFIX", image_prefix).replace("ATTACK_FRAMES", textures("attack_frames")).replace("HIT_FRAMES", textures("hit_frames"))
     .replace("ATTACK_MS", str(frame_ms(ch, "attack_frames"))).replace("HIT_MS", str(frame_ms(ch, "hit_frames")))]
 
 
@@ -330,6 +330,21 @@ def write_images(project, img_dir):
             for i, frame in enumerate(ch.get(key, [])):
                 process_image(frame["image"], ch.get("combat_scale"), ch.get("combat_flip"), ch.get("combat_lift")).save(
                     os.path.join(img_dir, "charui", f"{key}_{i}.png"))
+    import modgen as M
+    for ich in M.imported_characters(project):
+        source = ich.get("combat_image") or ""
+        if not source or not os.path.isfile(source):
+            continue
+        os.makedirs(os.path.join(img_dir, "charui"), exist_ok=True)
+        prefix = M.ichar_stem(ich) + "_"
+        process_image(source, ich.get("combat_scale"), ich.get("combat_flip"), ich.get("combat_lift")).save(
+            os.path.join(img_dir, "charui", prefix + "combat.png"))
+        for key in ("attack_frames", "hit_frames"):
+            for i, frame in enumerate(ich.get(key, [])):
+                frame_image = frame.get("image") or ""
+                if frame_image and os.path.isfile(frame_image):
+                    process_image(frame_image, ich.get("combat_scale"), ich.get("combat_flip"), ich.get("combat_lift")).save(
+                        os.path.join(img_dir, "charui", f"{prefix}{key}_{i}.png"))
 
 
 def validate(project, seen):
@@ -358,6 +373,15 @@ def validate(project, seen):
             for i, frame in enumerate(ch.get(key, []), 1):
                 if not os.path.isfile(frame.get("image") or ""):
                     errors.append(f"캐릭터 {label} 모션 {i}번째 그림을 찾을 수 없습니다: {frame.get('image', '')}")
+    for ich in M.imported_characters(project):
+        where = f"가져온 캐릭터 '{M.text(ich, 'name', 'ko') or ich.get('class', '캐릭터')}'"
+        if ich.get("attack_frames") or ich.get("hit_frames"):
+            if not os.path.isfile(ich.get("combat_image") or ""):
+                errors.append(f"{where}: 모션 재생에는 기본 전투 그림이 필요합니다.")
+            for key, label in (("attack_frames", "공격"), ("hit_frames", "피격")):
+                for i, frame in enumerate(ich.get(key, []), 1):
+                    if not os.path.isfile(frame.get("image") or ""):
+                        errors.append(f"{where}: {label} 모션 {i}번째 그림을 찾을 수 없습니다: {frame.get('image', '')}")
     return errors, warnings
 
 

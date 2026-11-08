@@ -202,6 +202,7 @@ def new_card(cid="new_card"):
     return {
         "id": cid, "name_ko": "새 카드", "name_en": "New Card",
         "type": "Attack", "rarity": "Common", "cost": 1, "upgrade_cost": 1, "target": "AnyEnemy",
+        "pool_character": "",   # 통째로 가져온 모드에서 특정 캐릭터의 카드 풀에만 넣기
         "x_cost": False, "x_plus_up": False,   # 에너지 X 비용 (남은 에너지를 전부 씀), 강화하면 X+1
         "keywords": [], "upgrade_add_keyword": "", "upgrade_remove_keyword": "", "tag": "",
         "effects": [new_effect("damage", 8, 3)],
@@ -319,6 +320,7 @@ def default_project():
         "relics": [relic],
         "potions": [potion],
         "powers": [ember, guard],
+        "call_mappings": [],
     }
 
 
@@ -341,6 +343,9 @@ def normalize(project):
         merged = copy.deepcopy(base[sec])
         merged.update(project.get(sec, {}))
         project[sec] = merged
+    # 가져온 모드의 호출을 블록에 연결한 규칙은 프로젝트 안에 저장한다.
+    if not isinstance(project.get("call_mappings"), list):
+        project["call_mappings"] = []
     for key, factory in (("cards", new_card), ("relics", new_relic), ("potions", new_potion), ("powers", new_power)):
         items = []
         for it in project.get(key, []):
@@ -379,6 +384,67 @@ def power_loc_id(project, pid):
     return loc_id(project, pid + "_power")
 
 
+# ---- 통째로 가져온 모드의 항목: 원래 클래스 이름·네임스페이스를 그대로 쓴다 ----
+KIND_KEY = {"card": "cards", "relic": "relics", "potion": "potions", "power": "powers"}
+KIND_NS = {"card": "Cards", "relic": "Relics", "potion": "Potions", "power": "Powers"}
+
+
+def keep_name(item):
+    cl = (item or {}).get("clone") or {}
+    return cl.get("class_name", "") if cl.get("keep_name") else ""
+
+
+def find_item(project, kind, iid):
+    return next((x for x in project.get(KIND_KEY[kind], []) if x.get("id") == iid), None)
+
+
+def item_cls(project, kind, item):
+    """항목 클래스의 전체 이름 (global::…). item 은 dict 또는 id."""
+    if isinstance(item, str):
+        item = find_item(project, kind, item) or {"id": item}
+    kn = keep_name(item)
+    if kn:
+        ns = item["clone"].get("namespace") or ""
+        return "global::" + (f"{ns}.{kn}" if ns else kn)
+    mid = project["mod"]["id"]
+    return f"global::{mid}.{mid}Code.{KIND_NS[kind]}.{pascal(item['id'])}" + ("Power" if kind == "power" else "")
+
+
+def item_loc_id(project, kind, item):
+    kn = keep_name(item)
+    if kn:
+        return item["clone"].get("orig_loc_id") or f"{project['mod']['id'].upper()}-{game_snake(kn)}"
+    return power_loc_id(project, item["id"]) if kind == "power" else loc_id(project, item["id"])
+
+
+def takeover(project):
+    """통째로 가져온 모드 정보 (없으면 None)."""
+    t = project.get("takeover")
+    return t if isinstance(t, dict) and t.get("src") else None
+
+
+def takeover_loc(project, lang):
+    """원래 모드의 번역 표 (사본). lang: en/ko/zh"""
+    t = takeover(project)
+    if not t or not t.get("loc") or not os.path.isfile(t["loc"]):
+        return None
+    try:
+        with open(t["loc"], encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return copy.deepcopy(data.get(lang) or {})
+
+
+def img_stem(kind, item):
+    """그림 파일 이름 (확장자 빼고). 게임은 Id.Entry 에서 접두어를 뺀 소문자로 찾는다."""
+    kn = keep_name(item)
+    if kn:
+        lid = item["clone"].get("orig_loc_id") or ""
+        return (lid.split("-", 1)[1] if "-" in lid else game_snake(kn)).lower()
+    return item["id"] + ("_power" if kind == "power" else "")
+
+
 def _has_jong(word: str) -> bool:
     for ch in reversed(word):
         if "가" <= ch <= "힣":
@@ -409,11 +475,22 @@ def power_meta(project, key):
         pid = key[2:]
         for p in project.get("powers", []):
             if p["id"] == pid:
-                mid = project["mod"]["id"]
-                cls = pascal(pid) + "Power"
-                return {"cls": f"global::{mid}.{mid}Code.Powers.{cls}", "var": cls,
+                full = item_cls(project, "power", p)
+                cls = full.rsplit(".", 1)[-1].replace("global::", "")
+                return {"cls": full, "var": cls,
                         "ko": text(p, "name", "ko"), "en": text(p, "name", "en"), "zh": text(p, "name", "zh"),
                         "target": "self" if p.get("type") == "Buff" else "enemy"}
+        return None
+    if key.startswith("t:"):
+        cls_name = key[2:]
+        for power in (project.get("takeover") or {}).get("extra_powers", []):
+            if power.get("class") == cls_name and power.get("full"):
+                full = power["full"]
+                if not full.startswith("global::"):
+                    full = "global::" + full
+                return {"cls": full, "var": cls_name, "ko": power.get("name_ko") or cls_name,
+                        "en": power.get("name_en") or cls_name, "zh": power.get("name_zh") or cls_name,
+                        "target": "self" if power.get("type") == "Buff" else "enemy"}
         return None
     if key in POWERS:
         cls, ko, en, tgt = POWERS[key]
@@ -442,6 +519,8 @@ def power_options(project):
     opts = [(k, f"{v[1]} ({k})") for k, v in POWERS.items()]
     opts += [("game:" + k, "원작 · " + text(v, "name", "ko")) for k, v in project["character"].get("game_powers", {}).items()]
     opts += [("c:" + p["id"], f"★ {p.get('name_ko') or p['id']} (새 파워)") for p in project.get("powers", [])]
+    opts += [("t:" + p["class"], f"◆ {p.get('name_ko') or p['class']} (가져온 파워)")
+             for p in (project.get("takeover") or {}).get("extra_powers", [])]
     opts += [("s:" + sm["id"], f"☆ {sm.get('name_ko') or sm['id']} (소환수 · 수치 = 단계)") for sm in gimmick.summons(project)]
     for d in project.get("dependencies", []):
         for pw in d.get("powers", []):
@@ -840,11 +919,13 @@ def validate(project):
                 errors.append(f"{where}: 예약된 이름과 겹칩니다. 다른 ID를 쓰세요.")
             if not text(it, "name", "ko"):
                 errors.append(f"{where}: 이름이 비어 있습니다.")
+            if owner_kind == "card" and it.get("pool_character") and not card_pool_for_character(project, it["pool_character"]):
+                errors.append(f"{where}: 캐릭터 전용 카드의 원래 카드 풀을 찾을 수 없습니다 ({it['pool_character']}).")
             effs = it.get("effects", [])
             gimmicky = owner_kind == "power" and (int(it.get("cap") or 0) or int(it.get("threshold") or 0)
                                                   or it.get("group") or it.get("hidden"))
             if not effs and not it.get("modifiers") and not (it.get("desc_ko") or it.get("desc_en")) \
-                    and not it.get("extra_code") and not gimmicky:
+                    and not it.get("extra_code") and not gimmicky and not it.get("clone"):
                 warnings.append(f"{where}: 효과가 없습니다.")
             kinds = []
             for e in effs:
@@ -873,9 +954,9 @@ def validate(project):
                     for be in dict.fromkeys(berr):
                         errors.append(f"{where}: 블록 코드 - {be}")
                 elif e["kind"] == "code" and not (e.get("code") or "").strip():
-                    errors.append(f"{where}: '직접 C# 코드' 효과에 코드가 비어 있습니다.")
+                    errors.append(f"{where}: '직접 코드' 효과에 코드가 비어 있습니다.")
                 elif e["kind"] == "code" and not (e.get("text_ko") or e.get("text_en")):
-                    warnings.append(f"{where}: '직접 C# 코드' 효과의 설명 문구가 비어 있습니다.")
+                    warnings.append(f"{where}: '직접 코드' 효과의 설명 문구가 비어 있습니다.")
                 if e.get("target") == "other" and (owner_kind != "power" or it.get("trigger") not in POWER_OTHER):
                     errors.append(f"{where}: '상대' 대상은 파워의 카드 사용/피해 받을 때/피해 줄 때 발동에서만 쓸 수 있습니다.")
                 needs_target = (e.get("cond_power") and e.get("cond_on") == "target") or \
@@ -935,6 +1016,28 @@ def validate(project):
             elif img and not img.lower().endswith(".png"):
                 errors.append(f"{where}: 이미지는 PNG 파일이어야 합니다.")
 
+    tk = project.get("takeover")
+    if isinstance(tk, dict) and tk.get("src"):
+        if not os.path.isdir(tk["src"]):
+            errors.append(f"통째로 가져온 모드 '{tk.get('mod')}'의 원래 코드 폴더가 없습니다 ({tk['src']}). "
+                          "'다른 모드' 탭에서 원래 모드를 다시 통째로 가져오세요.")
+        ids = {k: {x["id"] for x in project.get(k, [])} for k in ("cards", "relics")}
+        for ich in imported_characters(project):
+            where = f"가져온 캐릭터 '{text(ich, 'name', 'ko') or ich['class']}'"
+            for d in ich.get("deck", []):
+                c = d.get("card", "")
+                if not c.startswith(("raw:", "game:")) and c not in ids["cards"]:
+                    errors.append(f"{where}: 시작 덱의 카드 '{c}' 가 없습니다.")
+            for r in ich.get("relics", []):
+                if not r.startswith(("raw:", "game:")) and r not in ids["relics"]:
+                    errors.append(f"{where}: 시작 유물 '{r}' 가 없습니다.")
+            if not ich.get("deck_fixed") and not any(int(d.get("count", 0) or 0) for d in ich.get("deck", [])):
+                warnings.append(f"{where}: 시작 덱이 비어 있습니다.")
+            for field in ICHAR_FILES:
+                if ich.get(field) and not os.path.isfile(ich[field]):
+                    warnings.append(f"{where}: 그림 파일이 없습니다 ({ich[field]}). 원래 그림을 씁니다.")
+        if tk.get("mod") and tk["mod"] != project["mod"]["id"]:
+            warnings.append(f"모드 ID 를 '{tk['mod']}' 에서 바꿨습니다. 원래 코드가 옛 ID 로 리소스를 찾으면 그림·번역이 안 보일 수 있습니다.")
     dep_ids = {d.get("id") for d in project.get("dependencies", [])}
     for d in project.get("dependencies", []):
         if not d.get("dll") or not os.path.isfile(d["dll"]):
@@ -944,7 +1047,7 @@ def validate(project):
             cl = it.get("clone")
             where = f"{kname} '{it.get('id')}'"
             if cl:
-                if cl.get("mod") not in dep_ids:
+                if cl.get("mod") not in dep_ids and not cl.get("keep_name"):
                     errors.append(f"{where}: 복제한 원본 모드 '{cl.get('mod')}'가 참조 목록에 없습니다. '다른 모드' 탭에서 참조를 추가하세요.")
                 names = [v.get("name") for v in it.get("raw_vars", [])]
                 for e in it.get("effects", []):
@@ -1358,12 +1461,24 @@ def _clone_head(project, item, ns_sub):
     ns = cl.get("namespace", "")
     parts = ns.split(".") if ns else []
     extra = [f"using {'.'.join(parts[:i])};" for i in range(len(parts), 0, -1)]
-    lines = [_header(), USINGS_COMMON.rstrip("\n"), "using BaseLib.Utils;", "using BaseLib.Extensions;",
-             f"using {mid}.{mid}Code.Extensions;"]
+    lines = [_header(), USINGS_COMMON.rstrip("\n"), "using BaseLib.Utils;", "using BaseLib.Extensions;"]
+    if not keep_name(item):      # 원래 이름 그대로면 원본의 확장 메서드와 겹치지 않게 내 것은 전체 이름으로 부른다
+        lines.append(f"using {mid}.{mid}Code.Extensions;")
     for u in usings + extra:
         if u not in lines:
             lines.append(u)
+    if keep_name(item):
+        return lines + (["", f"namespace {ns};", ""] if ns else [""])
     return lines + ["", f"namespace {mid}.{mid}Code.{ns_sub};", ""]
+
+
+def _img_path(project, item, method, suffix=""):
+    """그림 경로 식. 원래 이름 그대로인 항목은 확장 메서드 대신 전체 이름으로 (원본 코드의 같은 이름 메서드와 겹침 방지)."""
+    arg = f'$"{{Id.Entry.RemovePrefix().ToLowerInvariant()}}{suffix}.png"'
+    if keep_name(item):
+        mid = project["mod"]["id"]
+        return f"global::{mid}.{mid}Code.Extensions.StringExtensions.{method}({arg})"
+    return f"{arg}.{method}()"
 
 
 def _fix_upgrade(body, item, cost_delta, add_kw):
@@ -1420,15 +1535,18 @@ def canonical_keyword_terms(project, item):
 def gen_clone(project, item, kind):
     mid = project["mod"]["id"]
     cl = item["clone"]
-    cls = pascal(item["id"]) + ("Power" if kind == "power" else "")
+    cls = keep_name(item) or (pascal(item["id"]) + ("Power" if kind == "power" else ""))
     ns_sub = {"card": "Cards", "relic": "Relics", "potion": "Potions", "power": "Powers"}[kind]
     our_base = {"card": f"{mid}Card", "relic": f"{mid}Relic", "potion": f"{mid}Potion", "power": f"{mid}Power"}[kind]
+    if keep_name(item):     # 원래 네임스페이스에 있으므로 내 기본 클래스는 전체 이름으로
+        our_base = f"global::{mid}.{mid}Code.{ns_sub}.{our_base}"
     base = ("global::" + cl["base"]) if cl.get("base") else our_base
     L = _clone_head(project, item, ns_sub)
     body = cl.get("body", "")
     if kind != "power":
-        pool = _pool_type(project, kind, cl.get("pool", "mine"), cl.get("their_pool", ""))
-        if cl.get("base") or cl.get("pool") == "theirs":
+        assigned_pool = card_pool_for_character(project, item.get("pool_character")) if kind == "card" else ""
+        pool = assigned_pool or _pool_type(project, kind, cl.get("pool", "mine"), cl.get("their_pool", ""))
+        if cl.get("base") or cl.get("pool") == "theirs" or assigned_pool:
             L.append(f"[Pool(typeof({pool}))]")
     L += [f"public sealed class {cls} : {base}", "{"]
     rv = _raw_var_exprs(item)
@@ -1455,9 +1573,9 @@ def gen_clone(project, item, kind):
             args = new_args
         L += [f"    public {cls}() : base({', '.join(args)})", "    {", "    }", ""]
         if cl.get("base"):
-            L += ['    public override string CustomPortraitPath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}.png".BigCardImagePath();',
-                  '    public override string PortraitPath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}.png".CardImagePath();',
-                  '    public override string BetaPortraitPath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}.png".CardImagePath();']
+            L += [f'    public override string CustomPortraitPath => {_img_path(project, item, "BigCardImagePath", "")};',
+                  f'    public override string PortraitPath => {_img_path(project, item, "CardImagePath", "")};',
+                  f'    public override string BetaPortraitPath => {_img_path(project, item, "CardImagePath", "")};']
         if item.get("tag"):
             L.append(f"    protected override HashSet<CardTag> CanonicalTags => [CardTag.{item['tag']}];")
         keywords = canonical_keyword_terms(project, item)
@@ -1489,9 +1607,9 @@ def gen_clone(project, item, kind):
         if not cl.get("base") and "GetUpgradeReplacement" not in body:     # 내 기본 클래스(CustomRelicModel)를 이어받을 때만
             L += relic_upgrade_lines(project, item)
         if cl.get("base"):
-            L += ['    public override string PackedIconPath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}.png".RelicImagePath();',
-                  '    protected override string PackedIconOutlinePath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}_outline.png".RelicOutlineImagePath();',
-                  '    protected override string BigIconPath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}.png".BigRelicImagePath();']
+            L += [f'    public override string PackedIconPath => {_img_path(project, item, "RelicImagePath", "")};',
+                  f'    protected override string PackedIconOutlinePath => {_img_path(project, item, "RelicOutlineImagePath", "_outline")};',
+                  f'    protected override string BigIconPath => {_img_path(project, item, "BigRelicImagePath", "")};']
         if rv:
             L.append(f"    protected override IEnumerable<DynamicVar> CanonicalVars => [{', '.join(rv)}];")
     elif kind == "potion":
@@ -1500,16 +1618,16 @@ def gen_clone(project, item, kind):
             L.append("    public override PotionUsage Usage => PotionUsage.CombatOnly;")
         L.append(f"    public override TargetType TargetType => TargetType.{item['target']};")
         if cl.get("base"):
-            L += ['    public override string? CustomPackedImagePath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}.png".PotionImagePath();',
-                  '    public override string? CustomPackedOutlinePath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}.png".PotionOutlineImagePath();']
+            L += [f'    public override string? CustomPackedImagePath => {_img_path(project, item, "PotionImagePath", "")};',
+                  f'    public override string? CustomPackedOutlinePath => {_img_path(project, item, "PotionOutlineImagePath", "")};']
         if rv:
             L.append(f"    protected override IEnumerable<DynamicVar> CanonicalVars => [{', '.join(rv)}];")
     elif kind == "power":
         L += [f"    public override PowerType Type => PowerType.{item['type']};",
               f"    public override PowerStackType StackType => PowerStackType.{item['stack']};"]
         if cl.get("base"):
-            L += ['    public override string? CustomPackedIconPath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}.png".PowerImagePath();',
-                  '    public override string? CustomBigIconPath => $"{Id.Entry.RemovePrefix().ToLowerInvariant()}.png".BigPowerImagePath();']
+            L += [f'    public override string? CustomPackedIconPath => {_img_path(project, item, "PowerImagePath", "")};',
+                  f'    public override string? CustomBigIconPath => {_img_path(project, item, "BigPowerImagePath", "")};']
         if rv:
             L.append(f"    protected override IEnumerable<DynamicVar> CanonicalVars => [{', '.join(rv)}];")
     L += ["", f"    // ---- 원본 '{cl.get('orig_class', '')}' ({cl.get('mod', '')}) 에서 가져온 코드 ----"]
@@ -1526,9 +1644,12 @@ def gen_card(project, card):
     cls = pascal(card["id"])
     effs = card["effects"]
     C = _Ctx("card", card)
-    lines = [_header(), USINGS_COMMON, f"namespace {mid}.{mid}Code.Cards;", "",
-             f"public sealed class {cls}() : {mid}Card({0 if card.get('x_cost') else int(card['cost'])}, CardType.{card['type']}, "
-             f"CardRarity.{card['rarity']}, TargetType.{card['target']})", "{"]
+    pool = card_pool_for_character(project, card.get("pool_character"))
+    lines = [_header(), USINGS_COMMON, f"namespace {mid}.{mid}Code.Cards;", ""]
+    if pool:
+        lines.append(f"[Pool(typeof({pool}))]")
+    lines += [f"public sealed class {cls}() : {mid}Card({0 if card.get('x_cost') else int(card['cost'])}, CardType.{card['type']}, "
+              f"CardRarity.{card['rarity']}, TargetType.{card['target']})", "{"]
     if card["tag"]:
         lines.append(f"    protected override HashSet<CardTag> CanonicalTags => [CardTag.{card['tag']}];")
     keywords = canonical_keyword_terms(project, card)
@@ -1583,7 +1704,7 @@ def relic_upgrade_lines(project, relic):
     up = relic.get("upgrade_relic") or ""
     if not up or up == relic.get("id") or not any(r["id"] == up for r in project.get("relics", [])):
         return []
-    return [f"    public override RelicModel? GetUpgradeReplacement() => ModelDb.Relic<{pascal(up)}>();"]
+    return [f"    public override RelicModel? GetUpgradeReplacement() => ModelDb.Relic<{item_cls(project, 'relic', up)}>();"]
 
 
 def gen_relic(project, relic):
@@ -1836,8 +1957,8 @@ def gen_character(project):
             if d["card"].startswith("game:"):
                 deck.append("        " + game_card_expression(d["card"][5:]))
             else:
-                deck.append(f"        ModelDb.Card<global::{mid}.{mid}Code.Cards.{pascal(d['card'])}>()")
-    relics = [("        " + game_item_expression("Relic", r[5:])) if r.startswith("game:") else f"        ModelDb.Relic<global::{mid}.{mid}Code.Relics.{pascal(r)}>()" for r in ch["relics"]]
+                deck.append(f"        ModelDb.Card<{item_cls(project, 'card', d['card'])}>()")
+    relics = [("        " + game_item_expression("Relic", r[5:])) if r.startswith("game:") else f"        ModelDb.Relic<{item_cls(project, 'relic', r)}>()" for r in ch["relics"]]
     L = [_header(), """using BaseLib.Abstracts;
 using BaseLib.Utils.NodeFactories;
 using Godot;
@@ -1876,6 +1997,131 @@ using MegaCrit.Sts2.Core.Models;
         L.append('    public override string CustomMapMarkerPath => "map_marker.png".CharacterUiPath();')
     if ch.get("select_bg_image"):
         L.append(f'    public override string CustomCharacterSelectBg => MainFile.ResPath + "/scenes/{SELECT_BG_SCENE}";')
+    L.append("}")
+    return "\n".join(L) + "\n"
+
+
+def imported_characters(project):
+    return [c for c in project.get("imported_characters") or [] if isinstance(c, dict) and c.get("class")]
+
+
+def card_characters(project):
+    """통째로 가져온 프로젝트의 모든 캐릭터와 원래 카드 풀 정보."""
+    rows = list(imported_characters(project))
+    takeover_data = project.get("takeover") if isinstance(project.get("takeover"), dict) else {}
+    rows.extend(c for c in takeover_data.get("characters", []) if isinstance(c, dict) and c.get("class"))
+    out, seen = [], set()
+    for ch in rows:
+        cls = ch.get("class", "")
+        if not cls or cls in seen:
+            continue
+        seen.add(cls)
+        pool_class = ch.get("card_pool_class") or ch.get("pool_class") or ""
+        pool_full = ch.get("card_pool_full") or ""
+        if not pool_full:
+            match = re.search(r"\bCardPool\s*<\s*(?:global::)?([\w.]+)\s*>", ch.get("body", "") or "")
+            if match:
+                pool_name = match.group(1)
+                pool_class = pool_class or pool_name.rsplit(".", 1)[-1]
+                pool_full = pool_name if "." in pool_name else ".".join(x for x in (ch.get("namespace", ""), pool_name) if x)
+        out.append({
+            "class": cls,
+            "name": text(ch, "name", "ko") or ch.get("name_ko") or cls,
+            "card_pool_class": pool_class,
+            "card_pool_full": pool_full,
+        })
+    return out
+
+
+def card_pool_for_character(project, character_class):
+    """캐릭터 클래스 이름으로 원래 카드 풀의 전체 형식을 찾는다."""
+    if not character_class:
+        return ""
+    return next(("global::" + c["card_pool_full"] for c in card_characters(project)
+                 if c["class"] == character_class and c.get("card_pool_full")), "")
+
+
+def ichar_stem(ich):
+    return ich["class"].lower()
+
+
+ICHAR_FILES = {"select_image": "select", "select_locked_image": "select_locked", "icon_image": "icon",
+               "map_marker_image": "map", "select_bg_image": "select_bg", "combat_image": "combat"}
+
+
+def ichar_ref(project, kind, r):
+    """가져온 캐릭터의 덱·유물 항목 → C# 형식 식 (ModelDb.Card<…>() 안에 넣을 이름 또는 전체 식)."""
+    if r.startswith("raw:"):
+        return f"ModelDb.{kind.capitalize()}<{r[4:]}>()"
+    if r.startswith("game:"):
+        return game_card_expression(r[5:]) if kind == "card" else game_item_expression("Relic", r[5:])
+    return f"ModelDb.{kind.capitalize()}<{item_cls(project, kind, r)}>()"
+
+
+def gen_imported_character(project, ich):
+    """원래 모드의 캐릭터 클래스를 같은 이름으로 다시 쓴다: 체력·골드·시작 덱·시작 유물·고른 그림만 바꾸고 나머지는 원래 코드."""
+    import modimport as MI
+    mid = project["mod"]["id"]
+    ui = f"global::{mid}.{mid}Code.Extensions.StringExtensions.CharacterUiPath"
+    stem = ichar_stem(ich)
+    remove, add = [], []
+
+    def has(field):
+        return bool(ich.get(field)) and os.path.isfile(ich[field])
+    if int(ich.get("hp") or 0) > 0:
+        remove.append("StartingHp")
+        add.append(f"    public override int StartingHp => {int(ich['hp'])};")
+    if str(ich.get("gold", "")).strip().isdigit():
+        remove.append("StartingGold")
+        add.append(f"    public override int StartingGold => {int(ich['gold'])};")
+    if not ich.get("deck_fixed"):
+        remove.append("StartingDeck")
+        deck = [f"        {ichar_ref(project, 'card', d['card'])}" for d in ich.get("deck", [])
+                for _ in range(int(d.get("count", 0) or 0))]
+        add += ["    public override IEnumerable<CardModel> StartingDeck =>", "    [", ",\n".join(deck), "    ];"]
+    if not ich.get("relics_fixed"):
+        remove.append("StartingRelics")
+        rel = [f"        {ichar_ref(project, 'relic', r)}" for r in ich.get("relics", [])]
+        add += ["    public override IReadOnlyList<RelicModel> StartingRelics =>", "    [", ",\n".join(rel), "    ];"]
+    if has("select_image"):
+        remove.append("CustomCharacterSelectIconPath")
+        add.append(f'    public override string CustomCharacterSelectIconPath => {ui}("{stem}_select.png");')
+    if has("select_locked_image"):
+        remove.append("CustomCharacterSelectLockedIconPath")
+        add.append(f'    public override string CustomCharacterSelectLockedIconPath => {ui}("{stem}_select_locked.png");')
+    if has("icon_image"):
+        remove += ["CustomIconTexturePath", "CustomIconOutlineTexturePath", "CustomIcon", "CustomIconPath"]
+        add += ["    public override Control CustomIcon", "    {", "        get", "        {",
+                "            var icon = global::BaseLib.Utils.NodeFactories.NodeFactory<Control>.CreateFromResource(CustomIconTexturePath);",
+                "            icon.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);",
+                "            return icon;", "        }", "    }",
+                f'    public override string CustomIconTexturePath => {ui}("{stem}_icon.png");']
+    if has("map_marker_image"):
+        remove.append("CustomMapMarkerPath")
+        add.append(f'    public override string CustomMapMarkerPath => {ui}("{stem}_map.png");')
+    if has("select_bg_image"):
+        remove.append("CustomCharacterSelectBg")
+        add.append(f'    public override string CustomCharacterSelectBg => global::{mid}.{mid}Code.MainFile.ResPath + "/scenes/{stem}_select_bg.tscn";')
+    if has("combat_image"):
+        remove.append("CreateCustomVisuals")
+        import pets as PT
+        add += PT.character_members(project, ich, image_prefix=f"{stem}_")
+    body = MI.remove_members(ich.get("body", ""), remove)
+    usings = ["using System.Collections.Generic;", "using Godot;", "using MegaCrit.Sts2.Core.Models;",
+              f"using {mid}.{mid}Code.Extensions;"]
+    for u in ich.get("usings", []):
+        if u not in usings:
+            usings.append(u)
+    mods = (ich.get("mods") or "public ").strip()
+    L = [_header()] + usings + [""]
+    if ich.get("namespace"):
+        L += [f"namespace {ich['namespace']};", ""]
+    if ich.get("attrs"):
+        L.append(ich["attrs"])
+    bases = ich.get("bases") or ich.get("base") or "PlaceholderCharacterModel"
+    L += [f"{mods} class {ich['class']} : {bases}", "{"]
+    L += ["    // ---- 모드 메이커에서 고친 값 ----"] + add + ["", "    // ---- 원래 코드 ----"]
+    L += _indent(body.strip("\n"))
     L.append("}")
     return "\n".join(L) + "\n"
 
@@ -2138,12 +2384,31 @@ public partial class MainFile : Node
 
     public static void Initialize()
     {{
-        var assembly = Assembly.GetExecutingAssembly();
-        Harmony harmony = new(ModId);
-        harmony.PatchAll(assembly);
+        var assembly = Assembly.GetExecutingAssembly();{_takeover_init(project)}
     }}
 }}
 """
+
+
+def _takeover_init(project):
+    """MainFile.Initialize 본문: 보통은 Harmony 패치. 통째로 가져온 모드면 원래 리소스 팩도 읽는다."""
+    t = takeover(project)
+    patch = """
+        Harmony harmony = new(ModId);
+        harmony.PatchAll(assembly);"""
+    if not t:
+        return patch
+    out = ""
+    if t.get("pck"):
+        out += f"""
+        // 원래 모드의 그림·장면·번역 (이 모드가 새로 만든 파일이 우선)
+        var dir = System.IO.Path.GetDirectoryName(assembly.Location) ?? "";
+        var basePack = System.IO.Path.Combine(dir, ModId + "{TAKEOVER_PCK_SUFFIX}.pck");
+        if (System.IO.File.Exists(basePack) && !ProjectSettings.LoadResourcePack(basePack, false))
+            MegaCrit.Sts2.Core.Logging.Log.Error("원래 리소스 팩을 읽지 못했습니다: " + basePack);"""
+    if not t.get("patches_all"):      # 원래 코드가 직접 패치하면 두 번 하지 않는다
+        out += patch
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2174,6 +2439,10 @@ def gen_csproj(project):
     mid = project["mod"]["id"]
     blv = project["mod"].get("baselib_version") or "*"
     dep_refs = _dep_refs(project)
+    if takeover(project):   # 원래 코드는 암시적 using 없이 만들어져서 Godot 형식(Timer·Thread·HttpClient 등)과 겹치지 않게
+        dep_refs += """
+        <Using Remove="System.Threading" />
+        <Using Remove="System.Net.Http" />"""
     return f"""<Project Sdk="Godot.NET.Sdk/4.5.1" InitialTargets="CheckDependencyPaths">
     <Import Project=".\\Sts2PathDiscovery.props"/>
     <PropertyGroup>
@@ -2243,6 +2512,7 @@ def gen_csproj(project):
         <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" />
         <Copy SourceFiles="$(AssemblyName).json" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" />
         <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" />
+        <Copy Condition="Exists('$(MSBuildProjectName)_original.pck')" SourceFiles="$(MSBuildProjectName)_original.pck" DestinationFolder="$(ModsPath)$(MSBuildProjectName)/" />
     </Target>
 
     <Target Name="NeedGodotForPublish" BeforeTargets="Publish">
@@ -2545,6 +2815,22 @@ def architect_loc(ch, lid, lang):
     return out
 
 
+def architect_from_loc(project, lid, lang):
+    """통째로 가져온 모드의 원래 아키텍트 대사 → 대화 목록 (없으면 None)."""
+    base = takeover_loc(project, lang) if lid else None
+    if not base:
+        return None
+    pat = re.compile(r"^THE_ARCHITECT\.talk\." + re.escape(lid) + r"\.(\d+)-(\d+)r?\.(ancient|char)$")
+    rows = {}
+    for k, v in (base.get("ancients") or {}).items():
+        m = pat.match(k)
+        if m:
+            rows.setdefault(int(m.group(1)), []).append((int(m.group(2)), m.group(3), v))
+    if not rows:
+        return None
+    return [[(who, line) for _j, who, line in sorted(rows[i])] for i in sorted(rows)]
+
+
 def gen_architect_safety(project):
     """아키텍트 대사가 없어 Dialogue 가 비면 게임이 WinRun 에서 멈춘다(널 참조) → 빈 대화로 막고,
     이 캐릭터 대사가 방문 횟수와 안 맞으면 이 캐릭터 대사 아무거나 고르게 한다."""
@@ -2590,15 +2876,17 @@ internal static class {cls}AncientDialogueFallback
 
 
 SELECT_BG_SCENE = "char_select_bg.tscn"
+TAKEOVER_PCK_SUFFIX = "_original"     # 통째로 가져온 모드의 원래 리소스 팩: <ID>_original.pck
+TAKEOVER_CODE_DIR = "Original"        # 원래 C# 코드를 넣는 폴더 (<ID>Code/Original)
 
 
-def gen_select_bg_scene(project):
+def gen_select_bg_scene(project, png="char_select_bg.png"):
     """캐릭터 선택 화면 전체 배경: 화면을 꽉 채우는 TextureRect 하나 (비율 유지, 넘치는 곳은 잘림)."""
     mid = project["mod"]["id"]
     return f"""; StS2 모드 메이커가 만든 파일 (캐릭터 선택 화면 배경)
 [gd_scene load_steps=2 format=3]
 
-[ext_resource type="Texture2D" path="res://{mid}/images/charui/char_select_bg.png" id="1_bg"]
+[ext_resource type="Texture2D" path="res://{mid}/images/charui/{png}" id="1_bg"]
 
 [node name="CharSelectBg" type="Control"]
 layout_mode = 3
@@ -2628,20 +2916,20 @@ def gen_localization(project, lang, extras=None):
     files = {n: {} for n in ("cards", "relics", "potions", "powers", "card_keywords", "static_hover_tips",
                              "characters", "ancients")}
     for c in project["cards"]:
-        lid = loc_id(project, c["id"])
+        lid = item_loc_id(project, "card", c)
         files["cards"][f"{lid}.title"] = text(c, "name", lang)
         files["cards"][f"{lid}.description"] = description(project, c, "card", lang)
     for r in project["relics"]:
-        lid = loc_id(project, r["id"])
+        lid = item_loc_id(project, "relic", r)
         files["relics"][f"{lid}.title"] = text(r, "name", lang)
         files["relics"][f"{lid}.description"] = description(project, r, "relic", lang)
         files["relics"][f"{lid}.flavor"] = text(r, "flavor", lang)
     for p in project["potions"]:
-        lid = loc_id(project, p["id"])
+        lid = item_loc_id(project, "potion", p)
         files["potions"][f"{lid}.title"] = text(p, "name", lang)
         files["potions"][f"{lid}.description"] = description(project, p, "potion", lang)
     for pw in project.get("powers", []):
-        lid = power_loc_id(project, pw["id"])
+        lid = item_loc_id(project, "power", pw)
         smart = description(project, pw, "power", lang)
         files["powers"][f"{lid}.title"] = text(pw, "name", lang)
         # 정적 설명(카드 툴팁 등)에는 {Amount}가 없으므로 X로 바꾼다
@@ -2649,11 +2937,11 @@ def gen_localization(project, lang, extras=None):
         files["powers"][f"{lid}.description"] = static or smart.replace("[blue]{Amount}[/blue]", "X").replace("{Amount}", "X")
         files["powers"][f"{lid}.smartDescription"] = smart
     # 복제한 항목: 원본 텍스트의 다른 키(선택 화면 문구 등)도 새 ID 로
-    for key, fname, lid_fn in (("cards", "cards", loc_id), ("relics", "relics", loc_id), ("potions", "potions", loc_id),
-                               ("powers", "powers", power_loc_id)):
+    for key, fname, kind in (("cards", "cards", "card"), ("relics", "relics", "relic"), ("potions", "potions", "potion"),
+                             ("powers", "powers", "power")):
         for it in project.get(key, []):
             extra = (it.get("extra_loc") or {}).get(lang) or (it.get("extra_loc") or {}).get("en" if lang == "ko" else "ko") or {}
-            lid = lid_fn(project, it["id"])
+            lid = item_loc_id(project, kind, it)
             for k, v in extra.items():
                 files[fname].setdefault(f"{lid}.{k}", v)
     ch = project["character"]
@@ -2670,6 +2958,40 @@ def gen_localization(project, lang, extras=None):
             d[f"{lid}.{k}"] = v.replace("{name}", name)
         files["ancients"].update(architect_loc(ch, lid, lang))
     gimmick.localization(project, lang, files, extras or [])
+    base = takeover_loc(project, lang)
+    if base is not None:      # 통째로 가져온 모드: 원래 번역(캐릭터·몬스터·이벤트 등)을 바탕에 깔고 내 항목 번역을 덮어쓴다
+        for name, data in files.items():
+            base.setdefault(name, {}).update(data)
+        files = base
+    for ich in imported_characters(project):
+        lid = ich["loc_id"]
+        chars = files.setdefault("characters", {})
+        orig = ich.get("orig") or {}
+        name = text(ich, "name", lang)
+        if name:
+            chars[f"{lid}.title"] = name
+            if name != text(orig, "name", lang) or f"{lid}.titleObject" not in chars:
+                chars[f"{lid}.titleObject"] = name
+        desc = text(ich, "desc", lang)
+        if desc:
+            chars[f"{lid}.description"] = desc
+        anc = files.setdefault("ancients", {})
+        mine = any((ich.get(f"architect_{lg}") or "").strip() for lg in ("ko", "en", "zh"))
+        pre = f"THE_ARCHITECT.talk.{lid}."
+        if mine:        # 내가 쓴 대사로 바꾼다
+            for k in [k for k in anc if k.startswith(pre)]:
+                del anc[k]
+            anc.update(architect_loc(ich, lid, lang))
+        elif not any(k.startswith(pre) for k in anc):
+            anc.update(architect_loc(ich, lid, lang))     # 원래도 없으면 기본 대사 (없으면 3막 뒤 멈춤)
+    t = takeover(project)
+    if t:
+        # 원래 캐릭터에 아키텍트 대사가 없으면 기본 대사를 넣는다 (없으면 3막 뒤 아키텍트에서 게임이 멈춘다)
+        anc = files.setdefault("ancients", {})
+        for oc in t.get("characters", []):
+            lid = oc.get("loc_id", "")
+            if lid and not any(k.startswith(f"THE_ARCHITECT.talk.{lid}.") for k in anc):
+                anc.update(architect_loc(oc, lid, lang))
     return files
 
 
@@ -2703,22 +3025,35 @@ def _image_output_paths(project, previous=False):
     for card in project.get("cards", []):
         item_id = card.get("id", "")
         if valid_id(item_id) and include_source(card.get("image")):
-            paths.update((f"images/card_portraits/{item_id}.png",
-                          f"images/card_portraits/big/{item_id}.png"))
+            stem = img_stem("card", card)
+            paths.update((f"images/card_portraits/{stem}.png",
+                          f"images/card_portraits/big/{stem}.png"))
     for relic in project.get("relics", []):
         item_id = relic.get("id", "")
         if valid_id(item_id) and include_source(relic.get("image")):
-            paths.update((f"images/relics/{item_id}.png", f"images/relics/{item_id}_outline.png",
-                          f"images/relics/big/{item_id}.png"))
+            stem = img_stem("relic", relic)
+            paths.update((f"images/relics/{stem}.png", f"images/relics/{stem}_outline.png",
+                          f"images/relics/big/{stem}.png"))
     for potion in project.get("potions", []):
         item_id = potion.get("id", "")
         if valid_id(item_id) and include_source(potion.get("image")):
-            paths.update((f"images/potions/{item_id}.png", f"images/potions/outline/{item_id}.png"))
+            stem = img_stem("potion", potion)
+            paths.update((f"images/potions/{stem}.png", f"images/potions/outline/{stem}.png"))
+    for ich in imported_characters(project):
+        for field, suffix in ICHAR_FILES.items():
+            if include_source(ich.get(field)):
+                paths.add(f"images/charui/{ichar_stem(ich)}_{suffix}.png")
+        if include_source(ich.get("combat_image")):
+            for key in ("attack_frames", "hit_frames"):
+                for i, frame in enumerate(ich.get(key, [])):
+                    if include_source(frame.get("image")):
+                        paths.add(f"images/charui/{ichar_stem(ich)}_{key}_{i}.png")
     # Powers receive a generated placeholder when they have no custom image.
     for power in project.get("powers", []):
         item_id = power.get("id", "")
         if valid_id(item_id):
-            paths.update((f"images/powers/{item_id}_power.png", f"images/powers/big/{item_id}_power.png"))
+            stem = img_stem("power", power)
+            paths.update((f"images/powers/{stem}.png", f"images/powers/big/{stem}.png"))
 
     # These features always write either a custom icon or a generated placeholder.
     for pet in PT.pets(project):
@@ -2857,6 +3192,7 @@ def generate(project, out_root, settings=None, log=print):
     finally:
         _EXTRAS_SINK.pop("x", None)
     ch = project["character"]
+    _write_takeover(project, root, code, res, log)
 
     # 현지화 (eng, kor)
     for lang, folder in (("en", "eng"), ("ko", "kor"), ("zh", "zhs")):
@@ -2868,6 +3204,46 @@ def generate(project, out_root, settings=None, log=print):
         _cleanup_stale_image_outputs(old_project, project, res, log)
     log(f"프로젝트 생성 완료: {root}")
     return root
+
+
+def _write_takeover(project, root, code, res, log=print):
+    """통째로 가져온 모드: 원래 C# 코드(항목 파일 제외)·원래 리소스 팩·원래 리소스 폴더를 넣는다."""
+    orig_dir = os.path.join(code, TAKEOVER_CODE_DIR)
+    shutil.rmtree(orig_dir, ignore_errors=True)
+    pck_dst = os.path.join(root, f"{project['mod']['id']}{TAKEOVER_PCK_SUFFIX}.pck")
+    t = takeover(project)
+    if not t:
+        if os.path.isfile(pck_dst):
+            os.remove(pck_dst)
+        return
+    skip = {os.path.normcase(os.path.normpath(p)) for p in t.get("exclude", [])}
+    # 가져온 항목의 원래 파일은 넣지 않는다 (그 클래스는 이 프로그램이 같은 이름으로 다시 만든다)
+    n = 0
+    for dp, _dirs, files in os.walk(t["src"]):
+        for fn in files:
+            if not fn.endswith(".cs"):
+                continue
+            full = os.path.join(dp, fn)
+            rel = os.path.relpath(full, t["src"])
+            if os.path.normcase(os.path.normpath(rel)) in skip:
+                continue
+            dst = os.path.join(orig_dir, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(full, dst)
+            n += 1
+    if n:
+        # 디컴파일한 Godot 클래스는 생성기가 만들던 코드를 이미 품고 있어 partial 이 아니어도 된다 → 그 검사만 끈다
+        _write(os.path.join(orig_dir, ".editorconfig"),
+               "# StS2 모드 메이커: 원래 모드 코드 (디컴파일)\n[*.cs]\ndotnet_diagnostic.GD0001.severity = none\n")
+    if t.get("res_dir") and os.path.isdir(t["res_dir"]):
+        # 소스 프로젝트의 리소스 폴더: 원래 파일을 먼저 깔고 (뒤에서 쓰는 내 파일이 덮어씀)
+        shutil.copytree(t["res_dir"], res, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("*.import", ".godot"))
+    if t.get("pck") and os.path.isfile(t["pck"]):
+        shutil.copyfile(t["pck"], pck_dst)
+    elif os.path.isfile(pck_dst):
+        os.remove(pck_dst)
+    log(f"원래 모드 코드 {n}개 파일을 넣었습니다 ({TAKEOVER_CODE_DIR}/).")
 
 
 def _generate_code(project, code, mid):
@@ -2907,6 +3283,15 @@ def _generate_code(project, code, mid):
         _write(os.path.join(code, "Character", f"{cls}CardPool.cs"), cp)
         _write(os.path.join(code, "Character", f"{cls}RelicPool.cs"), rp)
         _write(os.path.join(code, "Character", f"{cls}PotionPool.cs"), pp)
+    # 통째로 가져온 모드의 캐릭터들 (원래 이름 그대로, 고친 값만 다시 만든다)
+    scenes = os.path.join(os.path.dirname(code), mid, "scenes")
+    for ich in imported_characters(project):
+        _write(os.path.join(code, "Character", f"{ich['class']}.cs"), gen_imported_character(project, ich))
+        scene = os.path.join(scenes, f"{ichar_stem(ich)}_select_bg.tscn")
+        if ich.get("select_bg_image") and os.path.isfile(ich["select_bg_image"]):
+            _write(scene, gen_select_bg_scene(project, f"{ichar_stem(ich)}_select_bg.png"))
+        elif os.path.isfile(scene):
+            os.remove(scene)
 
 
 def _write_images(project, res, ch):
@@ -2938,21 +3323,29 @@ def _write_images(project, res, ch):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             pngmake.write_png(path, w, h, shape, "#ffffff", outline_only=True)
 
+    for ich in imported_characters(project):
+        for field, suffix in ICHAR_FILES.items():
+            if ich.get(field) and os.path.isfile(ich[field]):
+                _copy_img(ich[field], os.path.join(img, "charui", f"{ichar_stem(ich)}_{suffix}.png"))
+
     for c in project["cards"]:
         if c.get("image") and os.path.isfile(c["image"]):
-            _copy_img(c["image"], os.path.join(img, "card_portraits", f"{c['id']}.png"))
-            _copy_img(c["image"], os.path.join(img, "card_portraits", "big", f"{c['id']}.png"))
+            stem = img_stem("card", c)
+            _copy_img(c["image"], os.path.join(img, "card_portraits", f"{stem}.png"))
+            _copy_img(c["image"], os.path.join(img, "card_portraits", "big", f"{stem}.png"))
     for r in project["relics"]:
         if r.get("image") and os.path.isfile(r["image"]):
-            _copy_img(r["image"], os.path.join(img, "relics", f"{r['id']}.png"))
-            _copy_img(r["image"], os.path.join(img, "relics", f"{r['id']}_outline.png"))
-            _copy_img(r["image"], os.path.join(img, "relics", "big", f"{r['id']}.png"))
+            stem = img_stem("relic", r)
+            _copy_img(r["image"], os.path.join(img, "relics", f"{stem}.png"))
+            _copy_img(r["image"], os.path.join(img, "relics", f"{stem}_outline.png"))
+            _copy_img(r["image"], os.path.join(img, "relics", "big", f"{stem}.png"))
     for p in project["potions"]:
         if p.get("image") and os.path.isfile(p["image"]):
-            _copy_img(p["image"], os.path.join(img, "potions", f"{p['id']}.png"))
-            _copy_img(p["image"], os.path.join(img, "potions", "outline", f"{p['id']}.png"))
+            stem = img_stem("potion", p)
+            _copy_img(p["image"], os.path.join(img, "potions", f"{stem}.png"))
+            _copy_img(p["image"], os.path.join(img, "potions", "outline", f"{stem}.png"))
     for pw in project["powers"]:
-        name = f"{pw['id']}_power.png"
+        name = f"{img_stem('power', pw)}.png"
         small, big = os.path.join(img, "powers", name), os.path.join(img, "powers", "big", name)
         if pw.get("image") and os.path.isfile(pw["image"]):
             _copy_img(pw["image"], small)

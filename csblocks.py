@@ -5,8 +5,8 @@
 - 같은 카드나 부모 클래스의 도우미 메서드 (예: BishopPlay -> Hit) 는 안으로 펼친다.
   상수로 고르는 switch (BishopSpell.Strike) 는 그 갈래만 남긴다.
 - 함수 호출 한 줄은 '호출 블록' 하나가 되고, 인수 하나하나가 따로 고칠 수 있는 칸이 된다.
-  수치 칸은 원본 변수 (DynamicVars) / 강화 수치 / 직접 쓴 C# 식으로 알아본다.
-- 알아보지 못한 문장은 원본 코드 블록으로 남겨, 원래 동작이 그대로 유지된다.
+  수치 칸은 원본 변수 (DynamicVars) / 강화 수치 / 직접 입력한 수식으로 알아본다.
+- 지원하지 않는 문장은 직접 코드 블록으로 남겨, 원래 동작이 그대로 유지된다.
 """
 from __future__ import annotations
 
@@ -28,6 +28,22 @@ NUM_TYPES = {"int": "int", "decimal": "decimal", "float": "decimal", "double": "
 PLUMBING = {"choiceContext", "cardPlay", "this", "CombatState", "CombatState!", "base", "null"}
 _ID = re.compile(r"[A-Za-z_@][\w]*")
 _NUM = re.compile(r"^-?\d+(?:\.\d+)?[mMfFdD]?$")
+def call_signature(segs, rhs, aw=False):
+    """호출 사슬과 인수 개수로 프로젝트에 저장할 안정적인 연결 키를 만든다."""
+    parts = []
+    for seg in segs:
+        generic = ""
+        if seg.get("gen"):
+            a, b = seg["gen"]
+            generic = "<" + re.sub(r"\s+", "", rhs[a:b]).replace("global::", "") + ">"
+        if seg.get("args") is None:
+            arity = "-"
+        else:
+            a, b = seg["args"]
+            raw = rhs[a:b]
+            arity = str(len(split_args(raw))) if raw.strip() else "0"
+        parts.append(f"{seg['name']}{generic}/{arity}")
+    return ("await " if aw else "") + ".".join(parts)
 
 
 # ===========================================================================
@@ -522,7 +538,22 @@ def private_names(body):
             mm = re.match(r"\s*(?:\[[^\]]*\]\s*)*(?:\w+\s+)*?[\w.?<>\[\],]+\s+(\w+)\s*(?:[;={]|=>)", head + ";")
             if mm:
                 names.add(mm.group(1))
+        elif re.search(r"\bprivate\s+(?:set|init)\b", mem):
+            # 공개 속성이지만 값 넣기는 그 클래스 안에서만 → 펼친 코드가 값을 넣으면 안 된다
+            mm = re.match(r"\s*(?:\[[^\]]*\]\s*)*(?:\w+\s+)*?[\w.?<>\[\],]+\s+(\w+)\s*(?:[;={]|=>)", head + ";")
+            if mm:
+                names.add("set:" + mm.group(1))
     return names
+
+
+def assigns_any(body, names):
+    """body 가 names 중 하나에 값을 넣는지 (=, +=, ++ 등)."""
+    for n in names:
+        p = r"(?<![\w.])(?:this\s*\.\s*)?" + re.escape(n)
+        if re.search(p + r"\s*(?:[-+*/%&|^]|<<|>>|\?\?)?=(?!=)", body) or re.search(p + r"\s*(?:\+\+|--)", body) or \
+                re.search(r"(?:\+\+|--)\s*(?:this\s*\.\s*)?" + re.escape(n) + r"\b", body):
+            return True
+    return False
 
 
 class ClassChain:
@@ -565,9 +596,10 @@ def _num(text):
 
 
 class Decomposer:
-    def __init__(self, card, chain, class_names=(), max_depth=6):
+    def __init__(self, card, chain, class_names=(), max_depth=6, project=None):
         self.card = card
         self.chain = chain
+        self.project = project
         self.raw_vars = {v["name"]: v for v in card.get("raw_vars", []) if v.get("name")}
         self.classes = class_names if isinstance(class_names, dict) else {}
         self.class_names = set(class_names)
@@ -575,6 +607,9 @@ class Decomposer:
         self.taken = set()
         self.max_depth = max_depth
         self.stack = []
+        # Local aliases let the recognizers understand decompiled code such as
+        # ``var creature = Owner.Creature; ... Apply(..., creature, ...)``.
+        self.aliases = {}
         self.stats = {"calls": 0, "inlined": 0, "folded": 0, "raw": 0}
         self.uid = 0
 
@@ -732,9 +767,49 @@ class Decomposer:
     # ---- 블록 만들기 ----
     def blocks(self, stmts):
         out = []
-        for st in stmts:
-            out += self.node(st)
+        outer_aliases = self.aliases.copy()
+        try:
+            for st in stmts:
+                out += self.node(st)
+        finally:
+            self.aliases = outer_aliases
         return out
+
+    def _remember_alias(self, lhs, rhs):
+        """Track only simple, side-effect-free local values for API recognition."""
+        m = re.fullmatch(r"\s*(?:(?:[\w.?<>\[\],]+\s+)?)([A-Za-z_]\w*)\s*=\s*", lhs)
+        if not m:
+            return
+        name = m.group(1)
+        # A reassignment invalidates aliases which were derived from the old value.
+        doomed = {name}
+        changed = True
+        while changed:
+            changed = False
+            for alias, expr in list(self.aliases.items()):
+                if alias not in doomed and idents(expr) & doomed:
+                    doomed.add(alias)
+                    changed = True
+        for alias in doomed:
+            self.aliases.pop(alias, None)
+        value = rhs.strip().rstrip(";").strip()
+        if not value or name in idents(value):
+            return
+        if re.search(r"\b(?:await|new|throw|delegate|stackalloc)\b|=>|\+\+|--|(?<![=!<>])=(?!=)", value):
+            return
+        # Method calls and object initializers can have side effects; keep them opaque.
+        if re.search(r"\b[A-Za-z_]\w*\s*\(", value) or re.search(r"\b(?:with|is)\s*\{", value):
+            return
+        self.aliases[name] = value
+
+    def _expand_aliases(self, text):
+        value = text or ""
+        for _ in range(8):
+            expanded = rename(value, self.aliases)
+            if expanded == value:
+                break
+            value = expanded
+        return value
 
     def raw(self, code):
         self.stats["raw"] += 1
@@ -840,6 +915,8 @@ class Decomposer:
             return []
         decl = re.match(r"^((?:[\w.?<>\[\],]+\s+)?[A-Za-z_]\w*(?:\.\w+|\[[^\]]*\])*\s*(?:[+\-*/]?=)(?!=|>))\s*(.+);$", code, re.S)
         lhs, rhs = (decl.group(1), decl.group(2)) if decl else ("", code[:-1] if code.endswith(";") else code)
+        if lhs:
+            self._remember_alias(lhs, rhs)
         if lhs:
             nm = re.match(r"^(?:[\w.?<>\[\],]+\s+)?([A-Za-z_]\w*)", lhs)
             if nm:
@@ -982,7 +1059,9 @@ class Decomposer:
                 return None
             if re.search(r"\bbase\s*\.", body):
                 return None
-            if privates & idents(body):
+            if {p for p in privates if not p.startswith("set:")} & idents(body):
+                return None
+            if assigns_any(body, [p[4:] for p in privates if p.startswith("set:")]):
                 return None
         # 인수 -> 매개변수
         env, pre = {}, []
@@ -1125,6 +1204,914 @@ class Decomposer:
         self.stats["calls"] += 1
         return {"op": "src_call", "label": label, "parts": parts, "slots": slots, "args": args}
 
+    def _native_value(self, text):
+        value = self.resolve(self._expand_aliases(text))
+        return value if value is not None else {"t": "src", "code": one_line(text)}
+
+    def _mapped_call(self, signature, segs, rhs, lhs=""):
+        """Use a user's exact-call mapping before the built-in API recognizers."""
+        # Replacing a call whose return value is consumed would drop that value;
+        # keep those as editable call blocks instead.
+        if lhs and lhs.strip():
+            return None
+        if not self.project or not signature:
+            return None
+        rules = self.project.get("call_mappings", [])
+        if not isinstance(rules, list):
+            return None
+        for rule in reversed(rules):
+            if not isinstance(rule, dict) or rule.get("signature") != signature:
+                continue
+            op = rule.get("op")
+            bindings = rule.get("bindings")
+            if not isinstance(bindings, dict):
+                continue
+            try:
+                import blockcode as B
+                if op not in B.MANUAL_MAP_OPS:
+                    continue
+                block = B.new_block(op)
+                spec_args = B.SPECS[op].get("args", {})
+            except (KeyError, TypeError):
+                continue
+            resolved = {}
+            valid = True
+            for field, binding in bindings.items():
+                if field not in spec_args or not isinstance(binding, dict):
+                    valid = False
+                    break
+                if binding.get("kind") == "fixed":
+                    resolved[field] = copy.deepcopy(binding.get("value"))
+                    continue
+                field_kind = spec_args[field][0]
+                if binding.get("kind") != "arg" or field_kind not in ("value", "code"):
+                    valid = False
+                    break
+                try:
+                    si, ai = int(binding.get("segment")), int(binding.get("index"))
+                    if si < 0 or si >= len(segs) or ai < 0 or segs[si].get("args") is None:
+                        raise ValueError
+                    a, b = segs[si]["args"]
+                    raw = rhs[a:b]
+                    spans = split_args(raw)
+                    if ai >= len(spans):
+                        raise ValueError
+                    x, y = spans[ai]
+                    text = raw[x:y]
+                    named = re.match(r"^\w+\s*:(?!:)\s*", text)
+                    if named:
+                        text = text[named.end():]
+                    text = text.strip()
+                    resolved[field] = self._native_value(text) if field_kind == "value" else one_line(text)
+                except (ValueError, TypeError, IndexError):
+                    valid = False
+                    break
+            if not valid:
+                continue
+            block["args"].update(resolved)
+            block["mapped_signature"] = signature
+            mapped_rule = copy.deepcopy(rule)
+            for field, binding in mapped_rule.get("bindings", {}).items():
+                if binding.get("kind") == "arg" and field in resolved:
+                    binding["initial_value"] = copy.deepcopy(resolved[field])
+            block["mapped_rule"] = mapped_rule
+            self.stats["calls"] += 1
+            return block
+        return None
+
+    @staticmethod
+    def _expr_key(text):
+        return re.sub(r"\s+", "", text or "").replace("global::", "").replace("?.", ".").rstrip("!")
+
+    def _native_who(self, text):
+        expr = self._expr_key(self._expand_aliases(text))
+        if expr in {"Me", "Owner.Creature", "cardPlay.Owner.Creature", "choiceContext.Player.Creature"}:
+            return "self"
+        if expr in {"cardPlay.Target", "target", "cardPlay.TargetCreature"}:
+            return "target"
+        return None
+
+    def _native_context(self, text):
+        return self._expr_key(self._expand_aliases(text)) == "choiceContext"
+
+    def _native_player(self, text):
+        return self._expr_key(self._expand_aliases(text)) in {"Owner", "choiceContext.Player", "cardPlay.Owner",
+                                                              "cardPlay.Card.Owner", "Owner.Player"}
+
+    def _native_card_source(self, text):
+        return self._expr_key(self._expand_aliases(text)) in {"this", "(CardModel)this", "cardPlay.Card"}
+
+    def _native_block_amount(self, text):
+        expr = self._expand_aliases(text).strip()
+        m = re.fullmatch(r"new\s+(?:global::)?BlockVar\s*\((.*)\)", expr, re.S)
+        if not m:
+            return self._native_value(text), None
+        spans = split_args(m.group(1))
+        if not spans:
+            return None, None
+        amount = spans[0]
+        prop = self._expr_key(spans[1]) if len(spans) > 1 else None
+        if prop and not prop.startswith("ValueProp."):
+            mode = self._native_damage_mode(spans[1])
+            if isinstance(mode, tuple) and mode[0] == "damage" and not mode[2]:
+                prop = "ValueProp.Move" if mode[1] else "ValueProp.Unpowered"
+            else:
+                return None, None
+        return self._native_value(amount), prop
+
+    def _native_damage_mode(self, text):
+        """Resolve a DynamicVar.Props expression only when its imported definition states the flags."""
+        expr = self._expr_key(self._expand_aliases(text))
+        props = expr if expr.startswith("ValueProp.") else ""
+        if not props:
+            match = re.fullmatch(r"(?:this\.)?DynamicVars(?:\.([A-Za-z_]\w*)|\[\"([A-Za-z_]\w*)\"\])\.Props", expr)
+            if not match:
+                return None
+            var = self.raw_vars.get(match.group(1) or match.group(2))
+            code = (var or {}).get("expr", "")
+            found = re.findall(r"ValueProp\.\w+", code)
+            if not found:
+                return None
+            props = "|".join(found)
+        names = set(props.split("|"))
+        if "ValueProp.Unblockable" in names:
+            if names <= {"ValueProp.Unblockable", "ValueProp.Unpowered"}:
+                return "lose_hp"
+            if names <= {"ValueProp.Unblockable", "ValueProp.Unpowered", "ValueProp.Move"}:
+                return "damage", "ValueProp.Move" in names, True
+            return None
+        if names <= {"ValueProp.Move", "ValueProp.Unpowered"} and names:
+            return "damage", "ValueProp.Move" in names, False
+        if "ValueProp.Unpowered" in names and names <= {"ValueProp.Unpowered"}:
+            return "damage", False, False
+        return None
+
+    def _is_manosaba(self):
+        if not self.project:
+            return False
+        mod_id = (self.project.get("takeover") or {}).get("mod") or \
+            (self.project.get("mod") or {}).get("id", "")
+        return str(mod_id).casefold() == "manosaba"
+
+    def _manosaba_class(self, name):
+        if not self._is_manosaba():
+            return None
+        cls = self.classes.get(name)
+        return cls
+
+    def _class_full(self, name):
+        cls = self.classes.get(name)
+        if cls is not None:
+            return getattr(cls, "full", "") or getattr(cls, "name", "")
+        return ""
+
+    def _native_power_type(self, text):
+        value = str(text or "").strip().replace("global::", "")
+        short = value.rsplit(".", 1)[-1]
+        full = self._class_full(short)
+        if full:
+            return full
+        if "." not in value and re.fullmatch(r"[A-Za-z_]\w*", value):
+            return "MegaCrit.Sts2.Core.Models.Powers." + value
+        return value
+
+    def _power_key_for_type(self, power_type):
+        if not self.project or not power_type:
+            return None
+        import modgen as M
+        wanted = self._expr_key(power_type)
+        matches = []
+        for key, _label in M.power_options(self.project):
+            meta = M.power_meta(self.project, key)
+            full = self._expr_key((meta or {}).get("cls", "")).removeprefix("global::")
+            if full and (full == wanted or full.endswith("." + wanted)):
+                matches.append(key)
+        return matches[0] if len(matches) == 1 else None
+
+    def _native_call(self, head, segs, rhs, aw, lhs=""):
+        """Map well-known effect APIs to this editor's built-in action blocks."""
+        if not segs:
+            return None
+        names = [s["name"] for s in segs]
+        if lhs and self._is_manosaba() and aw and head in (
+                "ConsumeBloodOrbDamageBonus", "SekketsusoujitsuHelper.EvokeNextBloodOrb"):
+            method = segs[-1]
+            if method.get("args") is not None:
+                aa, ab = method["args"]
+                raw_args = rhs[aa:ab]
+                call_args = [raw_args[x:y].strip() for x, y in split_args(raw_args)] if raw_args.strip() else []
+                result = re.fullmatch(r"(?:decimal|var)\s+([A-Za-z_]\w*)\s*=", lhs.strip())
+                valid_args = (len(call_args) == 1 and self._native_context(call_args[0])) if head == "ConsumeBloodOrbDamageBonus" else \
+                    (len(call_args) == 2 and self._native_context(call_args[0]) and self._native_player(call_args[1]))
+                if result and valid_args:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_evoke_blood_orb", "args": {
+                        "result": result.group(1), "player": call_args[1] if len(call_args) > 1 else "Owner"}}
+        if not lhs and self._is_manosaba() and aw and len(segs) == 1 and \
+                head == "RemoveCurrentDeckHandAndDiscardFromCombat" and segs[0].get("args") is not None and \
+                not rhs[segs[0]["args"][0]:segs[0]["args"][1]].strip():
+            self.stats["calls"] += 1
+            return {"op": "manosaba_remove_main_piles", "args": {"player": "Owner"}}
+        if not lhs and self._is_manosaba() and aw and len(segs) == 1 and head == "PlayOwnerAttackAnimAsync" and \
+                segs[0].get("args") is not None and not rhs[segs[0]["args"][0]:segs[0]["args"][1]].strip():
+            self.stats["calls"] += 1
+            return {"op": "manosaba_owner_attack_anim", "args": {}}
+        # DamageCmd.Attack is a fluent builder rather than a two-part call.
+        # Map only the plain card-attack chain; FX/animation/custom modifiers stay intact.
+        if aw and not lhs and len(segs) >= 3 and head == "DamageCmd.Attack" and \
+                all(n in {"DamageCmd", "Attack", "FromCard", "WithHitCount", "WithHitFx", "Targeting",
+                          "TargetingAllOpponents", "TargetingAllOpponentsCompat",
+                          "TargetingRandomOpponents", "Execute"} for n in names) and \
+                names.count("FromCard") == 1 and names.count("Execute") == 1 and names.count("WithHitFx") <= 1:
+            attack = segs[1]
+            source = next((s for s in segs if s["name"] == "FromCard"), None)
+            execute = next((s for s in segs if s["name"] == "Execute"), None)
+            targeting = next((s for s in segs if s["name"] in {
+                "Targeting", "TargetingAllOpponents", "TargetingAllOpponentsCompat",
+                "TargetingRandomOpponents"}), None)
+            hit_fx = next((s for s in segs if s["name"] == "WithHitFx"), None)
+            if attack.get("args") and source and source.get("args") and execute and execute.get("args") and targeting and targeting.get("args") and \
+                    (hit_fx is None or hit_fx.get("args")):
+                aa, ab = attack["args"]
+                ea, eb = execute["args"]
+                sa, sb = source["args"]
+                ta, tb = targeting["args"]
+                amount_args = split_args(rhs[aa:ab])
+                source_args = split_args(rhs[sa:sb])
+                execute_args = split_args(rhs[ea:eb])
+                target_args = split_args(rhs[ta:tb])
+                hit_count = {"t": "num", "v": 1}
+                hit_seg = next((s for s in segs if s["name"] == "WithHitCount"), None)
+                if hit_seg:
+                    if hit_seg.get("args") is None:
+                        return None
+                    ha, hb = hit_seg["args"]
+                    hs = split_args(rhs[ha:hb])
+                    if len(hs) != 1:
+                        return None
+                    h0, h1 = hs[0]
+                    h_expr = self._expand_aliases(rhs[ha + h0:ha + h1]).strip()
+                    h_value = _num(h_expr)
+                    if h_value is not None:
+                        if int(h_value) < 1:
+                            return None
+                        hit_count = {"t": "num", "v": int(h_value)}
+                    else:
+                        hit_count = self._native_value(rhs[ha + h0:ha + h1])
+                if len(amount_args) == 1 and len(source_args) == 1 and len(execute_args) == 1 and \
+                        len(target_args) == 1 and self._native_context(rhs[ea + execute_args[0][0]:ea + execute_args[0][1]]):
+                    s0, s1 = source_args[0]
+                    if not self._native_card_source(rhs[sa + s0:sa + s1]):
+                        return None
+                    t0, t1 = target_args[0]
+                    target_expr = rhs[ta + t0:ta + t1]
+                    target_name = targeting["name"]
+                    if target_name in ("TargetingAllOpponents", "TargetingAllOpponentsCompat"):
+                        combat = self._expr_key(self._expand_aliases(target_expr))
+                        who = "all" if combat in {"CombatState", "this.CombatState", "Me.CombatState"} else None
+                    elif target_name == "TargetingRandomOpponents":
+                        combat = self._expr_key(self._expand_aliases(target_expr))
+                        who = "random" if combat in {"CombatState", "this.CombatState", "Me.CombatState"} else None
+                    else:
+                        who = self._native_who(target_expr)
+                    if who:
+                        a0, a1 = amount_args[0]
+                        vfx = sfx = ""
+                        fx_extra = ""
+                        if hit_fx:
+                            fa, fb = hit_fx["args"]
+                            fx_args = [rhs[fa + x:fa + y].strip() for x, y in split_args(rhs[fa:fb])]
+                            if not 1 <= len(fx_args) <= 5:
+                                return None
+                            vfx = fx_args[0]
+                            sfx = fx_args[1] if len(fx_args) == 2 else ""
+                            if len(fx_args) > 2:
+                                sfx = fx_args[1]
+                                fx_extra = ", ".join(fx_args[2:])
+                        self.stats["calls"] += 1
+                        return {"op": "card_attack", "args": {"who": who,
+                                "amount": self._native_value(rhs[aa + a0:aa + a1]),
+                                "hits": hit_count, "vfx": vfx, "sfx": sfx, "fx_extra": fx_extra}}
+
+        if not lhs and aw and self._manosaba_class("GunBase") and head == "ExecuteGunAttack" and len(segs) == 1:
+            method = segs[0]
+            if method.get("args"):
+                a, b = method["args"]
+                raw = rhs[a:b]
+                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
+                if len(args) == 3 and self._native_context(args[0]):
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_gun_attack", "args": {"target": args[1], "amount": self._native_value(args[2])}}
+
+        # Native utility APIs provided by the attached Manosaba mod.
+        if not lhs and self._manosaba_class("KotodamaEnergy") and head == "KotodamaEnergy.Gain" and len(segs) == 2:
+            method = segs[1]
+            if method.get("args"):
+                a, b = method["args"]
+                raw = rhs[a:b]
+                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
+                if len(args) == 2 and self._native_player(args[0]):
+                    self.stats["calls"] += 1
+                    return {"op": "kotodama_gain", "args": {"amount": self._native_value(args[1])}}
+
+        if not lhs and self._manosaba_class("SakurabaEmaDogCmd") and aw and head == "SakurabaEmaDogCmd.Summon" and len(segs) == 2:
+            method = segs[1]
+            if method.get("args"):
+                a, b = method["args"]
+                raw = rhs[a:b]
+                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
+                if len(args) == 4 and self._native_context(args[0]) and self._native_player(args[1]) and \
+                        self._expr_key(self._expand_aliases(args[3])) in {"this", "Me"}:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_ema_summon", "args": {"amount": self._native_value(args[2])}}
+
+        if not lhs and self._manosaba_class("NovelSettingMonsterCmd") and aw and \
+                head == "NovelSettingMonsterCmd.Summon" and len(segs) == 2:
+            method = segs[1]
+            if method.get("gen") and method.get("args"):
+                ga, gb = method["gen"]
+                generic = rhs[ga:gb].strip().replace("global::", "")
+                short = generic.rsplit(".", 1)[-1]
+                full = self._class_full(short)
+                a, b = method["args"]
+                raw = rhs[a:b]
+                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
+                if full and len(args) in (3, 4) and self._native_context(args[0]) and self._native_player(args[1]) and \
+                        self._expr_key(self._expand_aliases(args[2])) in {"this", "Me"}:
+                    amount = self._native_value(args[3]) if len(args) == 4 else {"t": "num", "v": 1}
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_novel_summon", "args": {"monster": full, "amount": amount}}
+
+        if not lhs and self._manosaba_class("ShitoCombustOperations") and len(segs) == 2 and \
+                head in ("ShitoCombustOperations.ApplyIgniteToCard", "ShitoCombustOperations.AttachCombust"):
+            method = segs[1]
+            if method.get("args") and (aw == (method["name"] == "ApplyIgniteToCard")):
+                a, b = method["args"]
+                raw = rhs[a:b]
+                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
+                is_ignite = method["name"] == "ApplyIgniteToCard"
+                target_idx, amount_idx = (1, 2) if is_ignite else (0, 1)
+                valid = len(args) == (3 if is_ignite else 2)
+                if is_ignite:
+                    valid = valid and self._native_context(args[0])
+                card_expr = args[target_idx] if valid else ""
+                valid = valid and bool(re.fullmatch(r"(?:(?:\([\w.?<>]+\))\s*)?(?:this|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*!?)", card_expr.strip()))
+                if valid:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_ignite" if is_ignite else "manosaba_attach_combust",
+                            "args": {"card": card_expr.strip(), "amount": self._native_value(args[amount_idx])}}
+
+        if not lhs and self._manosaba_class("ManosabaVfxCmd") and len(segs) == 2 and \
+                head.startswith("ManosabaVfxCmd.PlaySceneAtCombat"):
+            method_name = segs[1]["name"]
+            method_args = segs[1].get("args")
+            modes = {"PlaySceneAtCombatCenter", "PlaySceneAtCombatCenterAndWait",
+                     "PlaySceneAtCombatViewportPosition", "PlaySceneAtCombatViewportPositionAndWait"}
+            if method_name in modes and method_args and aw == method_name.endswith("AndWait"):
+                aa, ab = method_args
+                raw_args = rhs[aa:ab]
+                raw_parts = [raw_args[x:y].strip() for x, y in split_args(raw_args)] if raw_args.strip() else []
+                positional, named = [], {}
+                for part in raw_parts:
+                    match = re.fullmatch(r"(\w+)\s*:\s*(.+)", part, re.S)
+                    if match:
+                        named[match.group(1)] = match.group(2).strip()
+                    else:
+                        positional.append(part)
+                viewport = "ViewportPosition" in method_name
+                params = dict(named)
+                order = (["scenePath", "normalizedX", "normalizedY", "offsetX", "offsetY",
+                          "fitCoverViewport", "spriteNodeNames", "timeoutSeconds"] if viewport else
+                         ["scenePath", "fitCoverViewport", "spriteNodeNames", "timeoutSeconds"])
+                pos_index = 0
+                for param in order:
+                    if param in params:
+                        continue
+                    if pos_index < len(positional):
+                        params[param] = positional[pos_index]
+                        pos_index += 1
+                if params.get("scenePath") and (not viewport or "normalizedY" in params):
+                    scene = params["scenePath"]
+                    x = params.get("normalizedX", "0.5f")
+                    y = params.get("normalizedY", "0.5f")
+                    offset_x = params.get("offsetX", "0f")
+                    offset_y = params.get("offsetY", "0f")
+                    fit = params.get("fitCoverViewport", "false")
+                    sprite_nodes = params.get("spriteNodeNames", "null")
+                    timeout = params.get("timeoutSeconds", "30f")
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_scene_vfx", "args": {"mode": method_name, "scene": scene,
+                            "x": x, "y": y, "offset_x": offset_x, "offset_y": offset_y,
+                            "fit_cover": fit, "sprite_nodes": sprite_nodes,
+                            "timeout": self._native_value(timeout)}}
+
+        if not lhs and self._manosaba_class("ManosabaVideoCmd") and aw is False and len(segs) == 2 and \
+                head == "ManosabaVideoCmd.PlayFullscreenOneShot" and segs[1].get("args"):
+            aa, ab = segs[1]["args"]
+            raw_args = rhs[aa:ab]
+            raw_parts = [raw_args[x:y].strip() for x, y in split_args(raw_args)] if raw_args.strip() else []
+            positional, named = [], {}
+            for part in raw_parts:
+                match = re.fullmatch(r"(\w+)\s*:\s*(.+)", part, re.S)
+                if match:
+                    named[match.group(1)] = match.group(2).strip()
+                else:
+                    positional.append(part)
+            if positional:
+                self.stats["calls"] += 1
+                return {"op": "manosaba_video", "args": {"video": positional[0],
+                        "chroma_key": named.get("chromaKeyGreen", positional[1] if len(positional) > 1 else "false")}}
+
+        if not lhs and self._manosaba_class("ManosabaCombatCmd") and aw and len(segs) == 2 and \
+                head == "ManosabaCombatCmd.ForceWinWithoutDeathOrEscape" and segs[1].get("args"):
+            aa, ab = segs[1]["args"]
+            raw_args = rhs[aa:ab]
+            args = [raw_args[x:y].strip() for x, y in split_args(raw_args)] if raw_args.strip() else []
+            if len(args) == 1:
+                self.stats["calls"] += 1
+                return {"op": "manosaba_force_win", "args": {"combat_state": args[0]}}
+
+        # Shared card/potion APIs and the source mod's own APIs are promoted to
+        # Maker blocks so imported effects remain editable across different mods.
+        if not lhs and len(segs) >= 2:
+            method = segs[-1]
+            method_name = method["name"]
+            call_args = []
+            if method.get("args") is not None:
+                aa, ab = method["args"]
+                raw_args = rhs[aa:ab]
+                call_args = [raw_args[x:y].strip() for x, y in split_args(raw_args)] if raw_args.strip() else []
+
+            def call_receiver(seg):
+                prefix = rhs[:seg["start"]].rstrip()
+                null_safe = prefix.endswith("?.")
+                if null_safe:
+                    prefix = prefix[:-2].rstrip()
+                elif prefix.endswith("."):
+                    prefix = prefix[:-1].rstrip()
+                return prefix, null_safe
+
+            if self._manosaba_class("DyingMessagePower") and method_name == "Upgrade" and not aw and not call_args and \
+                    head.endswith(".Upgrade"):
+                receiver, null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_dying_message_upgrade", "args": {
+                        "power": receiver, "null_safe": null_safe}}
+
+            if self._is_manosaba() and method_name == "AfterSideTurnStart" and aw and len(call_args) == 3 and \
+                    head.endswith(".AfterSideTurnStart"):
+                receiver, _null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_run_side_turn_effect", "args": {
+                        "power": receiver, "side": call_args[0], "creatures": call_args[1], "state": call_args[2]}}
+
+            if head.endswith(".EnergyCost.SetThisTurnOrUntilPlayed") and not aw and len(call_args) == 1:
+                receiver, _null_safe = call_receiver(method)
+                card_expr = receiver.removesuffix(".EnergyCost")
+                if card_expr:
+                    self.stats["calls"] += 1
+                    return {"op": "card_set_cost_until_played", "args": {
+                        "card": card_expr, "amount": self._native_value(call_args[0])}}
+
+            if method_name == "SetToFreeThisTurn" and not aw and not call_args:
+                receiver, _null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "card_free_this_turn", "args": {"card": receiver}}
+
+            if method_name == "InvokeEnergyCostChanged" and not aw and not call_args:
+                receiver, _null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "card_notify_cost_changed", "args": {"card": receiver}}
+
+            if method_name in ("UpgradeInternal", "FinalizeUpgradeInternal") and not aw and not call_args:
+                receiver, _null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    op = "card_upgrade_internal" if method_name == "UpgradeInternal" else "card_finalize_upgrade_internal"
+                    return {"op": op, "args": {"card": receiver}}
+
+            if self._is_manosaba() and head in ("FanServiceSkillButtonUi.EnsureShown", "CouldItBeThatSkillButtonUi.EnsureShown") and \
+                    not aw and len(call_args) == 1:
+                button = "FanService" if head.startswith("FanService") else "CouldItBeThatSkill"
+                self.stats["calls"] += 1
+                return {"op": "manosaba_show_button", "args": {"button": button, "player": call_args[0]}}
+
+            if self._is_manosaba() and head.endswith(".OnDuplicateCardPlayed") and not aw and not call_args:
+                receiver, _null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_power_duplicate_callback", "args": {"power": receiver}}
+
+            if self._is_manosaba() and head == "PetEnemyAiPower.AssignAiSlot" and not aw and len(call_args) in (1, 2):
+                self.stats["calls"] += 1
+                return {"op": "manosaba_pet_ai_assign", "args": {
+                    "pet": call_args[0], "copy_from": call_args[1] if len(call_args) == 2 else "null"}}
+
+            if self._is_manosaba() and head == "PetEnemyAiPower.TryAdvanceToValidMove" and not aw and len(call_args) == 2:
+                self.stats["calls"] += 1
+                return {"op": "manosaba_pet_ai_advance", "args": {"pet": call_args[0], "targets": call_args[1]}}
+
+            if self._is_manosaba() and method_name == "ToggleIsInteractable" and not aw and len(call_args) == 1 and \
+                    head.endswith(".ToggleIsInteractable"):
+                interactable = re.sub(r"^on\s*:\s*", "", call_args[0]).strip()
+                if interactable in ("true", "false"):
+                    receiver, _null_safe = call_receiver(method)
+                    if receiver:
+                        self.stats["calls"] += 1
+                        return {"op": "manosaba_toggle_creature_node", "args": {
+                            "node": receiver, "interactable": interactable}}
+
+            if head == "Owner.AddPotionInternal" and not aw and len(call_args) == 2:
+                self.stats["calls"] += 1
+                return {"op": "potion_add_model_at", "args": {
+                    "potion": call_args[0], "player": "Owner", "slot": call_args[1]}}
+
+            if self._is_manosaba() and method_name == "Discard" and head.endswith(".Discard") and not aw and not call_args:
+                receiver, _null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "potion_discard", "args": {"potion": receiver}}
+
+            if self._is_manosaba() and head == "OrbGapChannelHelper.ChannelAt" and aw and len(call_args) == 4 and \
+                    self._native_context(call_args[0]) and self._native_player(call_args[2]):
+                self.stats["calls"] += 1
+                return {"op": "manosaba_channel_orb_at", "args": {
+                    "orb": call_args[1], "player": call_args[2], "insert_index": self._native_value(call_args[3])}}
+
+            if self._is_manosaba() and head == f"ManosabaKeywords.{method_name}" and aw and \
+                    method_name in ("ResolveLowStance", "ResolveMidStance", "ResolveHighStance") and len(call_args) == 3:
+                self.stats["calls"] += 1
+                return {"op": "manosaba_resolve_stance", "args": {
+                    "stance": method_name.removeprefix("Resolve").removesuffix("Stance"),
+                    "owner": call_args[0], "applier": call_args[1], "source": call_args[2]}}
+
+            if self._is_manosaba() and head == "NovelSettingNoahFriendsSfx.TryPlay" and \
+                    method_name == "TryPlay" and not aw and not call_args:
+                self.stats["calls"] += 1
+                return {"op": "manosaba_novel_friends_sfx", "args": {}}
+
+            if self._is_manosaba() and head == f"NanokaHelper.{method_name}" and method_name in \
+                    ("PlayGunFireSfx", "PlayAWPSfx") and not aw and len(call_args) <= 1:
+                path, default_volume = (("event:/Manosaba/audio/SFX/gun_shot.ogg", 5) if method_name == "PlayGunFireSfx"
+                                        else ("event:/Manosaba/audio/SFX/AWP.mp3", 3))
+                volume = self._native_value(call_args[0]) if call_args else {"t": "num", "v": default_volume}
+                self.stats["calls"] += 1
+                return {"op": "sfx", "args": {"path": f'"{path}"', "volume": volume}}
+
+            if self._manosaba_class("BloodOrb") and method_name == "AddLayers" and not aw and len(call_args) == 1:
+                receiver, _null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_add_layers", "args": {
+                        "orb": receiver, "amount": self._native_value(call_args[0])}}
+
+            if self._manosaba_class("WitchesCauldron") and method_name == "AddFirepower" and not aw and len(call_args) == 1:
+                receiver, _null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_add_firepower", "args": {
+                        "relic": receiver, "amount": self._native_value(call_args[0])}}
+
+            if self._manosaba_class("WitchesCauldron") and method_name == "MaximizeFirepower" and not aw and not call_args:
+                receiver, null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_maximize_firepower", "args": {
+                        "relic": receiver, "null_safe": null_safe}}
+
+            if self._manosaba_class("ManosabaTemporaryStrengthPower") and method_name == "IgnoreNextInstance" and \
+                    not aw and not call_args:
+                receiver, null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": "manosaba_ignore_next_instance", "args": {
+                        "power": receiver, "null_safe": null_safe}}
+
+            setter_models = {
+                "SetPartner": ("LifelongFriendPower", "manosaba_set_partner", "partner"),
+                "SetApplier": ("MemorySharingPower", "manosaba_set_applier", "applier"),
+                "SetTarget": ("MusouKenPower", "manosaba_set_target", "target"),
+                "SetSourceCard": ("MusouKenPower", "manosaba_set_source_card", "source"),
+                "SetUpgraded": ("MemorySharingPower", "manosaba_set_upgraded", "upgraded"),
+            }
+            setter = setter_models.get(method_name)
+            if setter and self._manosaba_class(setter[0]) and not aw and len(call_args) == 1:
+                receiver, null_safe = call_receiver(method)
+                if receiver:
+                    self.stats["calls"] += 1
+                    return {"op": setter[1], "args": {
+                        "power": receiver, setter[2]: call_args[0], "null_safe": null_safe}}
+
+        if len(segs) != 2 or (not aw and head not in ("SfxCmd.Play", "VfxCmd.PlayOnCreature", "CardCmd.Upgrade", "CardCmd.ApplyKeyword",
+                                                       "CardCmd.RemoveKeyword", "CardCmd.Preview", "CardCmd.PreviewCardPileAdd",
+                                                       "PlayerCmd.EndTurn") and not head.endswith(".AddKeyword")):
+            return None
+        method = segs[1]
+        if method["args"] is None:
+            return None
+        a, b = method["args"]
+        raw = rhs[a:b]
+        args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
+
+        def block(op, **values):
+            self.stats["calls"] += 1
+            return {"op": op, "args": values}
+
+        def target_amount(target_index, amount_index):
+            if len(args) <= max(target_index, amount_index):
+                return None
+            who = self._native_who(args[target_index])
+            return (who, self._native_value(args[amount_index])) if who else None
+
+        # Additional common effect commands whose arguments are best edited as
+        # Maker fields rather than retained as a raw call string.
+        if not lhs and len(segs) == 2 and method.get("args"):
+            a, b = method["args"]
+            raw = rhs[a:b]
+            call_args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
+            if not aw and head == "SfxCmd.Play" and len(call_args) == 2:
+                self.stats["calls"] += 1
+                return {"op": "sfx", "args": {"path": call_args[0], "volume": self._native_value(call_args[1])}}
+            if aw and head == "Cmd.Wait" and len(call_args) == 1:
+                self.stats["calls"] += 1
+                return {"op": "wait", "args": {"duration": self._native_value(call_args[0])}}
+            if aw and head == "Cmd.CustomScaledWait" and len(call_args) == 2:
+                self.stats["calls"] += 1
+                return {"op": "wait_scaled", "args": {"minimum": call_args[0], "maximum": call_args[1]}}
+            if aw and head == "CreatureCmd.TriggerAnim" and len(call_args) == 3:
+                self.stats["calls"] += 1
+                return {"op": "trigger_creature_anim", "args": {"creature": call_args[0],
+                        "animation": call_args[1], "delay": call_args[2]}}
+            if not aw and head == "VfxCmd.PlayOnCreature" and len(call_args) == 2:
+                self.stats["calls"] += 1
+                return {"op": "play_vfx_on_creature", "args": {"creature": call_args[0], "vfx": call_args[1]}}
+            if aw and head == "DoomPower.DoomKill" and len(call_args) == 1:
+                self.stats["calls"] += 1
+                return {"op": "doom_kill", "args": {"creatures": call_args[0]}}
+            if aw and head == "CardCmd.Exhaust" and len(call_args) in (2, 3, 4) and self._native_context(call_args[0]):
+                flags = call_args[2:]
+                if all(x in ("true", "false") for x in flags):
+                    flags += ["false"] * (2 - len(flags))
+                    self.stats["calls"] += 1
+                    return {"op": "card_exhaust", "args": {"card": call_args[1],
+                            "played": flags[0] == "true", "triggered": flags[1] == "true"}}
+            if not aw and head == "CardCmd.Upgrade" and len(call_args) in (1, 2):
+                self.stats["calls"] += 1
+                return {"op": "card_upgrade", "args": {"card": call_args[0],
+                        "style": call_args[1] if len(call_args) == 2 else ""}}
+            if not aw and head in ("CardCmd.ApplyKeyword", "CardCmd.RemoveKeyword") and len(call_args) == 2 and \
+                    re.fullmatch(r"CardKeyword\.\w+", self._expr_key(call_args[1])):
+                self.stats["calls"] += 1
+                return {"op": "card_keyword", "args": {"card": call_args[0],
+                        "keyword": self._expr_key(call_args[1]).split(".")[-1],
+                        "action": "add" if head.endswith("ApplyKeyword") else "remove"}}
+            if not aw and head.endswith(".AddKeyword") and len(call_args) == 1:
+                self.stats["calls"] += 1
+                return {"op": "card_add_keyword_model", "args": {"card": head.rsplit(".", 1)[0],
+                        "keyword": call_args[0]}}
+            if not aw and head == "CardCmd.Preview" and 1 <= len(call_args) <= 2:
+                self.stats["calls"] += 1
+                return {"op": "card_preview_cards", "args": {"cards": call_args[0],
+                        "scale": call_args[1] if len(call_args) == 2 else ""}}
+            if not aw and head == "CardCmd.PreviewCardPileAdd" and 1 <= len(call_args) <= 3:
+                self.stats["calls"] += 1
+                return {"op": "card_preview", "args": {"cards": call_args[0],
+                        "scale": self._native_value(call_args[1]) if len(call_args) >= 2 else {"t": "num", "v": 1},
+                        "style": call_args[2] if len(call_args) >= 3 else "CardPreviewStyle.Default"}}
+            if not aw and head == "PlayerCmd.EndTurn" and len(call_args) in (1, 2):
+                player = call_args[0]
+                can_back_out = "false"
+                if len(call_args) == 2:
+                    named = re.fullmatch(r"canBackOut\s*:\s*(.+)", call_args[1])
+                    can_back_out = named.group(1).strip() if named else call_args[1]
+                self.stats["calls"] += 1
+                return {"op": "end_turn", "args": {"player": player, "can_back_out": can_back_out}}
+            if aw and head == "CardCmd.AutoPlay" and len(call_args) >= 3 and len(call_args) <= 6 and self._native_context(call_args[0]):
+                auto_type = "AutoPlayType.Default"
+                skip_x = skip_visuals = "false"
+                if len(call_args) >= 4:
+                    auto_type = call_args[3]
+                if len(call_args) >= 5:
+                    named = re.fullmatch(r"skipXCapture\s*:\s*(.+)", call_args[4])
+                    skip_x = named.group(1).strip() if named else call_args[4]
+                if len(call_args) >= 6:
+                    named = re.fullmatch(r"skipCardPileVisuals\s*:\s*(.+)", call_args[5])
+                    skip_visuals = named.group(1).strip() if named else call_args[5]
+                self.stats["calls"] += 1
+                return {"op": "card_autoplay", "args": {"card": call_args[1], "target": call_args[2],
+                        "type": auto_type, "skip_x": skip_x, "skip_visuals": skip_visuals}}
+            if aw and head == "CardCmd.Discard" and len(call_args) == 2 and self._native_context(call_args[0]):
+                self.stats["calls"] += 1
+                return {"op": "card_discard", "args": {"cards": call_args[1]}}
+            if aw and head == "CardPileCmd.AddGeneratedCardToCombat" and len(call_args) == 3 and \
+                    self._expr_key(call_args[1]).startswith("PileType.") and self._native_player(call_args[2]):
+                pile = self._expr_key(call_args[1]).split(".")[-1]
+                if pile in {"Hand", "Draw", "Discard"}:
+                    self.stats["calls"] += 1
+                    return {"op": "card_add_generated", "args": {"card": call_args[0], "pile": pile}}
+            if aw and head == "CardPileCmd.Add" and 2 <= len(call_args) <= 5 and \
+                    self._expr_key(call_args[1]).startswith("PileType."):
+                extra = ", ".join(call_args[2:])
+                self.stats["calls"] += 1
+                return {"op": "card_add_pile", "args": {"cards": call_args[0], "pile": call_args[1], "extra": extra}}
+            if aw and head == "CardPileCmd.AddGeneratedCardsToCombat" and len(call_args) == 4 and \
+                    self._expr_key(call_args[1]).startswith("PileType."):
+                self.stats["calls"] += 1
+                return {"op": "card_add_generated_many", "args": {"cards": call_args[0], "pile": call_args[1],
+                        "player": call_args[2], "position": call_args[3]}}
+            if aw and head == "CardPileCmd.RemoveFromCombat" and len(call_args) == 1:
+                self.stats["calls"] += 1
+                return {"op": "card_remove_combat", "args": {"cards": call_args[0]}}
+            if aw and head == "CardPileCmd.Shuffle" and len(call_args) == 2 and self._native_context(call_args[0]):
+                self.stats["calls"] += 1
+                return {"op": "shuffle_draw_pile", "args": {"player": call_args[1]}}
+            if aw and head == "CardPileCmd.AutoPlayFromDrawPile" and len(call_args) == 5 and \
+                    self._native_context(call_args[0]):
+                force_exhaust = call_args[4]
+                named_force = re.fullmatch(r"forceExhaust\s*:\s*(.+)", force_exhaust)
+                if named_force:
+                    force_exhaust = named_force.group(1).strip()
+                self.stats["calls"] += 1
+                return {"op": "autoplay_draw_pile", "args": {"player": call_args[1],
+                        "count": self._native_value(call_args[2]), "position": call_args[3],
+                        "force_exhaust": force_exhaust}}
+            if aw and head == "CreatureCmd.Stun" and len(call_args) == 1:
+                self.stats["calls"] += 1
+                return {"op": "stun", "args": {"creature": call_args[0]}}
+            if aw and head == "PotionCmd.TryToProcure" and method.get("gen") and len(call_args) == 1:
+                ga, gb = method["gen"]
+                self.stats["calls"] += 1
+                return {"op": "potion_add_type", "args": {"potion_type": rhs[ga:gb].strip(),
+                        "player": call_args[0]}}
+            if aw and head == "PotionCmd.TryToProcure" and not method.get("gen") and len(call_args) == 2:
+                self.stats["calls"] += 1
+                return {"op": "potion_add_model", "args": {"potion": call_args[0], "player": call_args[1]}}
+            if aw and head == "CardCmd.TransformTo" and method.get("gen") and len(call_args) == 1:
+                ga, gb = method["gen"]
+                self.stats["calls"] += 1
+                return {"op": "card_transform_to", "args": {"card_type": rhs[ga:gb].strip(),
+                        "card": call_args[0]}}
+            if aw and head == "PowerCmd.ModifyAmount" and len(call_args) == 5 and self._native_context(call_args[0]) and \
+                    self._native_who(call_args[3]) == "self" and self._native_card_source(call_args[4]):
+                self.stats["calls"] += 1
+                return {"op": "modify_power_amount", "args": {"power": call_args[1],
+                        "amount": self._native_value(call_args[2])}}
+            if aw and head == "CreatureCmd.SetCurrentHp" and len(call_args) == 2:
+                self.stats["calls"] += 1
+                return {"op": "set_current_hp", "args": {"creature": call_args[0],
+                        "amount": self._native_value(call_args[1])}}
+            if aw and head == "OrbCmd.AddSlots" and len(call_args) == 2:
+                self.stats["calls"] += 1
+                return {"op": "orb_slots_to", "args": {"player": call_args[0],
+                        "amount": self._native_value(call_args[1])}}
+            if aw and head == "OrbCmd.Channel" and method.get("gen") and len(call_args) == 2 and \
+                    self._native_context(call_args[0]):
+                ga, gb = method["gen"]
+                self.stats["calls"] += 1
+                return {"op": "orb_channel_type", "args": {"orb_type": rhs[ga:gb].strip(),
+                        "player": call_args[1]}}
+            if aw and head == "OrbCmd.EvokeNext" and len(call_args) == 2 and \
+                    self._native_context(call_args[0]) and self._native_player(call_args[1]):
+                self.stats["calls"] += 1
+                return {"op": "evoke", "args": {"which": "front", "count": {"t": "num", "v": 1}}}
+            if aw and head == "OrbCmd.Passive" and len(call_args) == 3 and self._native_context(call_args[0]):
+                self.stats["calls"] += 1
+                return {"op": "orb_passive_model", "args": {"orb": call_args[1], "target": call_args[2]}}
+            if aw and head == "OrbCmd.Channel" and len(call_args) == 3 and self._native_context(call_args[0]) and \
+                    self._native_player(call_args[2]):
+                self.stats["calls"] += 1
+                return {"op": "orb_channel_model", "args": {"orb": call_args[1]}}
+            if aw and head == "PowerCmd.Remove" and len(call_args) == 1:
+                self.stats["calls"] += 1
+                return {"op": "remove_power_model", "args": {"power": call_args[0]}}
+            if aw and head == "PlayerCmd.LoseGold" and len(call_args) == 3:
+                self.stats["calls"] += 1
+                return {"op": "lose_gold", "args": {"amount": self._native_value(call_args[0]),
+                        "player": call_args[1], "loss_type": call_args[2]}}
+
+        if head == "CreatureCmd.GainBlock" and len(args) in (3, 4):
+            who = self._native_who(args[0])
+            amount, wrapped_prop = self._native_block_amount(args[1])
+            prop_expr = next((x for x in args[2:] if self._expr_key(x).startswith("ValueProp.") or
+                              self._expr_key(x).endswith(".Props")), "")
+            prop = wrapped_prop or ""
+            if prop_expr:
+                prop_key = self._expr_key(prop_expr)
+                prop = prop_key if prop_key.startswith("ValueProp.") else ""
+                mode = self._native_damage_mode(prop_expr)
+                if not prop and isinstance(mode, tuple) and mode[0] == "damage" and not mode[2]:
+                    prop = "ValueProp.Move" if mode[1] else "ValueProp.Unpowered"
+            extra = [self._expr_key(x) for x in args[2:]
+                     if self._expr_key(x) != (self._expr_key(prop_expr) if prop_expr else "")]
+            if wrapped_prop:
+                extra = [self._expr_key(x) for x in args[2:]]
+            if amount is not None and prop in ("", "ValueProp.Move", "ValueProp.Unpowered") and \
+                    all(x in ("choiceContext", "cardPlay", "null", "this") for x in extra):
+                if who == "self" and (prop == "ValueProp.Move" or (not prop and len(args) == 3 and extra == ["cardPlay"])):
+                    return block("block", amount=amount)
+                powered = prop == "ValueProp.Move" or (not prop and "cardPlay" in extra)
+                return block("block_to", creature=args[0], amount=amount, powered=powered,
+                             card_play="cardPlay" in extra)
+
+        if head == "CreatureCmd.Damage" and len(args) in (5, 6, 7):
+            who = self._native_who(args[1])
+            amount = self._native_value(args[2])
+            mode = self._native_damage_mode(args[3])
+            if (mode and isinstance(mode, tuple) and mode[0] == "damage") or mode == "lose_hp":
+                if self._native_context(args[0]) and who and len(args) == 7 and self._native_who(args[4]) == "self" and \
+                        self._native_card_source(args[5]) and self._expr_key(self._expand_aliases(args[6])) in ("cardPlay", "null") and \
+                        not (isinstance(mode, tuple) and mode[2]):
+                    if mode == "lose_hp":
+                        return block("lose_hp", who=who, amount=amount)
+                    return block("damage", who=who, amount=amount, hits=1, powered=mode[1])
+                return block("damage_to", creature=args[1], amount=amount,
+                             powered=isinstance(mode, tuple) and mode[1],
+                             unblockable=mode == "lose_hp" or (isinstance(mode, tuple) and mode[2]),
+                             attacker=args[4], source_card=args[5] if len(args) >= 6 else "",
+                             card_play=args[6] if len(args) >= 7 else "", context=args[0])
+
+        if head == "CreatureCmd.LoseBlock" and len(args) == 4 and self._native_context(args[0]):
+            pair = target_amount(1, 2)
+            if pair and self._expr_key(args[3]) in {"this", "Me", "Owner.Creature", "null"}:
+                who, amount = pair
+                return block("lose_block", who=who, amount=amount)
+
+        if head == "CreatureCmd.LoseBlock" and len(args) == 2:
+            return block("lose_block_to", creature=args[0], amount=self._native_value(args[1]))
+
+        if head == "CreatureCmd.Kill" and len(args) == 1:
+            return block("kill_creature", creature=args[0])
+
+        if head == "CreatureCmd.Heal" and len(args) == 2:
+            pair = target_amount(0, 1)
+            if pair:
+                who, amount = pair
+                return block("heal", who=who, amount=amount)
+            return block("heal_to", creature=args[0], amount=self._native_value(args[1]))
+
+        if head in ("CreatureCmd.LoseHp", "CreatureCmd.GainMaxHp") and len(args) == 3 and self._native_context(args[0]):
+            pair = target_amount(1, 2)
+            if pair:
+                who, amount = pair
+                if head == "CreatureCmd.LoseHp":
+                    return block("lose_hp", who=who, amount=amount)
+                if who == "self":
+                    return block("max_hp", amount=amount)
+
+        if head == "CreatureCmd.GainMaxHp" and len(args) == 2 and self._native_who(args[0]) == "self":
+            return block("max_hp", amount=self._native_value(args[1]))
+
+        if head == "CardPileCmd.Draw" and len(args) == 3 and self._native_context(args[0]):
+            if self._native_player(args[2]):
+                return block("draw", amount=self._native_value(args[1]))
+            return block("draw_to", amount=self._native_value(args[1]), player=args[2])
+
+        if head in ("PlayerCmd.GainEnergy", "PlayerCmd.GainGold", "PlayerCmd.GainStars") and len(args) == 2:
+            op = {"PlayerCmd.GainEnergy": "energy", "PlayerCmd.GainGold": "gold",
+                  "PlayerCmd.GainStars": "stars"}[head]
+            if self._native_player(args[1]):
+                return block(op, amount=self._native_value(args[0]))
+            if op == "energy":
+                return block("energy_to", amount=self._native_value(args[0]), player=args[1])
+            if op == "gold":
+                return block("gold_to", amount=self._native_value(args[0]), player=args[1])
+
+        if head == "PlayerCmd.AddPet" and len(args) == 2:
+            return block("add_pet_model", pet=args[0], player=args[1])
+
+        if head == "PowerCmd.Apply" and method["gen"] and len(args) == 5 and self._native_context(args[0]):
+            generic = rhs[method["gen"][0]:method["gen"][1]].strip()
+            return block("power_apply_type", creature=args[1], power_type=self._native_power_type(generic),
+                         amount=self._native_value(args[2]), applier=args[3], source=args[4])
+
+        if head == "PowerCmd.Apply" and not method["gen"] and len(args) == 6 and self._native_context(args[0]):
+            return block("power_apply_model", power=args[1], creature=args[2], amount=self._native_value(args[3]),
+                         applier=args[4], source=args[5])
+
+        silent = False
+        apply_args = args
+        if head == "CommonActions.Apply" and len(args) == 5:
+            m = re.fullmatch(r"silent\s*:\s*(true|false)", args[4])
+            if m:
+                silent = m.group(1) == "true"
+                apply_args = args[:4]
+        if head == "CommonActions.Apply" and method["gen"] and len(apply_args) == 4 and self._native_context(apply_args[0]):
+            generic = rhs[method["gen"][0]:method["gen"][1]].strip()
+            power = self._power_key_for_type(generic)
+            who = self._native_who(apply_args[1])
+            amount = self._native_value(apply_args[3])
+            if power and self._native_card_source(apply_args[2]):
+                if who:
+                    return block("apply_power", who=who, power=power, amount=amount, silent=silent)
+                return block("apply_power_to", creature=apply_args[1], power=power, amount=amount, silent=silent)
+            return block("apply_power_type", creature=apply_args[1], power_type=self._native_power_type(generic),
+                         amount=amount, source=apply_args[2], silent=silent)
+        return None
+
     def call(self, lhs, rhs):
         got = self.chain_parts(rhs)
         if not got:
@@ -1132,6 +2119,13 @@ class Decomposer:
         segs, aw = got
         head = ".".join(s["name"] for s in segs[:next(i for i, s in enumerate(segs) if s["args"] is not None) + 1])
         first_call = next(s for s in segs if s["args"] is not None)
+        signature = call_signature(segs, rhs, aw)
+        native = self._mapped_call(signature, segs, rhs, lhs)
+        if native:
+            return native
+        native = self._native_call(head, segs, rhs, aw, lhs)
+        if native:
+            return native
         sig = None
         if len(segs) == 1 or (segs[0]["name"] in ("this", "base") and len(segs) == 2):
             ps = first_call["args"]
@@ -1209,6 +2203,7 @@ class Decomposer:
                 else:
                     slot = {"key": key, "name": label or f"인수 {ai + 1}", "kind": "code", "orig": one_line(t),
                             "options": self._code_options(t)}
+                slot.update(source_segment=si, source_arg=ai)
                 cuts.append((a_s0 + a, a_s0 + b, slot))
             # 기본값이 있어 생략된 인수도 칸으로 (바꿀 때만 이름 붙여 넣는다)
             if seg is first_call and sig and local_sig:
@@ -1246,7 +2241,9 @@ class Decomposer:
             nm = re.match(r"^(?:[\w.?<>\[\],]+\s+)?([A-Za-z_][\w.]*)", lhs.strip())
             label += f" → {nm.group(1) if nm else lhs.strip()}"
         parts = [_squash(p) if i % 2 == 0 else p for i, p in enumerate(parts)]
-        return self._call_block(label, parts, slots)
+        block = self._call_block(label, parts, slots)
+        block["call_signature"] = signature
+        return block
 
     def global_sig(self, name, nargs):
         """다른 클래스의 메서드 (예: b.SupportHeal) 이름이 모드 안에서 하나뿐이면 그 매개변수 이름·형식."""
@@ -1426,7 +2423,7 @@ def onplay_of(body):
     return None
 
 
-def decompose(card, parents=(), class_names=()):
+def decompose(card, parents=(), class_names=(), project=None):
     """복제 카드 -> (블록 목록, 통계) 또는 (None, 이유).
     parents: [(이름, 본문)] 복제 클래스가 상속하는 원본 부모들 (가까운 것부터)."""
     cl = card.get("clone") or {}
@@ -1435,7 +2432,7 @@ def decompose(card, parents=(), class_names=()):
     if not pm:
         return None, "OnPlay 를 찾지 못했습니다."
     chain = ClassChain(body, list(parents) if cl.get("base") else [])
-    d = Decomposer(card, chain, class_names)
+    d = Decomposer(card, chain, class_names, project=project)
     names = [p["name"] for p in pm["params"]]
     want = ["choiceContext", "cardPlay"]
     text = pm["body"]
@@ -1481,14 +2478,14 @@ def parents_from(classes, cls_name):
     return out
 
 
-def decompose_with_classes(card, classes):
+def decompose_with_classes(card, classes, project=None):
     """classes: {짧은 이름: CsClass} (모드 전체)."""
     cl = card.get("clone") or {}
     orig = (cl.get("orig_class") or "").split(".")[-1]
     parents = parents_from(classes, orig)
     if cl.get("base") and parents and parents[0][0] != cl["base"]:
         parents = []
-    blocks, info = decompose(card, parents, classes)
+    blocks, info = decompose(card, parents, classes, project)
     if blocks is not None:
         # 부모 클래스 코드를 펼쳤으면 그 파일의 using 도 필요하다
         by_full = {c.full: c for c in classes.values()}
