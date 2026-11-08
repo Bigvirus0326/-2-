@@ -2430,7 +2430,7 @@ def decompose(card, parents=(), class_names=(), project=None):
     body = cl.get("body", "")
     pm = onplay_of(body)
     if not pm:
-        return None, "OnPlay 를 찾지 못했습니다."
+        return None, "원본 카드 클래스에서 OnPlay 메서드를 찾지 못했습니다. DLL 캐시를 다시 읽었는지 확인해 주세요."
     chain = ClassChain(body, list(parents) if cl.get("base") else [])
     d = Decomposer(card, chain, class_names, project=project)
     names = [p["name"] for p in pm["params"]]
@@ -2458,7 +2458,8 @@ def decompose(card, parents=(), class_names=(), project=None):
                 return None, "async 가 아닌 OnPlay 의 중간 return 은 풀지 않습니다."
         blocks = d.blocks(stmts)
     except (ValueError, IndexError, KeyError, RecursionError) as exc:
-        return None, f"원본 코드를 읽지 못했습니다: {exc}"
+        detail = str(exc).strip() or repr(exc).strip() or type(exc).__name__
+        return None, f"원본 코드를 읽지 못했습니다 ({type(exc).__name__}): {detail}"
     blocks = [{"op": "source_step", "args": {"source": p}} for p in pre] + blocks
     return blocks, d.stats
 

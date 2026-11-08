@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import sys
 import threading
+import traceback
 import tkinter as tk
 import webbrowser
 from tkinter import colorchooser, filedialog, messagebox, ttk
@@ -712,21 +713,45 @@ class EffectList(ttk.Frame):
 
             def decompose():
                 # 원본 모드 DLL 을 (한 번만) 풀어 그 안의 모든 클래스로 OnPlay -> 블록
-                classes = self.app.mod_classes(draft["clone"].get("mod"))
+                orig_class = (draft["clone"].get("orig_class") or "").split(".")[-1]
+                classes = self.app.mod_classes(draft["clone"].get("mod"), required_class=orig_class)
+                source_class = classes.get(orig_class)
+                if source_class is not None:
+                    source_body = MI.fix_decompiled(source_class.body)
+                    draft["clone"]["body"] = MI.remove_members(
+                        source_body, MI.REGENERATED["card"] + [source_class.name]).strip("\n")
+                    draft["clone"]["usings"] = list(source_class.usings)
+                    draft["clone"]["upgrade_body"] = MI.member_text(source_body, "OnUpgrade")
                 got, info = csblocks.decompose_with_classes(draft, classes, self.app.project)
                 if got:
                     csblocks.merge_usings(draft, info.get("usings"))
                 return got, info
             if [b.get("op") for b in blocks] == ["original_play"]:
                 try:
-                    got, _info = decompose()
-                    blocks = got or blocks
+                    got, info = decompose()
+                    if got:
+                        blocks = got
+                    else:
+                        reason = str(info or "").strip() or "변환 이유가 제공되지 않았습니다."
+                        self.app.log(f"[오류] 원본 코드 블록 변환 실패 ({item.get('id')}): {reason}")
+                        messagebox.showwarning("원본 코드 분석 결과",
+                                               f"원본 효과를 블록으로 풀지 못했습니다.\n\n{reason}\n\n"
+                                               "원래 효과 블록은 유지됩니다.", parent=self)
                 except Exception as exc:     # 못 풀면 원본 실행 블록 그대로
-                    self.app.log(f"원본 코드 블록 풀기 실패: {exc}")
+                    detail = str(exc).strip() or repr(exc).strip() or type(exc).__name__
+                    self.app.log(f"[오류] 원본 코드 블록 풀기 실패 ({type(exc).__name__}): {detail}\n"
+                                 f"{traceback.format_exc()}")
+                    messagebox.showerror("원본 코드 분석 실패", f"원본 코드를 읽지 못했습니다.\n\n"
+                                         f"{type(exc).__name__}: {detail}\n\n"
+                                         "현재 효과는 유지됩니다. 도움말 → 건의 / 오류 보내기에서 오류 로그를 확인할 수 있습니다.",
+                                         parent=self)
             ed = blockui.BlockEditor(self, self.app.project, "card", draft, blocks, show_text=False, on_decompose=decompose)
             host = ttk.Frame(ed)
             host.pack(fill="x", before=ed.winfo_children()[0])
-            panel = ClonePanel(host, type("Draft", (), {"changed": lambda _self: None})())
+            panel = ClonePanel(host, type("Draft", (), {
+                "kind": "card", "cur": self.app.card_tab.cur,
+                "changed": lambda _self: None, "refresh_list": lambda _self, _index: None,
+            })())
             panel.inside_editor = True
             panel.grid(row=0, column=0, sticky="we")
             panel.set(draft)
@@ -734,7 +759,11 @@ class EffectList(ttk.Frame):
             if ed.result is not None:
                 item["raw_vars"] = draft.get("raw_vars", [])
                 item["clone"]["pool"] = draft["clone"].get("pool", "mine")
+                item["pool_character"] = draft.get("pool_character", item.get("pool_character", ""))
                 item["clone"]["usings"] = draft["clone"].get("usings", item["clone"].get("usings", []))
+                item["clone"]["body"] = draft["clone"].get("body", item["clone"].get("body", ""))
+                item["clone"]["upgrade_body"] = draft["clone"].get(
+                    "upgrade_body", item["clone"].get("upgrade_body", ""))
                 self.effects[i]["blocks"] = ed.result["blocks"]
                 self.effects[i]["code"] = ed.result["code"] or "// 실행할 블록 없음"
                 self.refresh()
@@ -1521,10 +1550,19 @@ class ExternalTab(ttk.Frame):
                 em = MI.load_mod(path, sts2, log=self.app.log)
                 self.after(0, lambda: self._loaded(em))
             except Exception as e:  # noqa: BLE001
-                msg = str(e)
-                self.after(0, lambda: (self.status.configure(text=""), self.app.log(f"[오류] {msg}"),
-                                       messagebox.showerror(APP_TITLE, f"불러오기 실패:\n{msg}")))
+                msg = str(e).strip() or repr(e).strip() or f"{type(e).__name__} (자세한 내용 없음)"
+                trace = traceback.format_exc()
+                error_type = type(e).__name__
+                self.after(0, lambda msg=msg, trace=trace, error_type=error_type:
+                           self._show_load_error(msg, trace, error_type))
         threading.Thread(target=work, daemon=True).start()
+
+    def _show_load_error(self, message, trace, error_type):
+        self.status.configure(text="")
+        self.app.log(f"[오류] 다른 모드 불러오기 실패 ({error_type}): {message}\n{trace}")
+        messagebox.showerror(APP_TITLE, f"불러오기에 실패했습니다.\n\n{error_type}: {message}\n\n"
+                             "자세한 기록은 도움말 → 건의 / 오류 보내기에서 확인할 수 있습니다.",
+                             parent=self.winfo_toplevel())
 
     def _loaded(self, em):
         self.mods = [m for m in self.mods if m.root != em.root]
@@ -5184,24 +5222,42 @@ class App(tk.Tk):
             if jump:
                 jump(kind, iid)
 
-    def mod_classes(self, mod_id):
+    def mod_classes(self, mod_id, required_class=""):
         """의존 모드의 모든 C# 클래스 {짧은 이름: CsClass} — 원본 코드를 블록으로 풀 때 부모·도우미를 찾는 데 쓴다.
-        DLL 은 한 번만 디컴파일해 둔다 (게임·모드 파일은 읽기만 함)."""
+        DLL 은 한 번만 디컴파일해 둔다. 필요한 클래스가 캐시에 없으면 캐시를 새로 만든다."""
         cache = self.__dict__.setdefault("_mod_class_cache", {})
         dep = next((d for d in self.project.get("dependencies", []) if d.get("id") == mod_id), None)
         dll = (dep or {}).get("dll") or ""
         if not os.path.isfile(dll):
             raise ValueError(f"원본 모드 '{mod_id}' 의 DLL 을 찾지 못했습니다: {dll or '(경로 없음)'}")
-        key = (dll, os.path.getmtime(dll))
-        if key not in cache:
-            folder = MI.decompile(dll, self.settings.get("sts2_path", ""), log=self.log)
+
+        def parse_folder(folder):
             classes = {}
             import glob as _glob
             for f in _glob.glob(os.path.join(folder, "**", "*.cs"), recursive=True):
                 for c in MI.parse_cs(MI._read_text(f), f):
                     classes.setdefault(c.name, c)
+            return classes
+
+        key = (dll, os.path.getmtime(dll), os.path.getsize(dll))
+        classes = cache.get(key)
+        refresh = classes is not None and bool(required_class) and required_class not in classes
+        if refresh:
+            self.log(f"[경고] 디컴파일 캐시에 원본 클래스 '{required_class}'가 없어 다시 읽습니다.")
+        if classes is None or refresh:
+            folder = MI.decompile(dll, self.settings.get("sts2_path", ""), log=self.log, force=refresh)
+            classes = parse_folder(folder)
+            if required_class and required_class not in classes and not refresh:
+                self.log(f"[경고] 원본 클래스 '{required_class}'가 없어 디컴파일 캐시를 다시 만듭니다.")
+                folder = MI.decompile(dll, self.settings.get("sts2_path", ""), log=self.log, force=True)
+                classes = parse_folder(folder)
+            if not classes:
+                raise ValueError("디컴파일된 C# 파일에서 클래스를 찾지 못했습니다. 자세한 원인은 앱 로그를 확인해 주세요.")
+            if required_class and required_class not in classes:
+                raise ValueError(f"원본 DLL을 다시 읽었지만 클래스 '{required_class}'를 찾지 못했습니다.\n"
+                                 f"읽은 클래스 수: {len(classes)} · 캐시 폴더: {folder}")
             cache[key] = classes
-        return cache[key]
+        return classes
 
     def all_ids(self):
         ids = {c["id"] for k in ("cards", "relics", "potions", "powers") for c in self.project[k]}

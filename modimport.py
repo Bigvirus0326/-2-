@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 
 import ingame
 import modgen as M
@@ -67,6 +68,10 @@ def class_to_id(cls):
 # ---------------------------------------------------------------------------
 # 디컴파일 (ilspycmd)
 # ---------------------------------------------------------------------------
+_DECOMPILE_LOCK = threading.RLock()
+_DECOMPILE_MARKER = ".sts2mm-decompile.json"
+
+
 def _ilspy_cmd():
     tools = os.path.join(cache_root(), "tools")
     exe = os.path.join(tools, "ilspycmd.exe" if sys.platform == "win32" else "ilspycmd")
@@ -77,55 +82,203 @@ def _ilspy_cmd():
     return exe
 
 
+def _run_capture(cmd, env=None):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              creationflags=_NOWIN, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = str(exc).strip() or repr(exc).strip() or type(exc).__name__
+        raise RuntimeError(f"명령을 실행하지 못했습니다: {' '.join(map(str, cmd))}\n{detail}") from exc
+
+
+def _process_failure(label, cmd, result):
+    lines = [label, f"명령: {' '.join(map(str, cmd))}", f"종료 코드: {result.returncode}"]
+    has_output = False
+    for name, value in (("표준 오류", result.stderr), ("표준 출력", result.stdout)):
+        value = (value or "").strip()
+        if value:
+            has_output = True
+            lines.extend([f"{name}:", value[-3000:]])
+    if not has_output:
+        lines.append("프로그램이 오류 세부 내용을 출력하지 않았습니다. .NET SDK 또는 디컴파일러 설치를 확인해 주세요.")
+    return "\n".join(lines)
+
+
+def _dotnet_exe():
+    dotnet = shutil.which("dotnet")
+    if not dotnet:
+        raise RuntimeError(".NET SDK(dotnet)를 찾지 못했습니다. SDK 9 이상을 설치한 뒤 앱을 다시 실행해 주세요.")
+    cmd = [dotnet, "--version"]
+    result = _run_capture(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(_process_failure(".NET SDK 확인에 실패했습니다.", cmd, result))
+    return dotnet
+
+
+def _remove_decompiler_install(tools):
+    for name in ("ilspycmd.exe", "ilspycmd.cmd"):
+        path = os.path.join(tools, name)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError as exc:
+            detail = str(exc).strip() or repr(exc).strip() or type(exc).__name__
+            raise RuntimeError(f"손상된 디컴파일러 파일을 지우지 못했습니다.\n{path}\n{detail}") from exc
+    shutil.rmtree(os.path.join(tools, ".store", "ilspycmd"), ignore_errors=True)
+
+
+def _install_decompiler(tools, dotnet, log, previous_error=""):
+    log("dll 을 읽기 위한 디컴파일러(ilspycmd)를 설치합니다...")
+    cmd = [dotnet, "tool", "install", "ilspycmd", "--tool-path", tools]
+    result = _run_capture(cmd)
+    if result.returncode != 0:
+        detail = _process_failure("ilspycmd 설치에 실패했습니다.", cmd, result)
+        if previous_error:
+            detail = f"기존 설치 확인 결과:\n{previous_error}\n\n{detail}"
+        raise RuntimeError(detail)
+    exe = _ilspy_cmd()
+    if not os.path.isfile(exe):
+        raise RuntimeError(f"ilspycmd 설치 명령은 끝났지만 실행 파일을 찾지 못했습니다.\n예상 경로: {exe}\n"
+                           "앱 폴더의 쓰기 권한과 .NET SDK 설치를 확인해 주세요.")
+    env = dict(os.environ, DOTNET_ROLL_FORWARD="Major")
+    probe_cmd = [exe, "--version"]
+    probe = _run_capture(probe_cmd, env=env)
+    if probe.returncode != 0:
+        detail = _process_failure("설치한 ilspycmd가 실행되지 않습니다.", probe_cmd, probe)
+        if previous_error:
+            detail = f"기존 설치 확인 결과:\n{previous_error}\n\n{detail}"
+        raise RuntimeError(detail)
+    return exe
+
+
 def ensure_decompiler(log=print):
     exe = _ilspy_cmd()
     if os.path.isfile(exe):
-        return exe
-    if not shutil.which("dotnet"):
-        raise RuntimeError(".NET SDK(dotnet)가 없어 dll 을 읽을 수 없습니다.")
-    log("dll 을 읽기 위한 디컴파일러(ilspycmd)를 처음 한 번 설치합니다...")
+        probe_cmd = [exe, "--version"]
+        try:
+            probe = _run_capture(probe_cmd, env=dict(os.environ, DOTNET_ROLL_FORWARD="Major"))
+            if probe.returncode == 0:
+                return exe
+            previous_error = _process_failure("저장된 ilspycmd가 정상 실행되지 않습니다.", probe_cmd, probe)
+        except Exception as exc:  # noqa: BLE001 — 중단된 설치를 자동 복구한다
+            previous_error = str(exc).strip() or repr(exc).strip() or type(exc).__name__
+        log("저장된 디컴파일러가 실행되지 않아 설치를 복구합니다...")
+    else:
+        previous_error = ""
     tools = os.path.join(cache_root(), "tools")
     os.makedirs(tools, exist_ok=True)
-    r = subprocess.run(["dotnet", "tool", "install", "ilspycmd", "--tool-path", tools],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=_NOWIN)
-    if r.returncode != 0 and "already installed" not in (r.stdout + r.stderr):
-        raise RuntimeError("ilspycmd 설치 실패:\n" + (r.stderr or r.stdout)[-800:])
-    exe = _ilspy_cmd()
-    if not os.path.isfile(exe):
-        raise RuntimeError("ilspycmd 를 찾을 수 없습니다.")
-    return exe
+    dotnet = _dotnet_exe()
+    if previous_error or os.path.isdir(os.path.join(tools, ".store", "ilspycmd")):
+        _remove_decompiler_install(tools)
+    return _install_decompiler(tools, dotnet, log, previous_error)
 
 
 _NOWIN = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
-def decompile(dll, sts2_path="", extra_refs=(), log=print):
+def _source_files(folder):
+    return glob.glob(os.path.join(folder, "**", "*.cs"), recursive=True)
+
+
+def _source_stats(folder):
+    files = _source_files(folder)
+    try:
+        return len(files), sum(os.path.getsize(path) for path in files)
+    except OSError:
+        return 0, 0
+
+
+def _valid_decompile_cache(folder, dll, st):
+    marker_path = os.path.join(folder, _DECOMPILE_MARKER)
+    try:
+        with open(marker_path, encoding="utf-8") as stream:
+            marker = json.load(stream)
+        count, size = _source_stats(folder)
+        return bool(count and marker.get("dll") == os.path.abspath(dll) and
+                    marker.get("dll_size") == st.st_size and
+                    marker.get("dll_mtime_ns") == getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)) and
+                    marker.get("source_count") == count and marker.get("source_bytes") == size)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def decompile(dll, sts2_path="", extra_refs=(), log=print, force=False):
     """dll -> C# 소스 폴더 (캐시). 실패하면 예외."""
     st = os.stat(dll)
     key = hashlib.sha1(f"{os.path.abspath(dll)}|{st.st_size}|{st.st_mtime}".encode()).hexdigest()[:16]
     out = os.path.join(cache_root(), "decompiled", f"{os.path.splitext(os.path.basename(dll))[0]}-{key}")
-    if os.path.isdir(out) and glob.glob(os.path.join(out, "**", "*.cs"), recursive=True):
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with _DECOMPILE_LOCK:
+        backup = out + ".previous"
+        if os.path.isdir(backup):
+            if not os.path.exists(out):
+                try:
+                    os.replace(backup, out)
+                except OSError:
+                    pass
+            elif _valid_decompile_cache(out, dll, st):
+                shutil.rmtree(backup, ignore_errors=True)
+            elif _valid_decompile_cache(backup, dll, st):
+                shutil.rmtree(out, ignore_errors=True)
+                try:
+                    os.replace(backup, out)
+                except OSError:
+                    pass
+            else:
+                shutil.rmtree(backup, ignore_errors=True)
+        if not force and _valid_decompile_cache(out, dll, st):
+            return out
+        if os.path.isdir(out):
+            log("기존 원본 코드 캐시가 불완전하거나 이전 형식이라 다시 읽습니다...")
+        exe = ensure_decompiler(log)
+        temp_out = f"{out}.tmp-{os.getpid()}-{threading.get_ident()}"
+        shutil.rmtree(temp_out, ignore_errors=True)
+        os.makedirs(temp_out, exist_ok=True)
+        cmd = [exe, "-p", "-o", temp_out]
+        refs = list(extra_refs)
+        if sts2_path:
+            refs.append(os.path.join(sts2_path, "data_sts2_windows_x86_64"))
+            for sub in ("mods", "mods.disabled"):
+                for d in glob.glob(os.path.join(sts2_path, sub, "*")):
+                    if os.path.isdir(d):
+                        refs.append(d)
+        for ref in refs:
+            if os.path.isdir(ref):
+                cmd += ["-r", ref]
+        cmd.append(dll)
+        log(f"dll 읽는 중: {os.path.basename(dll)}")
+        try:
+            result = _run_capture(cmd, env=dict(os.environ, DOTNET_ROLL_FORWARD="Major"))
+            if result.returncode != 0:
+                raise RuntimeError(_process_failure("원본 DLL 디컴파일에 실패했습니다.", cmd, result))
+            count, size = _source_stats(temp_out)
+            if not count:
+                raise RuntimeError(_process_failure("디컴파일은 종료됐지만 C# 파일이 생성되지 않았습니다.", cmd, result))
+            marker = {
+                "dll": os.path.abspath(dll), "dll_size": st.st_size,
+                "dll_mtime_ns": getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
+                "source_count": count, "source_bytes": size,
+            }
+            marker_tmp = os.path.join(temp_out, _DECOMPILE_MARKER + ".tmp")
+            with open(marker_tmp, "w", encoding="utf-8") as stream:
+                json.dump(marker, stream, ensure_ascii=False)
+            os.replace(marker_tmp, os.path.join(temp_out, _DECOMPILE_MARKER))
+
+            shutil.rmtree(backup, ignore_errors=True)
+            if os.path.isdir(out):
+                os.replace(out, backup)
+            try:
+                os.replace(temp_out, out)
+            except OSError:
+                if os.path.isdir(backup) and not os.path.exists(out):
+                    os.replace(backup, out)
+                raise
+            shutil.rmtree(backup, ignore_errors=True)
+        except Exception as exc:
+            shutil.rmtree(temp_out, ignore_errors=True)
+            log(f"[오류] 원본 DLL을 읽지 못했습니다: {str(exc).strip() or repr(exc).strip() or type(exc).__name__}")
+            raise
         return out
-    exe = ensure_decompiler(log)
-    cmd = [exe, "-p", "-o", out]
-    refs = list(extra_refs)
-    if sts2_path:
-        refs.append(os.path.join(sts2_path, "data_sts2_windows_x86_64"))
-        for sub in ("mods", "mods.disabled"):
-            for d in glob.glob(os.path.join(sts2_path, sub, "*")):
-                if os.path.isdir(d):
-                    refs.append(d)
-    for r in refs:
-        if os.path.isdir(r):
-            cmd += ["-r", r]
-    cmd.append(dll)
-    log(f"dll 읽는 중: {os.path.basename(dll)}")
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=_NOWIN,
-                       env=dict(os.environ, DOTNET_ROLL_FORWARD="Major"))
-    if r.returncode != 0 or not glob.glob(os.path.join(out, "**", "*.cs"), recursive=True):
-        shutil.rmtree(out, ignore_errors=True)
-        raise RuntimeError("디컴파일 실패:\n" + (r.stderr or r.stdout)[-800:])
-    return out
 
 
 # ---------------------------------------------------------------------------

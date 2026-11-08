@@ -206,6 +206,17 @@ SPECS = {
                         "opt3": ("label", {"ko": "", "en": ""})},
                "body": True, "else": True, "third": True,
                "sections": [("else", "② {opt2}"), ("third", "③ {opt3}  (이름을 비우면 둘 중 고르기)")]},
+    "pick_each": {"cat": "gimmick", "ko": "{pile}에서 {ctype} {count}장 골라 한 장마다 실행",
+                  "args": {"pile": ("pick_pile", "Hand"), "ctype": ("card_filter", "Any"),
+                           "count": ("value", {"t": "num", "v": 1})}, "body": True},
+    "picked_action": {"cat": "gimmick", "ko": "고른 카드에 실행: {action}",
+                      "args": {"action": ("pick_action", "upgrade")}},
+    "random_transform": {"cat": "gimmick", "ko": "{pile}의 {ctype} 중 무작위 {count}장을 {result_filter} 중 한 장으로 변화",
+                         "args": {"pile": ("pick_pile", "Hand"), "ctype": ("card_filter", "Any"),
+                                  "result_filter": ("result_filter", "Any"), "count": ("value", {"t": "num", "v": 1})}},
+    "pick_transform": {"cat": "gimmick", "ko": "{pile}에서 {ctype} {count}장 골라 {card}로 변화시키기",
+                       "args": {"pile": ("pick_pile", "Hand"), "ctype": ("card_filter", "Any"),
+                                "count": ("value", {"t": "num", "v": 1}), "card": ("card", "this")}},
     "pick": {"cat": "gimmick", "ko": "{pile}에서 {ctype} {count}장 골라서 {action}",
              "args": {"pile": ("pick_pile", "Discard"), "ctype": ("card_filter", "Any"),
                       "count": ("value", {"t": "num", "v": 1}), "action": ("pick_action", "hand")}},
@@ -334,7 +345,7 @@ PALETTE = [
                "card_finalize_upgrade_internal", "card_transform_to", "keyword_this", "keyword_cards"]),
     ("flow", ["if", "if_else", "repeat", "each_enemy", "random_enemy", "wait", "wait_scaled"]),
     ("var", ["set_var", "change_var"]),
-    ("gimmick", ["pay", "summon", "command", "unsummon", "choice", "pick", "delayed"]),
+    ("gimmick", ["pay", "summon", "command", "unsummon", "choice", "pick", "random_transform", "pick_transform", "pick_each", "picked_action", "delayed"]),
     ("class", ["channel", "orb_channel_model", "orb_channel_type", "orb_passive_model", "evoke", "orb_passive_all", "orb_slots", "orb_slots_to", "orb_grow", "stars", "forge",
                "osty_summon", "osty_attack", "osty_kill", "pet_summon", "pet_attack", "pet_act", "pet_kill", "add_pet_model"]),
     ("mod_api", ["kotodama_gain", "manosaba_ema_summon", "manosaba_novel_summon", "manosaba_ignite", "manosaba_attach_combust",
@@ -351,7 +362,7 @@ PALETTE = [
 BODY_KEYS = ("body", "else", "third")
 PICK_PILES = [("Hand", "손패"), ("Draw", "뽑을 카드 더미"), ("Discard", "버린 카드 더미"), ("Exhaust", "소멸한 카드 더미")]
 PICK_ACTIONS = [("hand", "손으로 가져오기"), ("top", "뽑을 더미 맨 위에 놓기"), ("exhaust", "소멸"), ("discard", "버리기"),
-                ("upgrade", "강화 (이번 전투)")]
+                ("upgrade", "강화 (이번 전투)"), ("random_transform", "무작위 카드로 변화")]
 DELAY_WHEN = [("start", "다음 내 턴 시작에"), ("end", "이번 턴이 끝날 때")]
 PLAYED_SCOPES = [("turn", "이번 턴에"), ("combat", "이번 전투에서")]
 
@@ -1123,17 +1134,47 @@ def _describe_one(b, project, owner_kind, lang, card):
                 f"[gold]{n}[/gold]({describe(body, project, owner_kind, lang).rstrip('.')})" for n, body in opts) + "."
         return "Choose one: " + " / ".join(
             f"[gold]{n}[/gold] ({describe(body, project, owner_kind, lang).rstrip('.')})" for n, body in opts) + "."
-    if op == "pick":
+    if op == "picked_action":
+        action = a.get("action")
+        if ko:
+            return f"고른 카드에 {dict(PICK_ACTIONS).get(action, '')}."
+        return {"hand": "Move it to your hand.", "top": "Put it on top of your draw pile.",
+                "exhaust": "Exhaust it.", "discard": "Discard it.", "upgrade": "Upgrade it.",
+                "random_transform": "Transform it into a random card."}.get(action, "")
+    if op in ("pick", "random_transform", "pick_transform", "pick_each"):
         import gimmick as G
         pile_ko = dict(PICK_PILES).get(a.get("pile"), "")
         pile_en = {"Hand": "your hand", "Draw": "your draw pile", "Discard": "your discard pile",
                    "Exhaust": "your exhaust pile"}.get(a.get("pile"), "")
+        if op == "random_transform":
+            import modgen as M
+            result = a.get("result_filter", "Any")
+            if result.startswith("kw:"):
+                kw = result[3:]
+                name = dict(M.CARD_KEYWORDS).get(kw, kw) if ko else kw
+                pool = f"{name} 키워드가 있는 카드" if ko else f"cards with {name}"
+            else:
+                pool = G.filter_word(project, result, lang, plural=True)
+            if ko:
+                return f"{pile_ko}의 {G.filter_word(project, a.get('ctype'), 'ko')} 중 무작위 {V('count')}장을 {pool} 중 한 장으로 변화시킵니다."
+            return f"Transform {V('count')} random {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en} into random {pool}."
+        if op == "pick_each":
+            detail = describe(b.get("body"), project, owner_kind, lang)
+            return (f"{pile_ko}에서 {G.filter_word(project, a.get('ctype'), 'ko')} {V('count')}장을 골라 한 장마다 실행합니다. {detail}" if ko else
+                    f"Choose {V('count')} {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en}. For each chosen card: {detail}")
+        if op == "pick_transform":
+            import modgen as M
+            target = next((c for c in project.get("cards", []) if c["id"] == a.get("card")), None)
+            name = M.text(target, "name", lang) if target else ("이 카드" if ko else "this card")
+            if ko:
+                return f"{pile_ko}에서 {G.filter_word(project, a.get('ctype'), 'ko')} {V('count')}장을 골라 {name}(으)로 변화시킵니다."
+            return f"Choose {V('count')} {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en} and transform them into {name}."
         if ko:
             act = {"hand": "손으로 가져옵니다", "top": "뽑을 카드 더미 맨 위에 놓습니다", "exhaust": "소멸시킵니다",
-                   "discard": "버립니다", "upgrade": "강화합니다"}.get(a.get("action"), "")
+                   "discard": "버립니다", "random_transform": "무작위 카드로 변화시킵니다", "upgrade": "강화합니다"}.get(a.get("action"), "")
             return f"{pile_ko}에서 {G.filter_word(project, a.get('ctype'), 'ko')} {V('count')}장을 골라 {act}."
         act = {"hand": "put it into your hand", "top": "put it on top of your draw pile", "exhaust": "Exhaust it",
-               "discard": "discard it", "upgrade": "Upgrade it"}.get(a.get("action"), "")
+               "discard": "discard it", "random_transform": "transform it into a random card", "upgrade": "Upgrade it"}.get(a.get("action"), "")
         return f"Choose {V('count')} {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en} and {act}."
     if op in ("channel", "evoke", "orb_passive_all", "orb_slots", "orb_grow", "stars", "forge",
               "osty_summon", "osty_attack", "osty_kill"):
@@ -1181,6 +1222,7 @@ class _Gen:
         self.project = project
         self.C = C
         self.n = 0
+        self.selected_cards = []
         self.its = []        # 반복 안의 '그 적' 변수 이름 스택
         self.errors = []
         self.prefix = prefix          # 블록이 만드는 클래스(선택지 카드·예약 파워) 이름 앞부분
@@ -1431,6 +1473,16 @@ class _Gen:
     def stmt(self, b, ind):
         import modgen as M
         C, a, op = self.C, b.get("args", {}), b.get("op")
+        for key, value in a.items():
+            if key in ("creature", "target", "attacker", "applier") and value == "@random_enemy":
+                return self.each_target("random", ind, lambda enemy, indent:
+                    self.stmt({**b, "args": {**a, key: enemy}}, indent))
+            if key == "card" and value == "@random_hand":
+                hand, card = self.uid("hand"), self.uid("card")
+                lines = [f"{ind}var {hand} = {C.player}?.PlayerCombatState?.Hand.Cards.ToList();",
+                         f"{ind}if ({hand} != null && {hand}.Count > 0)", f"{ind}{{",
+                         f"{ind}    var {card} = {C.me}.CombatState!.RunState.Rng.CombatCardSelection.NextItem({hand});"]
+                return lines + self.stmt({**b, "args": {**a, key: card}}, ind + "    ") + [ind + "}"]
         if op in ("src_call", "src_loop"):
             if C.kind != "card" or not C.item.get("clone"):
                 self.errors.append("직접 코드 블록은 복제 카드에서만 사용할 수 있습니다.")
@@ -2072,7 +2124,7 @@ class _Gen:
             return [f"{ind}v_{_ident(a.get('name', 'a'))} = {self.val(a.get('amount'))};"]
         if op == "change_var":
             return [f"{ind}v_{_ident(a.get('name', 'a'))} += {self.val(a.get('amount'))};"]
-        if op in ("summon", "command", "unsummon", "pay", "choice", "pick", "delayed"):
+        if op in ("summon", "command", "unsummon", "pay", "choice", "pick", "random_transform", "pick_transform", "pick_each", "picked_action", "delayed"):
             return self.gimmick_stmt(b, op, a, ind)
         if op in SPECS and SPECS[op]["cat"] == "class":
             return self.class_stmt(b, op, a, ind)
@@ -2242,7 +2294,19 @@ class _Gen:
                 lines += [f"{ind}        {'if' if i == 0 else 'else if'} ({iv} == {i})", f"{ind}        {{"] + \
                     self.stmts(body, ind + "            ") + [f"{ind}        }}"]
             return lines + [f"{ind}    }}", f"{ind}}}"]
-        if op == "pick":
+        def picked_action(cv):
+            return {"hand": f"await CardPileCmd.Add({cv}, PileType.Hand);",
+                   "top": f"await CardPileCmd.Add({cv}, PileType.Draw, CardPilePosition.Top);",
+                   "exhaust": f"await CardCmd.Exhaust({cc}, {cv});",
+                   "discard": f"await CardCmd.Discard({cc}, {cv});",
+                   "random_transform": f"await CardCmd.TransformToRandom({cv}, {cv}.Owner.PlayerRng.Transformations);",
+                   "upgrade": f"if ({cv}.IsUpgradable) CardCmd.Upgrade({cv});"}.get(a.get("action", "hand"))
+        if op == "picked_action":
+            if not self.selected_cards:
+                self.errors.append("‘고른 카드에 실행’은 ‘한 장마다 실행’ 안에 넣으세요.")
+                return []
+            return [ind + picked_action(self.selected_cards[-1])]
+        if op in ("pick", "random_transform", "pick_transform", "pick_each"):
             pile = a.get("pile", "Discard")
             cv, lst, pv = self.uid("c"), self.uid("picked"), self.uid("pl")
             conds = [G.filter_expr(self.project, a.get("ctype") or "Any", cv)]
@@ -2250,17 +2314,59 @@ class _Gen:
                 conds.append(f"{cv} != this")
             if a.get("action") == "upgrade":
                 conds.append(f"{cv}.IsUpgradable")
-            act = {"hand": f"await CardPileCmd.Add({cv}, PileType.Hand);",
-                   "top": f"await CardPileCmd.Add({cv}, PileType.Draw, CardPilePosition.Top);",
-                   "exhaust": f"await CardCmd.Exhaust({cc}, {cv});",
-                   "discard": f"await CardCmd.Discard({cc}, {cv});",
-                   "upgrade": f"CardCmd.Upgrade({cv});"}.get(a.get("action", "hand"))
+            if op == "random_transform":
+                remaining = self.uid("remaining")
+                result = a.get("result_filter", "Any")
+                setup = []
+                guard = ""
+                change = f"await CardCmd.TransformToRandom({cv}, {pv}.PlayerRng.Transformations);"
+                if result != "Any":
+                    if result.startswith("kw:") and result[3:] in dict(M.CARD_KEYWORDS):
+                        match = f"model.Keywords.Contains(CardKeyword.{result[3:]})"
+                    elif result in dict(G.card_filters(self.project)):
+                        tag = G.find_tag(self.project, result[4:]) if result.startswith("tag:") else None
+                        match = G.filter_expr(self.project, result, "model")
+                        if tag and tag.get("keyword_member"):
+                            match = f"({match} || model.Keywords.Contains({tag['keyword_member']}))"
+                    else:
+                        self.errors.append("변화 결과에 사용할 키워드 또는 태그를 다시 선택하세요.")
+                        return []
+                    pool = self.uid("results")
+                    setup = [f"{ind}    var {pool} = ModelDb.AllCards.Where(model => {match}).ToList();"]
+                    guard = f" && {pool}.Count > 0"
+                    chosen = f"{pv}.PlayerRng.Transformations.NextItem({pool})"
+                    change = f"await CardCmd.Transform({cv}, {C.me}.CombatState!.CreateCard({chosen}, {pv}));"
+                return [f"{ind}if ({C.player} is {{ }} {pv})", f"{ind}{{",
+                        f"{ind}    var {lst} = PileType.{pile}.GetPile({pv}).Cards.Where({cv} => {' && '.join(conds)}).ToList();",
+                        f"{ind}    var {remaining} = (int)({self.val(a.get('count'))});",
+                        *setup, f"{ind}    while ({remaining}-- > 0 && {lst}.Count > 0{guard})", f"{ind}    {{",
+                        f"{ind}        var {cv} = {pv}.RunState.Rng.CombatCardSelection.NextItem({lst});",
+                        f"{ind}        {lst}.Remove({cv});",
+                        f"{ind}        {change}",
+                        f"{ind}    }}", f"{ind}}}"]
+            act = picked_action(cv)
+            if op == "pick_transform":
+                target = a.get("card", "this")
+                if target == "this" and C.kind == "card":
+                    target_type = M.item_cls(self.project, "card", C.item["id"])
+                elif any(c["id"] == target for c in self.project.get("cards", [])):
+                    target_type = M.item_cls(self.project, "card", target)
+                else:
+                    self.errors.append("변화 결과로 사용할 카드를 선택하세요.")
+                    return []
+                act = f"await CardCmd.TransformTo<{target_type}>({cv});"
             if pile == "Hand" and a.get("action") == "hand":
                 self.errors.append("손패에서 골라 손으로 가져올 수는 없습니다.")
+            if op == "pick_each":
+                self.selected_cards.append(cv)
+                commands = self.stmts(b.get("body"), ind + "        ")
+                self.selected_cards.pop()
+            else:
+                commands = [f"{ind}        {act}"]
             return [f"{ind}{{", f"{ind}    var {pv} = {C.player};",
                     f"{ind}    var {lst} = await {H}.Pick({cc}, {pv}, PileType.{pile}, (int)({self.val(a.get('count'))}), "
                     f"{cv} => {' && '.join(conds)}, this);",
-                    f"{ind}    foreach (var {cv} in {lst})", f"{ind}    {{", f"{ind}        {act}", f"{ind}    }}", f"{ind}}}"]
+                    f"{ind}    foreach (var {cv} in {lst})", f"{ind}    {{", *commands, f"{ind}    }}", f"{ind}}}"]
         if op == "delayed":
             cls = self.cls_name("Later")
             mid = self.project["mod"]["id"]

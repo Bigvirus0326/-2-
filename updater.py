@@ -20,7 +20,7 @@ import urllib.request
 import webbrowser
 import zipfile
 
-VERSION = "0.6"
+VERSION = "0.7"
 REPO = "Bigvirus0326/-2-"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"

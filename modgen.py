@@ -1047,7 +1047,7 @@ def validate(project):
             cl = it.get("clone")
             where = f"{kname} '{it.get('id')}'"
             if cl:
-                if cl.get("mod") not in dep_ids and not cl.get("keep_name"):
+                if cl.get("mod") not in dep_ids and not cl.get("keep_name") and not cl.get("game_original"):
                     errors.append(f"{where}: 복제한 원본 모드 '{cl.get('mod')}'가 참조 목록에 없습니다. '다른 모드' 탭에서 참조를 추가하세요.")
                 names = [v.get("name") for v in it.get("raw_vars", [])]
                 for e in it.get("effects", []):

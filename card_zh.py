@@ -175,6 +175,8 @@ def block_text(b, project, card):
         card = next((c for c in project["cards"] if c["id"] == key), {})
         name = "此牌的复制品" if key == "this" else M.text(card, "name", "zh") or str(key)
         return f"将{count}张{name}加入{PILES.get(a.get('pile'), '手牌')}。"
+    if op == "random_transform":
+        return f"将{PILES.get(a.get('pile'), '手牌')}中随机{count}张{card_type(project, a.get('ctype'))}变化为随机牌。"
     if op == "pick":
         action = {"hand":"放入手牌", "top":"放到抽牌堆顶", "exhaust":"消耗", "discard":"丢弃", "upgrade":"升级"}
         return f"从{PILES.get(a.get('pile'), '手牌')}中选择{count}张{card_type(project, a.get('ctype'))}，{action.get(a.get('action'), '')}。"

@@ -35,17 +35,22 @@ def original_sources(assets):
             for group, cards in sorted(groups.items())}
 
 
-def read_original_code(folder, entry):
+def read_original_code(folder, entry, log=print):
     dll = Path(folder) / "data_sts2_windows_x86_64" / "sts2.dll"
     cls = M.pascal(entry.lower())
-    exe = MI.ensure_decompiler()
+    if not dll.is_file():
+        raise FileNotFoundError(f"게임 DLL을 찾을 수 없습니다. 설치 폴더를 확인해 주세요.\n{dll}")
+    exe = MI.ensure_decompiler(log)
     result = subprocess.run([exe, "-t", "MegaCrit.Sts2.Core.Models.Cards." + cls, str(dll)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
         creationflags=MI._NOWIN, env=dict(os.environ, DOTNET_ROLL_FORWARD="Major"))
     if result.returncode:
-        raise ValueError(result.stderr.strip()[-600:] or "카드 원본 코드를 읽지 못했습니다.")
+        raise RuntimeError(MI._process_failure(f"{cls} 카드 디컴파일 실패", result.args, result))
     classes = MI.parse_cs(result.stdout)
-    body = next(c.body for c in classes if c.name == cls)
+    found = next((c for c in classes if c.name == cls), None)
+    if found is None:
+        raise ValueError(f"원작 DLL에서 카드 클래스 {cls}를 찾지 못했습니다. 게임 파일과 .NET 설치 상태를 확인해 주세요.")
+    body = found.body
     variables = MI.parse_vars(MI.member_text(body, "CanonicalVars"))
     upgrades, _, _ = MI.parse_upgrades(MI.member_text(body, "OnUpgrade"))
     for v in variables:
@@ -94,7 +99,7 @@ def import_project_card(target, source, card, used):
                 if isinstance(value, str):
                     if field in ("power", "scale_power", "cond_power", "res_power", "ref") and value.startswith("c:"):
                         require("powers", value[2:])
-                    elif value.startswith("tag:") and field in ("ctype", "filter", "played_filter"):
+                    elif value.startswith("tag:") and field in ("ctype", "filter", "played_filter", "result_filter"):
                         require("tags", value[4:])
                     elif value.startswith("s:") and field in ("power", "cond_power", "scale_power"):
                         require("summons", value[2:])
@@ -165,6 +170,7 @@ class CardLibrary(tk.Toplevel):
         self.assets = None
         self.photo = None
         self.rows = []
+        self._drag = None
         top = ttk.Frame(self, padding=6)
         top.pack(fill="x")
         ttk.Button(top, text="원작 캐릭터 열기", command=self.open_game).pack(side="left")
@@ -190,6 +196,11 @@ class CardLibrary(tk.Toplevel):
         self.cards = listpane("항목", 24)
         self.groups.bind("<<ListboxSelect>>", lambda _: self.refresh_cards())
         self.cards.bind("<<ListboxSelect>>", lambda _: self.show_card())
+        self.cards.bind("<ButtonPress-1>", self.drag_start, add="+")
+        self.cards.bind("<B1-Motion>", self.drag_move, add="+")
+        self.cards.bind("<ButtonRelease-1>", self.drag_end, add="+")
+        self._target_release_bind = app.card_tab.tree.bind("<ButtonRelease-1>", self.drag_end, add="+")
+        self.bind("<Destroy>", self._cleanup_drag, add="+")
         detail = ttk.LabelFrame(panes, text="선택한 항목", padding=6)
         panes.add(detail, weight=2)
         self.art = ttk.Label(detail)
@@ -200,8 +211,11 @@ class CardLibrary(tk.Toplevel):
         foot.pack(fill="x")
         self.status = ttk.Label(foot, text="원작 또는 프로젝트 파일을 열고 카드를 선택하세요.")
         self.status.pack(side="left")
-        self.apply_kw = ttk.Button(foot, text="편집 중인 카드에 적용", command=self.apply_keyword)
-        self.apply_kw.pack(side="right")
+        self.drop_zone = ttk.Label(self, text="↓ 여기로 카드를 끌어놓으면 프로젝트에 가져옵니다", anchor="center",
+                                   padding=8, relief="groove")
+        self.drop_zone.pack(fill="x", padx=6, pady=(0, 5), before=foot)
+        self.apply_btn = ttk.Button(foot, text="편집 중인 카드에 적용", command=self.apply_selected)
+        self.apply_btn.pack(side="right")
         self.code_btn = ttk.Button(foot, text="원작 코드·수치 보기", command=self.show_code)
         self.code_btn.pack(side="right", padx=3)
         self.remove_btn = ttk.Button(foot, text="내 풀에서 제거", command=self.remove)
@@ -305,24 +319,148 @@ class CardLibrary(tk.Toplevel):
         self.info.delete("1.0", "end")
         self.info.insert("1.0", "\n\n".join(lines))
         self.info.configure(state="disabled")
-        self.add_btn.configure(state="normal" if card and not imported else "disabled",
+        self.add_btn.configure(state="normal" if card and (not imported or source.get("kind", "cards") == "cards") else "disabled",
             text="프로젝트에 추가" if source.get("game") else "편집용 사본 가져오기")
-        self.apply_kw.configure(state="normal" if imported and source.get("kind") == "card_keywords" else "disabled")
+        can_apply = card and (not source.get("game") or source.get("kind", "cards") in ("cards", "card_keywords"))
+        self.apply_btn.configure(state="normal" if can_apply else "disabled",
+                                 text="원작 카드 그대로 가져오기" if source.get("game") and source.get("kind", "cards") == "cards"
+                                 else "편집 중인 카드에 적용")
         self.code_btn.configure(state="normal" if card and source.get("game") and not source.get("kind") and not self.reading else "disabled")
         self.remove_btn.configure(state="normal" if imported else "disabled")
 
-    def apply_keyword(self):
+    def apply_keyword(self, selected=None):
         tab = self.app.card_tab
-        if tab.cur is None or not self.selection():
+        selected = selected or self.selection()
+        if tab.cur is None or not selected:
             messagebox.showinfo("키워드 적용", "카드 탭에서 적용할 카드를 먼저 선택하세요.", parent=self)
             return
         card = tab.items[tab.cur]
-        keyword = M.pascal(self.selection()["id"].lower())
+        keyword = M.pascal(selected["id"].lower())
         if keyword not in card["keywords"]:
             card["keywords"].append(keyword)
             self.app.mark_dirty()
             tab.load(tab.cur)
         self.status.configure(text=f"{M.text(card, 'name', 'ko')}에 적용됨")
+
+    def apply_selected(self, card=None, source=None):
+        card = card or self.selection()
+        source = source or self.source()
+        tab = self.app.card_tab
+        if not card:
+            return False
+        if source.get("game") and source.get("kind", "cards") == "cards":
+            return self.add(card, source)
+        if tab.cur is None or tab.cur >= len(tab.items):
+            messagebox.showinfo("카드 적용", "카드 탭에서 적용할 카드를 먼저 선택하세요.", parent=self)
+            return False
+        if source.get("kind") == "card_keywords":
+            self.apply_keyword(card)
+            return True
+        if source.get("game"):
+            return False
+        if not messagebox.askyesno("카드 적용", "현재 카드의 내용과 효과를 선택한 카드로 바꿀까요?\n카드 ID와 전용 캐릭터 설정은 유지됩니다.", parent=self):
+            return False
+        index = tab.cur
+        old = tab.items[index]
+        try:
+            project = import_project_card(self.app.project, source["project"], card, self.app.all_ids())
+        except ValueError as exc:
+            messagebox.showwarning("카드 적용", str(exc), parent=self)
+            return False
+        replacement = project["cards"].pop()
+        imported_id = replacement["id"]
+        def rename_self(node):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "card" and value == imported_id:
+                        node[key] = old["id"]
+                    else:
+                        rename_self(value)
+            elif isinstance(node, list):
+                for value in node:
+                    rename_self(value)
+        rename_self(replacement)
+        replacement["id"] = old["id"]
+        replacement["pool_character"] = old.get("pool_character", "")
+        project["cards"][index] = replacement
+        self.app.project = project
+        self.app.mark_dirty()
+        self.app.load_all()
+        tab.refresh_list(index)
+        self.status.configure(text=f"{M.text(replacement, 'name', 'ko')}을(를) 편집 중인 카드에 적용했습니다.")
+        return True
+
+    def drag_start(self, event):
+        index = self.cards.nearest(event.y)
+        self._drag = (index, event.x_root, event.y_root) if 0 <= index < len(self.rows) else None
+        if self._drag:
+            self.cards.grab_set()
+
+    def _cleanup_drag(self, event):
+        if event.widget is not self:
+            return
+        try:
+            if self.cards.grab_current() == self.cards:
+                self.cards.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self.app.card_tab.tree.unbind("<ButtonRelease-1>", self._target_release_bind)
+        except tk.TclError:
+            pass
+
+    def drag_move(self, event):
+        if self._drag and abs(event.x_root - self._drag[1]) + abs(event.y_root - self._drag[2]) > 8:
+            self.status.configure(text="카드 탭에 놓으면 선택한 항목을 가져옵니다.")
+
+    def drag_end(self, event):
+        drag, self._drag = self._drag, None
+        try:
+            if self.cards.grab_current() == self.cards:
+                self.cards.grab_release()
+        except tk.TclError:
+            pass
+        if not drag or abs(event.x_root - drag[1]) + abs(event.y_root - drag[2]) <= 8:
+            return
+        def inside(widget):
+            return (widget.winfo_ismapped() and widget.winfo_rootx() <= event.x_root < widget.winfo_rootx() + widget.winfo_width()
+                    and widget.winfo_rooty() <= event.y_root < widget.winfo_rooty() + widget.winfo_height())
+        card, source = self.rows[drag[0]], self.source()
+        if inside(self.drop_zone):
+            self.add(card, source)
+            return
+        if inside(self):
+            self.status.configure(text="아래 가져오기 영역이나 카드 탭에 놓아 주세요.")
+            return
+        tab = self.app.card_tab
+        if not inside(tab.tree):
+            self.status.configure(text="카드 목록 위에 놓으면 가져올 수 있습니다.")
+            return
+        if source.get("kind") == "card_keywords":
+            self.apply_selected(card, source)
+        elif source.get("game") and source.get("kind", "cards") != "cards":
+            self.status.configure(text="카드 탭에는 카드만 가져올 수 있습니다.")
+        else:
+            self.add(card, source)
+
+    def _original_error(self, card, exc):
+        # Windows 도구가 출력한 NUL과 제어 문자는 Tk 대화상자에 그대로 넘기지 않는다.
+        detail = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", str(exc)).strip()
+        if not detail:
+            detail = "실패한 도구가 오류 설명을 반환하지 않았습니다. .NET SDK와 게임 설치 경로를 확인해 주세요."
+        title = f"원작 카드 {card['id']} 읽기 실패"
+        self.status.configure(text=f"{title} · {detail.splitlines()[0][:80]}")
+        self.app.log(f"[오류] {title} ({type(exc).__name__})\n{detail}")
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.transient(self)
+        ttk.Label(win, text=title, padding=8).pack(anchor="w")
+        view = tk.Text(win, width=76, height=12, wrap="word")
+        view.pack(fill="both", expand=True, padx=8)
+        view.insert("1.0", f"{type(exc).__name__}\n{detail}")
+        view.configure(state="disabled")
+        ttk.Button(win, text="닫기", command=win.destroy).pack(pady=6)
+        win.focus_set()
 
     def show_code(self):
         card = self.selection()
@@ -341,7 +479,7 @@ class CardLibrary(tk.Toplevel):
         self.reading = True
         self.show_card()
         self.status.configure(text="원작 카드 코드를 읽는 중…")
-        future = self.reader.submit(read_original_code, self.assets.sts2_path, card["id"])
+        future = self.reader.submit(read_original_code, self.assets.sts2_path, card["id"], self.app.log)
         def finish():
             if not future.done():
                 self.after(100, finish)
@@ -352,32 +490,72 @@ class CardLibrary(tk.Toplevel):
                 display()
                 self.status.configure(text="원작 수치를 설명에 반영했습니다.")
             except Exception as exc:
-                self.status.configure(text="원작 코드를 읽지 못했습니다.")
-                messagebox.showerror("원작 코드", str(exc), parent=self)
+                self._original_error(card, exc)
             self.show_card()
         self.after(100, finish)
 
-    def add(self):
-        card, source = self.selection(), self.source()
+    def import_game_copy(self, card):
+        if self.reading:
+            self.status.configure(text="원작 코드를 읽는 중입니다.")
+            return False
+        project = self.app.project
+        folder = self.assets.sts2_path
+        self.reading = True
+        self.status.configure(text="원작 카드 효과를 가져오는 중…")
+        future = self.reader.submit(read_original_code, folder, card["id"])
+        def finish():
+            if not future.done():
+                self.after(100, finish)
+                return
+            self.reading = False
+            try:
+                code, _ = future.result()
+                if self.app.project is not project:
+                    raise ValueError("프로젝트가 변경되었습니다. 카드를 다시 가져오세요.")
+                em = MI.ExtMod()
+                em.classes = {c.name: c for c in MI.parse_cs(code)}
+                MI._extract_items(em)
+                item = next((it for it in em.items["card"] if it["class"] == M.pascal(card["id"].lower())), None)
+                if item is None:
+                    raise ValueError("원작 카드의 기본 클래스와 효과를 확인할 수 없습니다.")
+                item.update({k: v for k, v in card.items() if k.startswith(("name_", "desc_"))})
+                copy_card = MI.clone_item(em, item, project)
+                copy_card["clone"]["game_original"] = True
+                self.add(copy_card, {"project": {"cards": [copy_card]}})
+            except Exception as exc:
+                self._original_error(card, exc)
+        self.after(100, finish)
+        return True
+
+    def add(self, card=None, source=None):
+        card, source = card or self.selection(), source or self.source()
         if not card:
-            return
+            return False
+        if source.get("game") and source.get("kind", "cards") == "cards":
+            return self.import_game_copy(card)
         if source.get("game"):
             ch = self.app.project["character"]
             kind = source.get("kind", "cards")
             if kind in ("cards", "relics", "potions") and not ch.get("enabled"):
                 messagebox.showinfo("원작 카드", "캐릭터 탭에서 새 캐릭터 만들기를 켜면 원작 카드를 풀에 추가할 수 있습니다.", parent=self)
-                return
+                return False
             ch.setdefault("game_" + kind, {})[card["id"]] = dict(card) if kind in ("powers", "card_keywords") else M.text(card, "name", "ko")
         else:
             try:
                 self.app.project = import_project_card(self.app.project, source["project"], card, self.app.all_ids())
             except ValueError as exc:
                 messagebox.showwarning("카드 가져오기", str(exc), parent=self)
-                return
+                return False
         self.app.mark_dirty()
         self.app.load_all()
+        if not source.get("game"):
+            tab = self.app.card_tab
+            index = len(self.app.project["cards"]) - 1
+            tab.search.set("")
+            tab.select_index(index)
         self.status.configure(text=f"{M.text(card, 'name', 'ko')} 추가됨")
         self.show_card()
+        return True
 
     def remove(self):
         card = self.selection()

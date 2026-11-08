@@ -8,9 +8,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import os
+import json
+from pathlib import Path
 import re
+import traceback
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import blockcode as B
 from winpos import center_window
@@ -19,6 +24,26 @@ import modgen as M
 TITLE = "블록 코딩"
 FONT = ("Malgun Gothic", 10)
 FONT_B = ("Malgun Gothic", 10, "bold")
+
+
+# Short names in the picker; the workspace shows the editable arguments.
+PALETTE_NAMES = {
+    "damage": "피해 주기 · 대상과 횟수 선택",
+    "block": "방어도 얻기", "draw": "카드 뽑기", "energy": "에너지 얻기",
+    "apply_power": "파워 부여하기", "remove_power": "파워 제거하기",
+    "heal": "체력 회복하기", "lose_hp": "방어도를 무시하고 체력 잃기",
+    "pick": "카드 골라서 한 가지 동작 실행",
+    "pick_each": "카드 골라서 한 장마다 여러 동작 실행",
+    "picked_action": "고른 카드에 동작 추가 · ‘한 장마다 실행’ 안에서 사용",
+    "pick_transform": "고른 카드를 지정한 카드로 변화시키기",
+    "if": "조건을 만족하면 실행", "if_else": "조건에 따라 두 갈래로 실행",
+    "repeat": "안에 넣은 블록 반복하기",
+}
+
+
+def _advanced_palette_block(op, spec):
+    return (spec["cat"] == "mod_api" or op in ("original_play", "source_step")
+            or any(kind == "code" for kind, _ in spec.get("args", {}).values()))
 
 
 def _plain(s):
@@ -592,6 +617,7 @@ class BlockEditor(tk.Toplevel):
         super().__init__(master)
         self.title(f"{TITLE} — 새 능력 만들기")
         self.project, self.owner_kind, self.item = project, owner_kind, item or {}
+        self.app = getattr(master, "app", None)
         self.allow_event = allow_event
         self.on_decompose = on_decompose
         B.set_project_hint(project)
@@ -632,6 +658,17 @@ class BlockEditor(tk.Toplevel):
         # ---- 블록 모음 ----
         pal_outer = ttk.Frame(upper, padding=4)
         upper.add(pal_outer, weight=0)
+        search_row = ttk.Frame(pal_outer)
+        search_row.pack(fill="x")
+        ttk.Label(search_row, text="블록 검색").pack(side="left")
+        self.palette_query = tk.StringVar(self)
+        search = ttk.Entry(search_row, textvariable=self.palette_query, width=18)
+        search.pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(search_row, text="지우기", width=6, command=lambda: self.palette_query.set("")).pack(side="right")
+        search.bind("<Escape>", lambda _: (self.palette_query.set(""), "break")[1])
+        self.show_advanced = tk.BooleanVar(self, True)
+        ttk.Checkbutton(pal_outer, text="고급 블록 표시 (C#·모드 전용)",
+                        variable=self.show_advanced, command=self._build_palette).pack(anchor="w")
         self.pal_canvas = tk.Canvas(pal_outer, width=290, background="#f4f4f6", highlightthickness=0)
         psb = ttk.Scrollbar(pal_outer, orient="vertical", command=self.pal_canvas.yview)
         self.pal_canvas.configure(yscrollcommand=psb.set)
@@ -640,6 +677,17 @@ class BlockEditor(tk.Toplevel):
         self.palette = tk.Frame(self.pal_canvas, background="#f4f4f6")
         self.pal_canvas.create_window(0, 0, window=self.palette, anchor="nw")
         self.palette.bind("<Configure>", lambda _e: self.pal_canvas.configure(scrollregion=self.pal_canvas.bbox("all")))
+        self.palette_query.trace_add("write", lambda *_: self._build_palette())
+        self.preset_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "sts2_mod_maker" / "block_presets"
+        self.saved_presets = {}
+        for preset_file in sorted(self.preset_dir.glob("*.json")):
+            try:
+                record = json.loads(preset_file.read_text(encoding="utf8"))
+                if isinstance(record["name"], str) and isinstance(record["blocks"], list) and all(
+                        isinstance(b, dict) and b.get("op") in B.SPECS for b in B.walk(record["blocks"])):
+                    self.saved_presets[preset_file.stem] = record
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
         self._build_palette()
 
         # ---- 작업 공간 ----
@@ -698,6 +746,10 @@ class BlockEditor(tk.Toplevel):
             ttk.Label(lower, text="원본 카드의 설명 문구를 그대로 씁니다.\n수치는 원본 변수(V0 등)를 바꾸면 설명 숫자도 함께 바뀝니다.\n"
                                   "블록 위 이름에 마우스를 올리면 그 블록의 C# 이 보입니다.",
                       foreground="#555", justify="left").grid(row=1, column=1, rowspan=3, sticky="nw", pady=4)
+        presets = ttk.Frame(lower)
+        presets.grid(row=6, column=0, sticky="w")
+        ttk.Button(presets, text="블록 모음 저장…", command=self.save_blocks).pack(side="left")
+        ttk.Button(presets, text="블록 모음 불러오기…", command=self.load_blocks).pack(side="left", padx=4)
         btns = ttk.Frame(lower)
         btns.grid(row=6, column=1, sticky="e", pady=(6, 0))
         ttk.Button(btns, text="확인", command=self.ok).pack(side="left", padx=4)
@@ -710,15 +762,34 @@ class BlockEditor(tk.Toplevel):
 
     # ---------------- 블록 모음 ----------------
     def _build_palette(self):
+        for widget in self.palette.winfo_children():
+            widget.destroy()
+        terms = self.palette_query.get().casefold().split()
+        matches = 0
+        self.pal_canvas.yview_moveto(0)
         is_manosaba = (self.project.get("takeover") or {}).get("mod", "").casefold() == "manosaba"
+        for preset in sorted(self.saved_presets.values(), key=lambda p: p["name"].casefold()):
+            keywords = " ".join(["저장한 블록 모음", preset["name"],
+                                 *(B.SPECS[b["op"]]["ko"] for b in B.walk(preset["blocks"]))]).casefold()
+            if not all(term in keywords for term in terms):
+                continue
+            if not matches:
+                ttk.Label(self.palette, text="저장한 블록 모음", font=FONT_B).pack(anchor="w", padx=6)
+            matches += 1
+            label = ttk.Label(self.palette, text=preset["name"], padding=5, relief="ridge", cursor="hand2")
+            label.pack(fill="x", padx=6, pady=2)
+            label.bind("<ButtonPress-1>", lambda e, p=preset: self.start_drag(e, preset=p))
+            label.bind("<B1-Motion>", self.on_drag)
+            label.bind("<ButtonRelease-1>", self.end_drag)
         for cat, ops in B.PALETTE:
             if cat == "mod_api" and not is_manosaba:
                 continue
             name, color = B.CATS[cat]
-            tk.Label(self.palette, text=name, font=FONT_B, background="#f4f4f6", foreground=_darker(color, 0.8),
-                     anchor="w").pack(fill="x", padx=6, pady=(10, 2))
+            show_heading = True
             for op in ops:
                 spec = B.SPECS[op]
+                if not self.show_advanced.get() and _advanced_palette_block(op, spec):
+                    continue
                 if op == "kotodama_gain" and self.owner_kind not in ("card", "relic", "potion", "power"):
                     continue
                 if op in ("manosaba_ema_summon", "manosaba_novel_summon", "manosaba_ignite",
@@ -735,13 +806,26 @@ class BlockEditor(tk.Toplevel):
                 if op == "card_attack" and self.owner_kind != "card":
                     continue
                 text = re.sub(r"\{\w+\}", "▢", spec["ko"])
-                lab = tk.Label(self.palette, text=("⊓ " if spec.get("body") else "") + text, font=FONT,
+                caption = PALETTE_NAMES.get(op, text)
+                keywords = " ".join((name, text, caption, op, *(label for _, label in B.PICK_ACTIONS
+                                                    if op in ("pick", "picked_action")))).casefold()
+                if not all(term in keywords for term in terms):
+                    continue
+                matches += 1
+                if show_heading:
+                    tk.Label(self.palette, text=name, font=FONT_B, background="#f4f4f6", foreground=_darker(color, 0.8),
+                             anchor="w").pack(fill="x", padx=6, pady=(10, 2))
+                    show_heading = False
+                lab = tk.Label(self.palette, text=("⊓ " if spec.get("body") else "") + caption, font=FONT,
                                background=color, foreground="white", anchor="w", padx=8, pady=5, cursor="hand2",
                                wraplength=260, justify="left")
                 lab.pack(fill="x", padx=6, pady=2)
                 lab.bind("<ButtonPress-1>", lambda e, o=op: self.start_drag(e, new=o))
                 lab.bind("<B1-Motion>", self.on_drag)
                 lab.bind("<ButtonRelease-1>", self.end_drag)
+        if terms and not matches:
+            ttk.Label(self.palette, text="검색 결과가 없습니다." if self.show_advanced.get() else "검색 결과가 없습니다. 고급 블록도 확인해 보세요.").pack(padx=8, pady=12)
+            return
         tk.Label(self.palette, text="\n블록을 여기로 다시 끌어오면 지워집니다.\n오른쪽 클릭: 연결(가져온 호출) / 복제 / 삭제",
                  font=("Malgun Gothic", 9), background="#f4f4f6", foreground="#888", justify="left").pack(fill="x", padx=6)
 
@@ -867,6 +951,36 @@ class BlockEditor(tk.Toplevel):
         except Exception as exc:     # 미리보기는 실패해도 편집에는 지장 없음
             return f"(미리보기 실패: {exc})"
 
+    def _code_choices(self, op, key):
+        if op not in B.SPECS or op in ("src_call", "src_loop"):
+            return {}
+        ctx = M._Ctx(self.owner_kind, self.item)
+        if key in ("creature", "target", "attacker", "applier"):
+            choices = {"자신": ctx.me, "무작위 적 한 명": "@random_enemy"}
+            if ctx.single:
+                choices["선택한 대상"] = ctx.single
+            return choices
+        if key == "card_type":
+            return {f"{M.text(c, 'name', 'ko')} ({c['id']})": M.item_cls(self.project, "card", c)
+                    for c in self.project.get("cards", [])}
+        if key == "card":
+            choices = {"손패에서 무작위 한 장": "@random_hand"}
+            if self.owner_kind == "card":
+                choices["이 카드"] = "this"
+            return choices
+        if key == "power_type":
+            return {label: meta["cls"] for pid, label in M.power_options(self.project)
+                    if (meta := M.power_meta(self.project, pid))}
+        if key == "player":
+            return {"소유 플레이어": ctx.player}
+        if key == "pile":
+            return {label: "PileType." + pile for pile, label in B.PILES}
+        if key == "position" and B.SPECS[op]["args"][key][1].startswith("CardPilePosition."):
+            return {"맨 위": "CardPilePosition.Top", "맨 아래": "CardPilePosition.Bottom", "무작위 위치": "CardPilePosition.Random"}
+        if key == "keyword":
+            return {label: "CardKeyword." + code for code, label in M.CARD_KEYWORDS}
+        return {}
+
     def _arg_widget(self, parent, b, key, kind):
         a = b["args"]
         changed = self._changed
@@ -895,15 +1009,21 @@ class BlockEditor(tk.Toplevel):
             s = B.slot_info(b, key)
             cur = str(a.get(key, "") or "")
             opts = list(dict.fromkeys([cur] + list(s.get("options", []) or []) + ([s["orig"]] if s.get("orig") else [])))
-            v = tk.StringVar(value=cur)
-            w = ttk.Combobox(parent, textvariable=v, values=opts, width=max(6, min(30, len(cur) + 2)), font=FONT)
+            choices = self._code_choices(b["op"], key)
+            if B.SPECS.get(b["op"], {}).get("args", {}).get(key, (None, None))[1] in ("true", "false"):
+                choices.update({"예": "true", "아니오": "false"})
+            labels = {code: label for label, code in choices.items()}
+            options = list(choices) + [code for code in opts if code not in labels]
+            display = labels.get(cur, cur)
+            v = tk.StringVar(value=display)
+            w = ttk.Combobox(parent, textvariable=v, values=options, width=max(14, min(30, len(display) + 2)), font=FONT)
             state = {"pushed": False}
 
             def upd(*_):
                 if not state["pushed"]:
                     self._push_history()
                     state["pushed"] = True
-                a[key] = v.get()
+                a[key] = choices.get(v.get(), v.get())
                 changed()
             v.trace_add("write", upd)
             return w
@@ -927,6 +1047,10 @@ class BlockEditor(tk.Toplevel):
             return _Combo(parent, B.WHICH, a.get(key), 8, set_)
         if kind == "card_type":
             return _Combo(parent, B.CARD_TYPES, a.get(key), 6, set_)
+        if kind == "result_filter":
+            import gimmick as G
+            options = G.card_filters(self.project) + [("kw:" + code, label + " 키워드 카드") for code, label in M.CARD_KEYWORDS]
+            return _Combo(parent, options, a.get(key, "Any"), 20, set_)
         if kind == "card_filter":
             import gimmick as G
             return _Combo(parent, G.card_filters(self.project), a.get(key) or "Any", 12, set_)
@@ -1062,8 +1186,8 @@ class BlockEditor(tk.Toplevel):
                 w.bind("<ButtonRelease-1>", self.end_drag)
                 w.bind("<Button-3>", lambda e, b_=b, l_=lst: self.context_menu(e, b_, l_))
 
-    def start_drag(self, e, new=None, block=None, src=None):
-        self.drag = {"new": new, "block": block, "src": src, "x0": e.x_root, "y0": e.y_root, "moved": False}
+    def start_drag(self, e, new=None, block=None, src=None, preset=None):
+        self.drag = {"preset": preset, "new": new, "block": block, "src": src, "x0": e.x_root, "y0": e.y_root, "moved": False}
 
     def _canvas_xy(self, e):
         return (self.canvas.canvasx(e.x_root - self.canvas.winfo_rootx()),
@@ -1078,7 +1202,7 @@ class BlockEditor(tk.Toplevel):
         d["moved"] = True
         x, y = self._canvas_xy(e)
         self.canvas.delete("drag")
-        name = B.SPECS[d["new"]]["ko"] if d["new"] else B.block_caption(d["block"])
+        name = d["preset"]["name"] if d["preset"] else B.SPECS[d["new"]]["ko"] if d["new"] else B.block_caption(d["block"])
         self.canvas.create_text(x + 14, y + 10, anchor="nw", text="✥ " + re.sub(r"\{\w+\}", "▢", name)[:30],
                                 font=FONT_B, fill="#555", tags="drag")
         slot = self._nearest_slot(x, y, d)
@@ -1119,12 +1243,16 @@ class BlockEditor(tk.Toplevel):
         x, y = self._canvas_xy(e)
         if not (0 <= e.x_root - self.canvas.winfo_rootx() <= self.canvas.winfo_width()):
             return
+        if not 0 <= e.y_root - self.canvas.winfo_rooty() < self.canvas.winfo_height():
+            return
         slot = self._nearest_slot(x, y, d)
         if not slot:
             return
         lst, idx, _sx, _sy = slot
         self._push_history()
-        if d["new"]:
+        if d["preset"]:
+            lst[idx:idx] = copy.deepcopy(d["preset"]["blocks"])
+        elif d["new"]:
             lst.insert(idx, B.new_block(d["new"]))
         else:
             blk, src = d["block"], d["src"]
@@ -1178,6 +1306,60 @@ class BlockEditor(tk.Toplevel):
         self.render()
 
     # ---------------- 되돌리기 ----------------
+    def _register_preset(self, path, blocks):
+        source = Path(path).resolve()
+        key = hashlib.sha256(os.path.normcase(str(source)).encode("utf8")).hexdigest()
+        record = {"name": source.stem, "blocks": copy.deepcopy(blocks)}
+        self.preset_dir.mkdir(parents=True, exist_ok=True)
+        dest = self.preset_dir / (key + ".json")
+        temp = dest.with_suffix(".tmp")
+        temp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf8")
+        temp.replace(dest)
+        self.saved_presets[key] = record
+        self._build_palette()
+
+    def save_blocks(self):
+        if not self.blocks:
+            messagebox.showinfo(TITLE, "저장할 블록이 없습니다.", parent=self)
+            return
+        path = filedialog.asksaveasfilename(parent=self, title="블록 모음 저장",
+            defaultextension=".sts2blocks", filetypes=[("블록 모음", "*.sts2blocks")])
+        if path:
+            try:
+                data = {"format": "sts2blocks-1", "blocks": self.blocks}
+                Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf8")
+                self._register_preset(path, self.blocks)
+            except OSError as exc:
+                messagebox.showerror(TITLE, str(exc), parent=self)
+
+    def load_blocks(self):
+        path = filedialog.askopenfilename(parent=self, title="블록 모음 불러오기",
+            filetypes=[("블록 모음", "*.sts2blocks")])
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+            if not isinstance(data, dict) or data.get("format") != "sts2blocks-1":
+                raise ValueError("모드 메이커에서 저장한 블록 모음을 선택하세요.")
+            blocks = data.get("blocks")
+            if not isinstance(blocks, list) or not blocks:
+                raise ValueError("저장된 블록 목록이 비어 있거나 손상되었습니다.")
+            for block in B.walk(blocks):
+                if (not isinstance(block, dict) or block.get("op") not in B.SPECS
+                        or not isinstance(block.get("args", {}), dict)
+                        or any(not isinstance(block[k], list) for k in B.BODY_KEYS if k in block)):
+                    raise ValueError("지원하지 않는 블록이 포함되어 있습니다.")
+            self._push_history()
+            self.blocks.extend(blocks)
+            try:
+                self.render()
+                self._register_preset(path, blocks)
+            except Exception:
+                self.undo()
+                raise
+        except Exception as exc:
+            messagebox.showerror("블록 모음 불러오기", str(exc) or repr(exc), parent=self)
+
     def _push_history(self):
         self.history.append(copy.deepcopy(self.blocks))
         if len(self.history) > 50:
@@ -1197,7 +1379,14 @@ class BlockEditor(tk.Toplevel):
         try:
             blocks, info = self.on_decompose()
         except Exception as exc:
-            messagebox.showwarning("블록 변환", f"코드를 블록으로 변환하지 못했습니다.\n{exc}", parent=self)
+            detail = str(exc).strip() or repr(exc).strip() or type(exc).__name__
+            trace = traceback.format_exc()
+            if self.app is not None:
+                self.app.log(f"[오류] 원본 코드 재분석 실패 ({type(exc).__name__}): {detail}\n{trace}")
+            messagebox.showerror("원본 코드 분석 실패", "원본 코드를 블록으로 풀지 못했습니다.\n\n"
+                                 f"{type(exc).__name__}: {detail}\n\n"
+                                 "현재 효과는 유지됩니다. 도움말 → 건의 / 오류 보내기에서 오류 로그를 확인할 수 있습니다.",
+                                 parent=self)
             return
         finally:
             if had_mappings:
@@ -1205,8 +1394,11 @@ class BlockEditor(tk.Toplevel):
             else:
                 self.project.pop("call_mappings", None)
         if not blocks:
-            messagebox.showinfo("블록 변환", f"변환할 수 있는 코드가 없습니다.\n{info if isinstance(info, str) else ''}",
-                                parent=self)
+            reason = str(info or "").strip() or "변환할 수 있는 코드가 없습니다. 원본 DLL과 카드 클래스를 확인해 주세요."
+            if self.app is not None:
+                self.app.log(f"[오류] 원본 코드 블록 변환 실패: {reason}")
+            messagebox.showwarning("원본 코드 분석 결과", "원본 코드를 블록으로 풀지 못했습니다.\n\n"
+                                   f"{reason}\n\n현재 효과 블록은 그대로 유지됩니다.", parent=self)
             return
         self._push_history()
         self.blocks = blocks
