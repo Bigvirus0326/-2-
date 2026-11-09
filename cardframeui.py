@@ -1,6 +1,7 @@
 """카드 테두리 디자인 편집 창 — 스타일 목록 + 부위별(틀·그림 테두리·제목 띠) 설정 + 실시간 미리보기 3장."""
 from __future__ import annotations
 
+from uxkit import buffered_canvas, stable_listbox
 import os
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
@@ -157,6 +158,7 @@ class FrameStyleDialog(tk.Toplevel):
     def styles(self):
         return CF.styles(self.app.project)
 
+    @stable_listbox('lst')
     def refresh_list(self, select=None):
         self.lst.delete(0, "end")
         for s in self.styles:
@@ -359,6 +361,7 @@ class FrameStyleDialog(tk.Toplevel):
             self.after_cancel(self._job)
         self._job = self.after(200, self.draw)
 
+    @buffered_canvas("canvas")
     def draw(self):
         self._job = None
         c = self.canvas

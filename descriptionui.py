@@ -158,17 +158,29 @@ class DescriptionText(tk.Text):
         self._remember()
 
     def source(self, start="1.0", end="end-1c"):
-        out = []
+        segments = []
         for kind, value, index in self.dump(start, end, text=True, window=True):
             if kind == "window":
                 pair = self.chips.get(value)
                 value = pair[1] if pair else ""
-            tags = [name for name in self.tag_names(index) if name in self.formats]
-            out.append("".join(self.formats[name][0] for name in tags) + value +
-                       "".join(self.formats[name][1] for name in reversed(tags)))
+            tags = tuple(name for name in self.tag_names(index) if name in self.formats)
+            if segments and segments[-1][0] == tags:
+                segments[-1] = (tags, segments[-1][1] + value)
+            else:
+                segments.append((tags, value))
+        out = ["".join(self.formats[name][0] for name in tags) + value +
+               "".join(self.formats[name][1] for name in reversed(tags))
+               for tags, value in segments]
         return "".join(out)
 
     def set_source(self, source, history=True):
+        source = source or ""
+        if self.source() == source:
+            self.refresh_labels()
+            if history:
+                self._history = [source]
+                self._history_pos = 0
+            return
         self._busy = True
         try:
             super().delete("1.0", "end")
@@ -254,18 +266,18 @@ class GameColorBar(ttk.Frame):
         super().__init__(parent)
         self.field, self.on_change = field, on_change
         from uxkit import Tooltip
-        ttk.Label(self, text="게임 기본 색").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        ttk.Label(self, text="게임 기본 색").grid(row=0, column=0, columnspan=4, sticky="w", padx=(0, 5))
         self.presets = {}
         for col, (name, label) in enumerate(GAME_COLOR_LABELS, 1):
             button = tk.Button(self, text=label, width=3, background=PV.TEXT_COLORS[name],
                                foreground="#17212e", activeforeground="#17212e", activebackground=PV.TEXT_COLORS[name],
                                relief="flat", borderwidth=1, cursor="hand2", takefocus=False,
                                command=lambda name=name:self.apply(name))
-            button.grid(row=0, column=col, padx=2, pady=2)
+            button.grid(row=1+(col-1)//4, column=(col-1)%4, padx=2, pady=2,sticky="we")
             Tooltip(button, "선택한 글자를 게임의 " + label + "으로 표시합니다.")
             self.presets[name] = button
         actions = ttk.Frame(self)
-        actions.grid(row=1, column=0, columnspan=9, sticky="w", pady=(2, 0))
+        actions.grid(row=1+(len(GAME_COLOR_LABELS)+3)//4, column=0, columnspan=4, sticky="w", pady=(2, 0))
         ttk.Button(actions, text="기본색으로", command=lambda:self.apply(None)).pack(side="left")
         ttk.Button(actions, text="다른 색 직접 선택…", command=self.custom).pack(side="left", padx=4)
 

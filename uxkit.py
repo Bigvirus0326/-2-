@@ -4,20 +4,185 @@
 from __future__ import annotations
 
 import json
+import sys
+import time
+import _tkinter
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 from winpos import center_window
-from docking import CheckedMenu, pointer_in_workspace, DockDrag, DockPanedWindow, install_panel_menu, is_panel_window, panel_groups, position_window, prepare_float_window
+from docking import forget_floating_window, CheckedMenu, pointer_in_workspace, DockDrag, DockPanedWindow, install_panel_menu, is_panel_window, panel_groups, position_window, prepare_float_window
+
+# Retain visible content until its replacement has been prepared. These helpers
+# never pump events: callers keep control of when Tk paints the completed batch.
+from functools import wraps
+from contextlib import ExitStack, contextmanager
+
+
+@contextmanager
+def _canvas_batch(canvas, defer_new=False):
+    if getattr(canvas, "_paint_batch_active", False):
+        yield
+        return
+    canvas._paint_batch_active = True
+    old = set(canvas.find_all())
+    original_delete, original_create = canvas.delete, canvas._create
+    clear = False
+    pending = []
+    def delete(*items):
+        nonlocal clear
+        if "all" in items:
+            clear = True
+            pending.clear()
+            for item in set(canvas.find_all()) - old:
+                original_delete(item)
+        else:
+            original_delete(*items)
+    def create(kind, args, kw):
+        if defer_new:
+            # Only draw-only layout passes use this mode: they do not inspect
+            # item IDs/bounds until the complete layout is ready.
+            pending.append((kind,args,dict(kw)))
+            return 0
+        return original_create(kind,args,kw)
+    canvas.delete, canvas._create = delete, create
+    try:
+        yield
+        for kind,args,kw in pending:
+            original_create(kind,args,kw)
+    except BaseException:
+        for item in set(canvas.find_all()) - old:
+            original_delete(item)
+        raise
+    else:
+        if clear:
+            for item in old:
+                original_delete(item)
+    finally:
+        canvas.delete, canvas._create = original_delete, original_create
+        canvas._paint_batch_active = False
+
+
+def buffered_canvas(*attributes, defer_new=False):
+    def decorate(method):
+        @wraps(method)
+        def render(self, *args, **kwargs):
+            # PhotoImage destruction blanks existing canvas images immediately.
+            # Hold previous references through the entire drawing operation.
+            retained = [v[:] if isinstance(v,list) else v for k,v in vars(self).items()
+                        if "photo" in k or "image" in k]
+            with ExitStack() as stack:
+                for canvas in ([getattr(self,a) for a in attributes] if attributes else [self]):
+                    stack.enter_context(_canvas_batch(canvas, defer_new))
+                return method(self,*args,**kwargs)
+        return render
+    return decorate
+
+
+def stable_tree(attribute="tree"):
+    """Reuse root rows when a legacy refresh calls delete-all then insert."""
+    def decorate(method):
+        @wraps(method)
+        def refresh(self,*args,**kwargs):
+            tree = getattr(self,attribute)
+            old = tuple(tree.get_children())
+            delete, insert, children = tree.delete, tree.insert, tree.get_children
+            rebuilding, used = False, []
+            def remove(*items):
+                nonlocal rebuilding
+                if tuple(map(str,items)) == old:
+                    rebuilding = True
+                else:
+                    delete(*items)
+            def add(parent,index,iid=None,**options):
+                if not rebuilding or parent != "":
+                    return insert(parent,index,iid=iid,**options)
+                key = str(iid) if iid is not None else old[len(used)] if len(used)<len(old) else None
+                if key is not None and tree.exists(key):
+                    for name,value in options.items():
+                        if str(tree.item(key,name)) != str(value):
+                            tree.item(key,**{name:value})
+                    if tree.index(key) != len(used):
+                        tree.move(key,"",len(used))
+                else:
+                    key = insert(parent,index,iid=key,**options)
+                used.append(str(key))
+                return key
+            def get_children(item=None):
+                if rebuilding and item in (None, ""):
+                    return tuple(used)
+                return children(item)
+            tree.delete, tree.insert, tree.get_children = remove, add, get_children
+            try:
+                result = method(self,*args,**kwargs)
+                if rebuilding:
+                    stale = [key for key in old if key not in used]
+                    if stale:
+                        delete(*stale)
+                return result
+            finally:
+                tree.delete, tree.insert, tree.get_children = delete, insert, children
+        return refresh
+    return decorate
+
+
+def stable_listbox(*attributes):
+    """Keep unchanged list entries, selection and scroll position in place."""
+    def decorate(method):
+        @wraps(method)
+        def refresh(self,*args,**kwargs):
+            restorers = []
+            finishers = []
+            for attribute in attributes:
+                box = getattr(self,attribute)
+                old = tuple(box.get(0,"end"))
+                delete, insert = box.delete, box.insert
+                state = {"clear":False,"count":0}
+                def remove(first,last=None, state=state, delete=delete):
+                    if str(first)=="0" and str(last)=="end":
+                        state["clear"],state["count"] = True,0
+                    else:
+                        delete(first,last)
+                def add(index,*values, box=box, old=old, state=state, delete=delete, insert=insert):
+                    if not state["clear"] or str(index)!="end":
+                        return insert(index,*values)
+                    for value in values:
+                        i = state["count"]
+                        if i>=len(old):
+                            insert("end",value)
+                        elif old[i]!=str(value):
+                            delete(i)
+                            insert(i,value)
+                        state["count"] += 1
+                def finish(state=state, delete=delete, old=old):
+                    if state["clear"] and state["count"]<len(old):
+                        delete(state["count"],"end")
+                box.delete,box.insert = remove,add
+                restorers.append((box,delete,insert))
+                finishers.append(finish)
+            try:
+                result = method(self,*args,**kwargs)
+                for finish in finishers:
+                    finish()
+                return result
+            finally:
+                for box,delete,insert in restorers:
+                    box.delete,box.insert = delete,insert
+        return refresh
+    return decorate
+
 
 # ---------------------------------------------------------------------------
 # 테마
 # ---------------------------------------------------------------------------
 C = {
-    "bg": "#f3f4f7", "surface": "#ffffff", "line": "#d6d9e0", "line2": "#c3c8d2", "text": "#1d2129", "muted": "#6b7280",
-    "accent": "#2f6bd8", "accent_hi": "#2559b8", "accent_soft": "#dce7fb", "hover": "#eef1f6", "warn": "#b4572f",
-    "console": "#1d1f24", "console_fg": "#d7dae0",
+    "bg": "#eef2f8", "surface": "#ffffff", "line": "#dfe5ef", "line2": "#ccd5e4",
+    "text": "#24324b", "muted": "#66758c", "accent": "#365ee8", "accent_hi": "#2949bd",
+    "accent_soft": "#e9eeff", "hover": "#f2f5ff", "warn": "#a46615", "danger": "#b8364b",
+    "success": "#237b62", "workspace": "#f7f9fd", "panel": "#e8edf6",
+    "console": "#182235", "console_fg": "#d4deed",
 }
+
 FONT = "Malgun Gothic"
 
 
@@ -53,19 +218,19 @@ def apply_theme(root, size=10):
     st.configure(".", background=C["bg"], foreground=C["text"], font=f, bordercolor=C["line"], lightcolor=C["bg"],
                  darkcolor=C["bg"], troughcolor=C["bg"], focuscolor=C["accent"], selectbackground=C["accent_soft"],
                  selectforeground=C["text"], fieldbackground=C["surface"], insertcolor=C["text"])
-    st.configure("TFrame", background=C["bg"])
+    st.configure("TFrame", background=C["surface"])
     st.configure("Card.TFrame", background=C["surface"], relief="solid", borderwidth=1)
-    st.configure("TLabel", background=C["bg"], foreground=C["text"])
+    st.configure("TLabel", background=C["surface"], foreground=C["text"])
     st.configure("Muted.TLabel", foreground=C["muted"], font=fs)
-    st.configure("Head.TLabel", font=(FONT, size + 1, "bold"))
+    st.configure("Head.TLabel", font=(FONT, size + 1, "bold"), foreground=C["text"])
     st.configure("Count.TLabel", foreground=C["muted"], font=fs)
     st.configure("Help.TLabel", foreground=C["accent"], font=fs)
-    st.configure("TLabelframe", background=C["bg"], bordercolor=C["line"], relief="solid", borderwidth=1)
-    st.configure("TLabelframe.Label", background=C["bg"], foreground=C["accent_hi"], font=fb)
+    st.configure("TLabelframe", background=C["surface"], bordercolor=C["line"], relief="solid", borderwidth=1)
+    st.configure("TLabelframe.Label", background=C["surface"], foreground=C["text"], font=fb)
     st.configure("TSeparator", background=C["line"])
 
     st.configure("TButton", background=C["surface"], foreground=C["text"], bordercolor=C["line2"], lightcolor=C["surface"],
-                 darkcolor=C["surface"], padding=(10, 4), relief="flat", focusthickness=0)
+                 darkcolor=C["surface"], padding=(10, 4), relief="flat", focusthickness=1)
     st.map("TButton", background=[("disabled", C["bg"]), ("pressed", C["accent_soft"]), ("active", C["hover"])],
            bordercolor=[("focus", C["accent"]), ("active", C["accent"])],
            foreground=[("disabled", "#a2a7b1")])
@@ -78,16 +243,16 @@ def apply_theme(root, size=10):
            bordercolor=[("active", C["line"])])
     st.configure("Small.TButton", width=0, padding=(6, 2), font=fs)
 
-    st.configure("TCheckbutton", background=C["bg"], indicatorbackground=C["surface"], indicatorforeground=C["accent"],
+    st.configure("TCheckbutton", background=C["surface"], indicatorbackground=C["surface"], indicatorforeground=C["accent"],
                  bordercolor=C["line2"])
-    st.map("TCheckbutton", background=[("active", C["bg"])], indicatorbackground=[("selected", C["surface"])])
-    st.configure("TRadiobutton", background=C["bg"], indicatorbackground=C["surface"], indicatorforeground=C["accent"],
+    st.map("TCheckbutton", background=[("active", C["surface"])], indicatorbackground=[("selected", C["surface"])])
+    st.configure("TRadiobutton", background=C["surface"], indicatorbackground=C["surface"], indicatorforeground=C["accent"],
                  bordercolor=C["line2"])
-    st.map("TRadiobutton", background=[("active", C["bg"])])
+    st.map("TRadiobutton", background=[("active", C["surface"])])
 
     for w in ("TEntry", "TCombobox", "TSpinbox"):
         st.configure(w, fieldbackground=C["surface"], background=C["surface"], bordercolor=C["line2"],
-                     lightcolor=C["surface"], darkcolor=C["surface"], padding=(5, 3), arrowcolor=C["muted"])
+                     lightcolor=C["surface"], darkcolor=C["surface"], padding=(7, 5), arrowcolor=C["muted"])
         st.map(w, bordercolor=[("focus", C["accent"])], lightcolor=[("focus", C["accent_soft"])],
                fieldbackground=[("readonly", C["surface"]), ("disabled", C["bg"])],
                foreground=[("disabled", "#9aa0aa")], arrowcolor=[("active", C["accent"])])
@@ -98,16 +263,16 @@ def apply_theme(root, size=10):
 
     st.configure("TNotebook", background=C["bg"], bordercolor=C["line"], tabmargins=(6, 6, 6, 0), padding=0)
     st.configure("TNotebook.Tab", background=C["bg"], foreground=C["muted"], bordercolor=C["bg"], lightcolor=C["bg"],
-                 padding=(10, 5), font=f)
+                 padding=(11, 7), font=f)
     st.map("TNotebook.Tab", background=[("selected", C["surface"]), ("active", C["hover"])],
            foreground=[("selected", C["accent_hi"]), ("active", C["text"])],
            bordercolor=[("selected", C["line"])], lightcolor=[("selected", C["surface"])],
            expand=[("selected", (0, 2, 0, 0))])
 
     st.configure("Treeview", background=C["surface"], fieldbackground=C["surface"], foreground=C["text"],
-                 bordercolor=C["line"], rowheight=int(root.winfo_fpixels("1i") / 96 * 26), font=f)
+                 bordercolor=C["line"], rowheight=max(int(root.winfo_fpixels("1i") / 96 * 29), int(size * float(root.tk.call("tk", "scaling"))) + 12), font=f)
     st.map("Treeview", background=[("selected", C["accent_soft"])], foreground=[("selected", C["text"])])
-    st.configure("Treeview.Heading", background=C["bg"], foreground=C["muted"], bordercolor=C["line"], font=fs, relief="flat")
+    st.configure("Treeview.Heading", background=C["bg"], foreground=C["muted"], bordercolor=C["line"], font=fs, relief="flat", padding=(8, 6))
     st.configure("TScrollbar", background=C["bg"], troughcolor=C["bg"], bordercolor=C["bg"], arrowcolor=C["muted"],
                  lightcolor=C["bg"], darkcolor=C["bg"], gripcount=0)
     st.map("TScrollbar", background=[("active", C["line"]), ("!active", C["bg"])])
@@ -127,6 +292,29 @@ def apply_theme(root, size=10):
     st.map("Step.TButton", background=[("pressed", C["accent_soft"]), ("active", C["accent_soft"])],
            bordercolor=[("active", C["accent"])])
     st.configure("Toolbar.TSeparator", background=C["line"])
+    # Shared visual hierarchy for main, floating and modal workspaces.
+    st.configure("Desk.TFrame", background=C["bg"])
+    st.configure("PanelHeader.TFrame", background=C["panel"])
+    st.configure("PanelHeader.TLabel", background=C["panel"], foreground=C["muted"], font=(FONT,size-1,"bold"))
+    st.configure("Panel.Tool.TButton", padding=(4, 0), font=fs, width=2, background=C["panel"],
+                 bordercolor=C["panel"], lightcolor=C["panel"], darkcolor=C["panel"])
+    st.map("Panel.Tool.TButton", background=[("active", C["accent_soft"])],
+           foreground=[("active", C["accent"])])
+    st.configure("Brand.TLabel", font=(FONT,size+3,"bold"), foreground=C["text"])
+    st.configure("Project.TLabel", font=fs, foreground=C["muted"])
+    st.configure("Badge.TLabel", padding=(8,3), background=C["accent_soft"], foreground=C["accent_hi"], font=fs)
+    st.configure("Saved.Badge.TLabel", background="#e9f5ef", foreground=C["success"])
+    st.configure("Unsaved.Badge.TLabel", background="#fff2df", foreground=C["warn"])
+    st.configure("Footer.TFrame", background=C["bg"])
+    st.configure("Footer.TLabel", background=C["bg"], foreground=C["muted"], font=fs)
+    st.configure("Danger.TButton", foreground=C["danger"])
+    st.map("Danger.TButton", background=[("active","#fff0f2")], foreground=[("disabled","#9da7b8")])
+    st.layout("Segment.TRadiobutton", [("Button.border", {"sticky":"nswe", "children":[
+        ("Button.padding", {"sticky":"nswe", "children":[("Radiobutton.label", {"sticky":"nswe"})]})]})])
+    st.configure("Segment.TRadiobutton", padding=(9,6), background=C["bg"], foreground=C["muted"],
+                 bordercolor=C["line"], font=f, anchor="center")
+    st.map("Segment.TRadiobutton", background=[("selected",C["accent_soft"]),("active",C["hover"])],
+           foreground=[("selected",C["accent_hi"])], bordercolor=[("selected",C["accent"])])
     return st
 
 
@@ -511,6 +699,7 @@ class FindPalette(tk.Toplevel):
             self.search.set(query)
         self.refresh(self.search.get())
 
+    @stable_tree("tree")
     def refresh(self, q):
         self.tree.delete(*self.tree.get_children())
         self.rows = {}
@@ -651,15 +840,22 @@ class BulkEditDialog(tk.Toplevel):
 # 자동 스크롤바 (창이 작으면 아래·오른쪽 스크롤바가 나타남)
 # ---------------------------------------------------------------------------
 class AutoScroll(ttk.Frame):
-    """안쪽(inner)이 창보다 크면 오른쪽·아래 스크롤바가 나타나고, 창이 더 크면 안쪽을 창에 맞게 늘린다."""
+    """Keep one content tree; scrolling only moves its existing Canvas window.
+
+    Position-only Configure events never trigger layout or synthetic painting.
+    Tk handles normal exposure of the retained native widgets.
+    """
 
     def __init__(self, master, x=True, y=True, **kw):
         super().__init__(master, **kw)
         self.x, self.y = x, y
-        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
-        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
-        self.canvas.configure(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
+        increment = max(12,int(self.winfo_fpixels("1i")/96*20))
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0,
+                                yscrollincrement=increment,xscrollincrement=increment)
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=lambda *a:self._drag(False,*a))
+        self.hsb = ttk.Scrollbar(self, orient="horizontal", command=lambda *a:self._drag(True,*a))
+        self.canvas.configure(yscrollcommand=lambda a,b:self._view_changed(False,a,b),
+                              xscrollcommand=lambda a,b:self._view_changed(True,a,b))
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.vsb.grid(row=0, column=1, sticky="ns")
         self.hsb.grid(row=1, column=0, sticky="ew")
@@ -670,14 +866,40 @@ class AutoScroll(ttk.Frame):
         self.inner = ttk.Frame(self.canvas)
         self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self._job = None
+        self._sizes = {}
+        self._window_size = None
+        self._region = None
+        self.bind("<Destroy>",self._destroy,add="+")
         self.inner.bind("<Configure>", self._later, add="+")
         self.canvas.bind("<Configure>", self._later, add="+")
 
-    def _later(self, _e=None):
+    def _destroy(self, event):
+        if event.widget is self:
+            for attr in ("_job",):
+                job = getattr(self,attr)
+                if job is not None:
+                    self.after_cancel(job)
+                    setattr(self,attr,None)
+
+    def _drag(self, horizontal, *args):
+        (self.canvas.xview if horizontal else self.canvas.yview)(*args)
+        present_scroll(self.canvas)
+
+    def _view_changed(self, horizontal, first, last):
+        (self.hsb if horizontal else self.vsb).set(first,last)
+
+    def _later(self, event=None):
+        if event is not None:
+            size = (event.width,event.height)
+            if self._sizes.get(event.widget)==size:
+                return
+            self._sizes[event.widget] = size
         if self._job is None:
-            self._job = self.after_idle(self._sync)
+            self._job = self.after(16,self._sync)
 
     def _sync(self):
+        if self._job is not None:
+            self.after_cancel(self._job)
         self._job = None
         try:
             cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
@@ -689,8 +911,13 @@ class AutoScroll(ttk.Frame):
         need_x, need_y = self.x and rw > cw + 1, self.y and rh > ch + 1
         w = max(cw, rw) if self.x else cw
         h = max(ch, rh) if self.y else ch
-        self.canvas.itemconfigure(self._win, width=w, height=h)
-        self.canvas.configure(scrollregion=(0, 0, w, h))
+        if self._window_size != (w,h):
+            self.canvas.itemconfigure(self._win,width=w,height=h)
+            self._window_size = (w,h)
+        region = (0,0,w,h)
+        if self._region != region:
+            self.canvas.configure(scrollregion=region)
+            self._region = region
         for bar, need in ((self.hsb, need_x), (self.vsb, need_y)):
             if need and not bar.winfo_ismapped():
                 bar.grid()
@@ -700,6 +927,118 @@ class AutoScroll(ttk.Frame):
             self.canvas.xview_moveto(0)
         if not need_y:
             self.canvas.yview_moveto(0)
+
+
+
+def _set_if(widget, **options):
+    """Configure only options that differ: any Tk configure re-runs layout and redraw."""
+    changed = {k:v for k,v in options.items() if str(widget.cget(k)) != str(v)}
+    if changed:
+        widget.configure(**changed)
+
+
+class ResponsiveForm:
+    """Reflow four-column forms without recreating their controls or variables."""
+    def __init__(self, form, viewport):
+        self.form, self.viewport = form, viewport
+        self.original = {w:dict(w.grid_info()) for w in form.grid_slaves()}
+        self.groups = {}
+        self.job = None
+        self._sizes = {}
+        self.narrow = None
+        viewport.bind("<Configure>",self.schedule,add="+")
+        form.bind("<Configure>",self.schedule,add="+")
+        form.bind("<Destroy>",self._destroy,add="+")
+        self.schedule()
+
+    def _destroy(self, event):
+        if event.widget is self.form and self.job is not None:
+            self.form.after_cancel(self.job)
+            self.job = None
+
+    def schedule(self, event=None):
+        if event is not None:
+            size = (event.width,event.height)
+            if self._sizes.get(event.widget)==size:
+                return
+            self._sizes[event.widget] = size
+        if self.job is None:
+            self.job = self.form.after(16,self._sync)
+
+    def _sync(self):
+        if self.job is not None:
+            self.form.after_cancel(self.job)
+        self.job = None
+        if not self.form.winfo_exists():
+            return
+        width = self.viewport.winfo_width()
+        if width<2:
+            return
+        dpi = self.form.winfo_fpixels("1i")/96
+        narrow = width<int(880*dpi)
+        stacked = narrow and width<400
+        if narrow != self.narrow or stacked != getattr(self,"stacked",None):
+            self.stacked = stacked
+            self.narrow = narrow
+            for col in range(4):
+                self.form.columnconfigure(col,weight=1 if col==(0 if stacked else 1) or (not narrow and col==3) else 0)
+        for widget, original in self.original.items():
+            current = widget.grid_info()
+            if not current:
+                continue
+            row,col = int(original["row"]),int(original["column"])
+            values = dict(row=row*4+col if stacked else row*2+col//2 if narrow else row,
+                          column=0 if stacked else col%2 if narrow else col,
+                          columnspan=1 if stacked else (2 if col==0 and int(original["columnspan"])>=4 else 1) if narrow else int(original["columnspan"]),
+                          rowspan=1 if narrow else int(original["rowspan"]))
+            if narrow:
+                values["sticky"] = "we" if col%2 or int(original["columnspan"])>1 else "w"
+            else:
+                values["sticky"] = original["sticky"]
+            if any(str(current.get(key)) != str(value) for key,value in values.items()):
+                widget.grid_configure(**values)
+            if isinstance(widget,ttk.Label):
+                _set_if(widget,wraplength=max(110,min(180,width//3)) if narrow and not stacked and col%2==0 and int(original["columnspan"])==1 else max(160,width-50))
+        controls = (ttk.Button,ttk.Checkbutton,ttk.Radiobutton,ttk.Menubutton,
+                    ttk.Entry,ttk.Combobox,ttk.Spinbox,ttk.Label,ttk.Separator,tk.Label,tk.Button)
+        def discover(parent):
+            packed = parent.pack_slaves()
+            if packed and all(isinstance(w,controls) and w.pack_info()["side"] in ("left","right") for w in packed):
+                records = []
+                for w in packed:
+                    info = w.pack_info()
+                    records.append((w,info))
+                    w.pack_forget()
+                self.groups[parent] = records
+            for child in parent.winfo_children():
+                if isinstance(child,(ttk.Frame,ttk.LabelFrame,tk.Frame,ttk.Notebook)):
+                    discover(child)
+        discover(self.form)
+        for parent, records in list(self.groups.items()):
+            if not parent.winfo_exists():
+                del self.groups[parent]
+                continue
+            budget = max(160,width-(200 if parent.master is self.form and parent.grid_info().get("column")==1 else 60 if parent.master is self.form else 220))
+            x,y,line_height,max_width = 0,0,0,0
+            for widget,info in records:
+                if not widget.winfo_exists():
+                    continue
+                if isinstance(widget,(ttk.Label,tk.Label)):
+                    _set_if(widget,wraplength=budget)
+                wanted,height = widget.winfo_reqwidth(),widget.winfo_reqheight()
+                if x and x+wanted>budget:
+                    y += line_height+6
+                    x,line_height = 0,0
+                current = widget.place_info()
+                if not current or int(current["x"])!=x or int(current["y"])!=y:
+                    widget.place(x=x,y=y)
+                x += wanted+6
+                max_width = max(max_width,x)
+                line_height = max(line_height,height)
+            # Keep native parents unchanged while wrapping controls. This also
+            # stays stable when an ancestor panel is detached with wm manage.
+            _set_if(parent,width=max(1,max_width),height=max(1,y+line_height+3))
+
 
 
 class _TabHost(tk.Frame, tk.Wm):
@@ -749,8 +1088,8 @@ class ScrollNotebook(ttk.Notebook):
 
     def add_scrolled(self, factory, text, **kw):
         host = _TabHost(self, background=C["bg"])
-        header = ttk.Frame(host, padding=5)
-        title_label = ttk.Label(header, text="⠿ " + text + " · 끌어서 결합", style="Head.TLabel")
+        header = ttk.Frame(host, padding=(10,3), style="PanelHeader.TFrame")
+        title_label = ttk.Label(header, text="⠿ " + text + " · 끌어서 결합", style="PanelHeader.TLabel")
         title_label.pack(side="left")
         ttk.Button(header, text="탭으로 되돌리기", command=lambda:self.dock(str(host))).pack(side="right")
         ttk.Button(header, text="숨기기", command=lambda:self.set_visible(str(host), False)).pack(side="right", padx=4)
@@ -1025,6 +1364,7 @@ class ScrollNotebook(ttk.Notebook):
         record["options"] = dict(old_options)
         super().forget(key)
         try:
+            host.update_idletasks()
             self.tk.call("wm", "manage", host)
             host.withdraw()
             record["detached"] = True
@@ -1041,7 +1381,7 @@ class ScrollNotebook(ttk.Notebook):
         except Exception:
             # A failed native transition must never leave a page forgotten and invisible.
             try:
-                self.tk.call("wm","forget",host)
+                forget_floating_window(host)
             except tk.TclError:
                 pass
             record["header"].pack_forget()
@@ -1064,7 +1404,7 @@ class ScrollNotebook(ttk.Notebook):
             record["geometry"] = host.geometry()
             host.withdraw()
             try:
-                self.tk.call("wm", "forget", host)
+                forget_floating_window(host)
                 record["header"].pack_forget()
                 native = set(map(str,super().tabs()))
                 after = self._visual_order[self._visual_order.index(key)+1:]
@@ -1152,6 +1492,58 @@ class ScrollNotebook(ttk.Notebook):
 
 
 # ---------------------------------------------------------------------------
+# 스크롤 직후 새로 드러난 줄을 같은 처리 안에서 그린다
+# ---------------------------------------------------------------------------
+_presenting = False
+
+
+def present_scroll(canvas):
+    """Paint the strip a scroll just revealed before the frame reaches the screen.
+
+    Moving a Canvas window on Windows copies the old pixels, so the revealed strip
+    shows stale copies until Tk handles WM_PAINT on a later loop pass. Only
+    regions Windows already invalidated are painted (no extra invalidation).
+    Canvases without embedded widgets are double-buffered and need nothing.
+    """
+    global _presenting
+    if _presenting or sys.platform != "win32":
+        return
+    try:
+        if not canvas.winfo_children():
+            return
+    except tk.TclError:
+        return
+    _presenting = True
+    try:
+        canvas.update_idletasks()
+        _user32().RedrawWindow(canvas.winfo_id(), None, None, 0x0100 | 0x0080)  # UPDATENOW | ALLCHILDREN
+        deadline = time.perf_counter() + 0.05
+        for _ in range(400):
+            if not canvas.tk.dooneevent(_tkinter.WINDOW_EVENTS | _tkinter.DONT_WAIT):
+                break
+            if time.perf_counter() > deadline:
+                break
+        canvas.update_idletasks()
+    except (tk.TclError, OSError, AttributeError):
+        pass
+    finally:
+        _presenting = False
+
+
+def scroll_command(canvas, horizontal=False):
+    """Scrollbar command for a Canvas that holds widgets (moves, then paints the new strip)."""
+    def command(*args):
+        (canvas.xview if horizontal else canvas.yview)(*args)
+        present_scroll(canvas)
+    return command
+
+
+def _user32():
+    import ctypes
+    return ctypes.windll.user32
+
+
+# ---------------------------------------------------------------------------
 # 마우스 휠: 포인터 아래에서 스크롤할 수 있는 것을 찾아 굴린다 (Shift = 가로, Ctrl = 화면 배율)
 # ---------------------------------------------------------------------------
 def _can_scroll(w, horizontal):
@@ -1163,13 +1555,13 @@ def _can_scroll(w, horizontal):
 
 
 def install_wheel(root, on_zoom=None):
-    acc = {"d": 0}
+    acc = {}
 
-    def steps(e):
-        acc["d"] += e.delta
-        n = int(acc["d"] / 120)
+    def steps(e, key):
+        acc[key] = acc.get(key,0)+e.delta
+        n = int(acc[key] / 120)
         if n:
-            acc["d"] -= n * 120
+            acc[key] -= n * 120
             return -n
         return 0
 
@@ -1189,23 +1581,57 @@ def install_wheel(root, on_zoom=None):
             return None
         seq = "<Shift-MouseWheel>" if horizontal else "<MouseWheel>"
         first = w
+        protect_value = isinstance(w,(ttk.Combobox,ttk.Spinbox,tk.Spinbox))
+        # Scrolling over a form input must not change its selected value.
+        # Popup listboxes and text/list widgets keep their own native scrolling.
+        if protect_value:
+            w = w.master
+        elif root.bind_class(w.winfo_class(),seq):
+            return None
         while w is not None:
             if _can_scroll(w, horizontal):
                 # 글 상자·목록처럼 자체 휠 동작이 있는 위젯은 그 동작이 이미 굴렸다
                 if w is first and root.bind_class(w.winfo_class(), seq):
                     return None
-                n = steps(e)
+                n = steps(e,(str(w),horizontal))
                 if n:
                     (w.xview_scroll if horizontal else w.yview_scroll)(n, "units")
+                    if isinstance(w, tk.Canvas):
+                        present_scroll(w)
                 return "break"
             w = w.master
-        return None
+        return "break" if protect_value else None
 
     def zoom(e):
         if on_zoom:
-            on_zoom(1 if e.delta > 0 else -1)
+            n = steps(e,("zoom",False))
+            if n:
+                on_zoom(-n)
         return "break"
 
-    root.bind_all("<MouseWheel>", lambda e: handler(e, False))
-    root.bind_all("<Shift-MouseWheel>", lambda e: handler(e, True))
-    root.bind_all("<Control-MouseWheel>", zoom)
+    tag = "MakerWheel"+str(id(root))
+    root.bind_class(tag,"<MouseWheel>",lambda e:handler(e,False))
+    root.bind_class(tag,"<Shift-MouseWheel>",lambda e:handler(e,True))
+    root.bind_class(tag,"<Control-MouseWheel>",zoom)
+    def attach(widget):
+        if isinstance(widget,str):
+            try:
+                widget = root.nametowidget(widget)
+            except (KeyError,tk.TclError):
+                return
+        tags = widget.bindtags()
+        if tag not in tags:
+            widget.bindtags((tag,)+tags)
+    def walk(widget):
+        attach(widget)
+        for child in widget.winfo_children():
+            walk(child)
+    walk(root)
+    root.bind_all("<Map>",lambda e:attach(e.widget),add="+")
+    # Also guard native input classes: Windows may deliver wheel input to a
+    # focused control before newly mapped widgets receive their custom tag.
+    for cls in ("TCombobox","TSpinbox","Spinbox"):
+        root.bind_class(cls,"<MouseWheel>",lambda e:handler(e,False))
+        root.bind_class(cls,"<Shift-MouseWheel>",lambda e:handler(e,True))
+    for cls in ("Text","Listbox","Treeview","TCombobox","TSpinbox","Spinbox"):
+        root.bind_class(cls,"<Control-MouseWheel>",zoom)

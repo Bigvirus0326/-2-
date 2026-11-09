@@ -1,4 +1,5 @@
 """Read-only character sources and selective card import."""
+from uxkit import stable_listbox
 import copy
 import json
 import os
@@ -259,6 +260,7 @@ class CardLibrary(ttk.Frame):
             except Exception as exc:
                 messagebox.showerror("프로젝트 열기", f"{path}\n{exc}", parent=self)
 
+    @stable_listbox('groups')
     def refresh_groups(self, selected):
         self.groups.delete(0, "end")
         for src in self.sources.values():
@@ -272,6 +274,7 @@ class CardLibrary(ttk.Frame):
         sel = self.groups.curselection()
         return list(self.sources.values())[sel[0]] if sel else {}
 
+    @stable_listbox('cards')
     def refresh_cards(self):
         query = self.search.get().strip().casefold()
         self.rows = [c for c in self.source().get("cards", []) if any(query in str(c.get(k, "")).casefold()
@@ -289,6 +292,7 @@ class CardLibrary(ttk.Frame):
 
     def show_card(self):
         card, source = self.selection(), self.source()
+        retained_photo = self.photo
         self.photo = None
         lines = []
         imported = False

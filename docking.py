@@ -63,6 +63,17 @@ class PanelHost(tk.Frame, tk.Wm):
     pass
 
 
+def forget_floating_window(host):
+    # Remove transient ownership before changing a floating window back
+    # into an embedded frame, including rollback paths.
+    try:
+        host.transient("")
+    except tk.TclError:
+        pass
+    host.update_idletasks()
+    host.tk.call("wm", "forget", host)
+
+
 class DockDrag:
     def __init__(self, owner, probe, finish):
         self.owner, self.probe, self.finish = owner, probe, finish
@@ -235,18 +246,18 @@ class DockPanedWindow(ttk.PanedWindow):
 
     def add_panel(self, factory, title, default_visible=True, **options):
         host = PanelHost(self, background="#f3f4f7")
-        header = ttk.Frame(host, padding=(5,3))
+        header = ttk.Frame(host, padding=(9,3), style="PanelHeader.TFrame")
         header.pack(fill="x")
-        label = ttk.Label(header, text="⠿ " + title, anchor="w")
+        label = ttk.Label(header, text="⠿ " + title, anchor="w", style="PanelHeader.TLabel")
         label.pack(side="left", fill="x", expand=True)
         body = ttk.Frame(host)
         body.pack(fill="both", expand=True)
         widget = factory(body)
         widget.pack(fill="both", expand=True)
         key = str(widget)
-        action = ttk.Button(header, text="↗", width=2, command=lambda:self.dock(key) if self._records[key]["detached"] else self.detach(key))
+        action = ttk.Button(header, text="↗", style="Panel.Tool.TButton", width=2, command=lambda:self.dock(key) if self._records[key]["detached"] else self.detach(key))
         action.pack(side="right")
-        ttk.Button(header, text="×", width=2, command=lambda:self.close_panel(key)).pack(side="right", padx=2)
+        ttk.Button(header, text="×", style="Panel.Tool.TButton", width=2, command=lambda:self.close_panel(key)).pack(side="right", padx=2)
         self._records[key] = dict(host=host, content=widget, title=title, options=options,
                                   visible=tk.BooleanVar(self,True), floating=tk.BooleanVar(self,False), detached=False, action=action, geometry=None, default_visible=default_visible, close_handler=None)
         self._hosts[str(host)] = key
@@ -352,6 +363,7 @@ class DockPanedWindow(ttk.PanedWindow):
         if was_visible:
             super().forget(host)
         try:
+            host.update_idletasks()
             self.tk.call("wm","manage",host)
             host.withdraw()
             record["detached"] = True
@@ -361,7 +373,7 @@ class DockPanedWindow(ttk.PanedWindow):
             record["action"].configure(text="↙")
         except Exception:
             try:
-                self.tk.call("wm","forget",host)
+                forget_floating_window(host)
             except tk.TclError:
                 pass
             record["detached"] = False
@@ -385,7 +397,7 @@ class DockPanedWindow(ttk.PanedWindow):
             if was_detached:
                 record["geometry"] = host.geometry()
                 host.withdraw()
-                self.tk.call("wm","forget",host)
+                forget_floating_window(host)
                 record["detached"] = False
             if before is not None and before != key:
                 self._order.remove(key)

@@ -1,6 +1,7 @@
 """AI 그림 설명서 창 / 그림 한꺼번에 적용 창."""
 from __future__ import annotations
 
+from uxkit import buffered_canvas, stable_tree
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -332,6 +333,7 @@ class ArtApplyDialog(tk.Toplevel):
         self.file_combo.configure(values=["(없음)"] + [os.path.basename(f) for f in files])
         self.refresh()
 
+    @stable_tree("tree")
     def refresh(self):
         sel = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
@@ -380,6 +382,7 @@ class ArtApplyDialog(tk.Toplevel):
             self.refresh()
             self.show_preview()
 
+    @buffered_canvas("canvas")
     def show_preview(self):
         from PIL import Image, ImageTk
         s = self.cur_slot()

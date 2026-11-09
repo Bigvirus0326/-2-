@@ -1,7 +1,7 @@
 """Native Tk docking regressions. Run: python -m unittest discover -s tests -v.
 
 Uses the real editor widgets with isolated settings, no user project or game assets.
-Pointer hit tests are supplied explicitly because test windows are transparent.
+Pointer hit tests are supplied explicitly because test windows stay off-screen.
 """
 import contextlib
 import itertools
@@ -48,13 +48,28 @@ class DockingRegressionTests(unittest.TestCase):
         except tk.TclError:
             cls.patches.close()
             raise
-        cls.app.attributes("-alpha", 0)
+        # Use ordinary off-screen windows. Fully transparent native windows
+        # take a separate Windows composition path during wm manage/forget.
+        cls.app.state("normal")
+        cls.app.geometry("1400x900+5000+5000")
+        cls.app.attributes("-alpha", 1)
+        original_float = D.prepare_float_window
+        def offscreen_float(host,*args,**kwargs):
+            original_float(host,*args,**kwargs)
+            host.geometry("+5000+5000")
+        cls.patches.enter_context(patch.object(D,"prepare_float_window",offscreen_float))
+        cls.patches.enter_context(patch.object(U,"prepare_float_window",offscreen_float))
+        cls.patches.enter_context(patch.object(blockui,"center_window",lambda win:win.geometry("+5000+5000")))
         cls.app.update()
         cls.nb = cls.app.nb
         cls.baseline = json.dumps(cls.app.project, sort_keys=True)
 
     @classmethod
     def tearDownClass(cls):
+        # Tcl timers outlive Tk windows unless explicitly canceled. Keep this
+        # interpreter isolated from subsequent test roots in the same thread.
+        for job in cls.app.tk.splitlist(cls.app.tk.call("after","info")):
+            cls.app.tk.call("after","cancel",job)
         cls.app.destroy()
         cls.patches.close()
         print(f"\nDocking coverage: {len(cls.checked_tabs)} task tabs, "
@@ -115,13 +130,13 @@ class DockingRegressionTests(unittest.TestCase):
 
     def float_tab(self, key):
         self.nb.detach(key, position=(400,180))
-        self.nb._pages[key]["host"].attributes("-alpha",0)
+        self.nb._pages[key]["host"].geometry("+5000+5000")
         self.app.update_idletasks()
         self.check_notebook()
 
     def float_panel(self, group, key):
         group.detach(key,position=(400,180))
-        group._records[key]["host"].attributes("-alpha",0)
+        group._records[key]["host"].geometry("+5000+5000")
         self.app.update_idletasks()
         self.check_panels(group)
 
@@ -178,13 +193,38 @@ class DockingRegressionTests(unittest.TestCase):
                         rootx=self.nb.winfo_rootx()+140,rooty=self.nb.winfo_rooty()+body_y)
                 record = self.nb._pages[source]
                 self.assertTrue(record["detached"])
-                record["host"].attributes("-alpha",0)
+                record["host"].geometry("+5000+5000")
                 self.app.update_idletasks()
                 self.check_notebook()
                 self.app.tk.call(record["host"].protocol("WM_DELETE_WINDOW"))
                 self.app.update_idletasks()
                 self.assertEqual(self.native_tabs(),prior)
                 self.check_notebook()
+
+    def test_release_delivered_to_body_entry(self):
+        key = self.nb._order[0]
+        self.nb.select(key)
+        self.app.update_idletasks()
+        row = self.nb._tab_strip_height() // 2
+        x = next(px for px in range(self.nb.winfo_width())
+                 if self.nb._native_tab_at(px, row) == key)
+        body = ttk.Entry(self.nb._pages[key]["box"])
+        try:
+            self.nb.event_generate("<ButtonPress-1>", x=x, y=row,
+                rootx=self.nb.winfo_rootx()+x, rooty=self.nb.winfo_rooty()+row)
+            # Native Windows controls may receive the final events instead of
+            # the notebook. Deliberately deliver both events to that control.
+            for sequence in ("<B1-Motion>", "<ButtonRelease-1>"):
+                body.event_generate(sequence, x=10, y=10,
+                    rootx=self.nb.winfo_rootx()+150,
+                    rooty=self.nb.winfo_rooty()+100)
+            self.assertTrue(self.nb._pages[key]["detached"])
+            self.assertIsNone(self.nb._tab_drag.drag)
+            self.assertEqual(self.nb._tab_drag._capture_bindings, [])
+            self.nb.dock(key)
+            self.check_notebook()
+        finally:
+            body.destroy()
 
     def test_batch_tab_restore_all_close_orders(self):
         keys = self.nb._order[:]
@@ -387,11 +427,145 @@ class DockingRegressionTests(unittest.TestCase):
         self.assertIsNone(drag.ghost)
         self.assertIsNone(drag.preview)
 
+    def test_favorites_preserve_rows_and_bypass_advanced_filter(self):
+        card = M.new_card("test_favorites")
+        editor = blockui.BlockEditor(self.app,self.app.project,"card",card,[])
+        editor.geometry("+5000+5000")
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                editor.favorite_file = Path(folder)/"favorites.json"
+                editor.favorites = set()
+                editor.show_advanced.set(True)
+                editor._build_palette()
+                op = next(op for op, _, _ in editor._favorite_candidates
+                          if blockui._advanced_palette_block(op, B.SPECS[op]))
+                rows = list(editor.palette.winfo_children())
+                editor._toggle_favorite(op)
+                self.assertEqual(rows, editor.palette.winfo_children())
+                self.assertEqual(json.loads(editor.favorite_file.read_text()), [op])
+                editor.show_advanced.set(False)
+                editor._apply_palette_visibility()
+                self.assertEqual(rows, editor.palette.winfo_children())
+                stars = [star for candidate,star in editor._palette_stars if candidate==op and star.master.master == editor._favorites_frame]
+                self.assertEqual(len(stars),1)
+                self.assertEqual(stars[0].master.master, editor._favorites_frame)
+                self.assertEqual(stars[0].pack_info()["side"],"left")
+                rows = list(editor.palette.winfo_children())
+                editor._toggle_favorite(op)
+                self.assertEqual(rows,editor.palette.winfo_children())
+                self.assertNotIn(op, editor._favorite_rows)
+                editor._toggle_favorite("damage")
+                editor._toggle_favorite("draw")
+                favorite_rows = dict(editor._favorite_rows)
+                editor._move_favorite("draw", 0)
+                self.assertEqual(editor.favorite_order, ["draw", "damage"])
+                self.assertEqual(json.loads(editor.favorite_file.read_text()), ["draw", "damage"])
+                self.assertEqual(favorite_rows, editor._favorite_rows)
+                editor._build_palette()
+                self.assertEqual(list(editor._favorite_rows), ["draw", "damage"])
+                cached = editor.palette.winfo_children()
+                for show in (True,False,True):
+                    editor.show_advanced.set(show)
+                    editor._apply_palette_visibility()
+                    self.assertEqual(cached, editor.palette.winfo_children())
+                    for widget, advanced in editor._palette_visibility:
+                        self.assertEqual(bool(widget.winfo_manager()), show or not advanced)
+        finally:
+            editor.destroy()
+
+    def test_scrolling_keeps_controls_and_canvas_items(self):
+        tab = self.app.card_tab
+        self.nb.select(tab)
+        self.app.update()
+        area = tab.item_editor
+        area._sync()
+        widgets = tuple(tab.form.winfo_children())
+        items = area.canvas.find_all()
+        start = area.canvas.yview()[0]
+        combo = tab.vars["type"][1]
+        original_type = combo.get_value()
+        with patch.object(self.app,"winfo_containing",return_value=combo):
+            combo.event_generate("<MouseWheel>",state=0,delta=-120,x=0,y=0,rootx=0,rooty=0)
+        self.app.update()
+        self.assertEqual(combo.get_value(),original_type)
+        self.assertGreater(area.canvas.yview()[0],start)
+        for _ in range(5):
+            area.canvas.yview_scroll(1,"units")
+            self.app.update_idletasks()
+        self.app.update()
+        self.assertGreater(area.canvas.yview()[0],start)
+        self.assertEqual(tuple(tab.form.winfo_children()),widgets)
+        self.assertEqual(area.canvas.find_all(),items)
+        area.canvas.yview_moveto(0)
+
+    def test_scale_applies_without_recreating_editor(self):
+        old = self.app.ui_scale
+        geometry = self.app.geometry()
+        self.app.geometry("760x700+5000+5000")
+        self.app.update()
+        self.app._fit_toolbar()
+        tab = self.app.card_tab
+        self.nb.select(tab)
+        widgets = tuple(tab.form.winfo_children())
+        try:
+            with patch.object(U,"apply_theme",wraps=U.apply_theme) as theme:
+                self.app.set_scale(1.25)
+                theme.assert_not_called()
+            self.app.update()
+            self.assertEqual(self.app.ui_scale,1.25)
+            self.assertEqual(self.app.scale_var.get(),125)
+            self.assertEqual(int(tab.pv.canvas.cget("width")),int(360*self.app.ui))
+            self.assertEqual(int(tab.pv.canvas.cget("height")),int(480*self.app.ui))
+            self.assertEqual(tuple(tab.form.winfo_children()),widgets)
+            self.assertIs(self.app.card_tab,tab)
+            self.app._fit_toolbar()
+            self.app.update_idletasks()
+            right = self.app._tb.winfo_rootx()+self.app._tb.winfo_width()
+            for button,_,_ in self.app._tb_texts[:7]:
+                self.assertLessEqual(button.winfo_rootx()+button.winfo_width(),right)
+        finally:
+            self.app.set_scale(old)
+            self.app.geometry(geometry)
+            self.app.update()
+
+    def test_editor_focus_layout_and_responsive_toolbar(self):
+        app = self.app
+        previous_state, previous_geometry = app.state(),app.geometry()
+        try:
+            app.state("normal")
+            for width in (760,1024,1440):
+                app.geometry(f"{width}x700+5000+5000")
+                app.update_idletasks()
+                app._fit_toolbar()
+                app.update_idletasks()
+                right = app._tb.winfo_rootx()+app._tb.winfo_width()
+                for button,_,_ in app._tb_texts[:7]:
+                    self.assertTrue(button.winfo_ismapped())
+                    self.assertLessEqual(button.winfo_rootx()+button.winfo_width(),right)
+            tab = app.card_tab
+            tab.set_editor_layout(True)
+            self.assertFalse(tab.item_panes._records[str(tab.pv)]["visible"].get())
+            self.assertFalse(tab.item_panes._records[str(tab.item_list)]["visible"].get())
+            self.assertTrue(tab.item_panes._records[str(tab.item_editor)]["visible"].get())
+            tab.set_editor_layout(False)
+            self.assertTrue(tab.item_panes._records[str(tab.pv)]["visible"].get())
+            self.assertTrue(tab.item_panes._records[str(tab.item_list)]["visible"].get())
+        finally:
+            app.geometry(previous_geometry)
+            app.state(previous_state)
+
     def test_block_editor_float_drag_save_and_close(self):
+        self._exercise_block_editor_float_close()
+
+    def test_repeated_block_editor_float_close(self):
+        for _ in range(3):
+            self._exercise_block_editor_float_close()
+
+    def _exercise_block_editor_float_close(self):
         card = M.new_card("test_drag")
         editor = blockui.BlockEditor(self.app,self.app.project,"card",card,
                                       [B.new_block("damage"),B.new_block("draw")])
-        editor.attributes("-alpha",0)
+        editor.geometry("+5000+5000")
         try:
             group=editor.block_panes
             for key,record in group._records.items():

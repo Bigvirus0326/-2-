@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+from uxkit import buffered_canvas, stable_listbox
 import copy
 import math
 import time
@@ -297,6 +298,7 @@ class EffectPainter(ttk.Frame):
     def fx(self):
         return self.fxs[self.cur] if self.cur is not None and self.cur < len(self.fxs) else None
 
+    @stable_listbox('lst')
     def load(self):
         self.lst.delete(0, "end")
         for e in self.fxs:
@@ -380,6 +382,7 @@ class EffectPainter(ttk.Frame):
         self.load()
 
     # ---- 도형 목록 ----
+    @stable_listbox('shapes')
     def refresh_shapes(self):
         self.shapes.delete(0, "end")
         if self.fx is None:
@@ -688,6 +691,7 @@ class EffectPainter(ttk.Frame):
         return None
 
     # ---- 화면 ----
+    @buffered_canvas("canvas")
     def redraw(self, t=None):
         from PIL import ImageTk
         base = stage_image(self.grid_on.get(), self.at_enemy.get(), self.tab.project)
@@ -1050,6 +1054,7 @@ class ButtonDesigner(ttk.Frame):
     def b(self):
         return self.items[self.cur] if self.cur is not None and self.cur < len(self.items) else None
 
+    @stable_listbox('lst')
     def load(self):
         import modgen as M
         self.lst.delete(0, "end")
@@ -1467,6 +1472,7 @@ class ButtonDesigner(ttk.Frame):
         if self.fx_play or self.popups:
             self._after = self.after(33, self._anim)
 
+    @buffered_canvas("canvas")
     def draw(self, now=None):
         from PIL import Image, ImageDraw, ImageTk
         import gamescene as GS

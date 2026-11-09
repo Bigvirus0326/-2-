@@ -36,7 +36,7 @@ ARG_KIND_TEXT = {
     "summon_any": '소환수 ID 또는 "*"(전부)',
     "label": '{"ko": "...", "en": "...", "zh": "..."}',
     "pick_pile": '"Hand" | "Draw" | "Discard" | "Exhaust"',
-    "pick_action": '"hand" | "top" | "exhaust" | "discard" | "upgrade"',
+    "pick_action": '"hand" | "top" | "bottom" | "exhaust" | "discard" | "upgrade"',
     "delay_when": '"start"(다음 내 턴 시작) | "end"(이번 턴 끝)',
     "orb": '게임 구체 "Lightning" | "Frost" | "Dark" | "Plasma" | "Glass" 또는 새 구체 "o:<구체ID>"',
     "evoke_which": '"front" | "last"',

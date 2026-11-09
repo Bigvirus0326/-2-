@@ -75,6 +75,8 @@ def value(v, project, card):
         return f"({value(v.get('a'), project, card)} {dict(B.ARITH).get(v.get('op'), '?')} {value(v.get('b'), project, card)})"
     if t == "rand":
         return f"{value(v.get('min'), project, card)}～{value(v.get('max'), project, card)}"
+    if t == "card_state":
+        return ("此牌" if v.get("card", "this") == "this" else "所选牌") + "的" + str(v.get("key") or "count")
     labels = {"energy": "剩余能量", "round": "当前回合数", "summons": "召唤物数量", "stars": "星星数", "event": "该数值"}
     if t in labels:
         return labels[t]
@@ -170,6 +172,13 @@ def block_text(b, project, card):
         if op == "change_var" and amt.get("t") == "num" and float(amt.get("v", 0) or 0) < 0:
             return f"{n}减少{value(dict(amt, v=-float(amt.get('v', 0))), project, card)}。"
         return f"将{n}设为{amount}。" if op == "set_var" else f"{n}增加{amount}。"
+    if op in ("card_var_new", "card_var_remove", "card_do", "card_ref_keyword", "card_tag", "card_enchant",
+              "card_enchant_clear", "add_card_pos", "draw_bottom"):
+        return B.describe([b], project, "card", "en")
+    if op in ("card_state_set", "card_state_change"):
+        who = "此牌" if a.get("card", "this") == "this" else "所选牌"
+        k = str(a.get("key") or "count")
+        return f"将{who}的{k}设为{amount}。" if op == "card_state_set" else f"{who}的{k}增加{amount}。"
     if op == "add_card":
         key = a.get("card")
         card = next((c for c in project["cards"] if c["id"] == key), {})
@@ -178,7 +187,7 @@ def block_text(b, project, card):
     if op == "random_transform":
         return f"将{PILES.get(a.get('pile'), '手牌')}中随机{count}张{card_type(project, a.get('ctype'))}变化为随机牌。"
     if op == "pick":
-        action = {"hand":"放入手牌", "top":"放到抽牌堆顶", "exhaust":"消耗", "discard":"丢弃", "upgrade":"升级"}
+        action = {"hand":"放入手牌", "top":"放到抽牌堆顶", "bottom":"放到抽牌堆底", "exhaust":"消耗", "discard":"丢弃", "upgrade":"升级"}
         return f"从{PILES.get(a.get('pile'), '手牌')}中选择{count}张{card_type(project, a.get('ctype'))}，{action.get(a.get('action'), '')}。"
     if op == "channel":
         orb = G.orb_meta(project, a.get("orb")) or {}

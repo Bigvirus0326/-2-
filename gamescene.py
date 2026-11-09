@@ -515,6 +515,8 @@ class Sim:
             return a + b if o == "+" else a - b if o == "-" else a * b if o == "*" else (math.floor(a / b) if b else 0)
         if t == "var":
             return self.vars.get(v.get("name", "a"), 0)
+        if t == "card_state":
+            return self.vars.get("card:" + str(v.get("card", "this")) + ":" + str(v.get("key") or "count"), 0)
         if t == "played":
             return st.get("played", 0)
         if t == "stars":
@@ -564,6 +566,8 @@ class Sim:
             return not self.cond(c.get("a"))
         if t == "pet_alive":
             return (self.st.get("pets") or {}).get(c.get("pet"), (0, 0))[0] > 0
+        if t == "card_var_has":
+            return ("card:" + str(c.get("card", "this")) + ":" + str(c.get("key") or "count")) in self.vars
         return False
 
     def hit(self, enemy, n):
@@ -650,6 +654,16 @@ class Sim:
                 self.vars[a.get("name", "a")] = self.val(a.get("amount"))
             elif op == "change_var":
                 self.vars[a.get("name", "a")] = self.vars.get(a.get("name", "a"), 0) + self.val(a.get("amount"))
+            elif op in ("card_var_new", "card_var_remove"):
+                k = "card:" + str(a.get("card", "this")) + ":" + str(a.get("key") or "count")
+                if op == "card_var_new":
+                    self.vars[k] = self.val(a.get("amount"))
+                else:
+                    self.vars.pop(k, None)
+            elif op in ("card_state_set", "card_state_change"):
+                k = "card:" + str(a.get("card", "this")) + ":" + str(a.get("key") or "count")
+                base = self.vars.get(k, 0) if op == "card_state_change" else 0
+                self.vars[k] = base + self.val(a.get("amount"))
             elif op == "fx":
                 self.events.append(("fx", a.get("fx"), "enemy" if enemy else "self"))
             elif op.startswith("pet_"):

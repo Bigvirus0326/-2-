@@ -8,6 +8,7 @@ dotnet 으로 빌드해 게임의 mods 폴더에 넣어 준다.
 """
 from __future__ import annotations
 
+from uxkit import buffered_canvas, stable_listbox, stable_tree
 import copy
 import hashlib
 import json
@@ -663,6 +664,9 @@ class EffectList(ttk.Frame):
         if owner_kind != "card":
             self.tree["displaycolumns"] = ("kind", "amount", "extra")
         self.tree.grid(row=0, column=0, sticky="nsew")
+        horizontal = ttk.Scrollbar(self,orient="horizontal",command=self.tree.xview)
+        horizontal.grid(row=2,column=0,sticky="we",pady=(2,0))
+        self.tree.configure(xscrollcommand=horizontal.set)
         self.tree.bind("<Double-1>", lambda _e: self.edit())
         bf = ttk.Frame(self)
         bf.grid(row=0, column=1, sticky="ns", padx=(4, 0))
@@ -675,6 +679,7 @@ class EffectList(ttk.Frame):
         self.effects = effects
         self.refresh()
 
+    @stable_tree("tree")
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
         for i, e in enumerate(self.effects):
@@ -916,6 +921,7 @@ class ModifierList(ttk.Frame):
         self.mods = mods
         self.refresh()
 
+    @stable_tree("tree")
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
         for i, m in enumerate(self.mods):
@@ -977,17 +983,28 @@ class AsyncTiles:
         self.jobs = queue.Queue()
         self.results = queue.Queue()
         self.photos = {}
+        self.photo_cache = {}
+        self.cache_keys = {}
         self.tiles = []
         self.polling = False
         threading.Thread(target=self._worker, daemon=True).start()
 
     def begin(self):
         self.gen += 1
+        self.previous_photos = self.photos
         self.photos = {}
+        self.cache_keys = {}
         self.tiles = []
 
-    def add(self, key, x, y, w, h, tags, make):
+    def add(self, key, x, y, w, h, tags, make, cache_key=None):
         """make(): 백그라운드에서 PIL 그림을 돌려주는 함수 (None 이면 빈 칸 유지)."""
+        identity = (cache_key, int(w), int(h)) if cache_key is not None else None
+        self.cache_keys[key] = identity
+        if identity is not None and identity in self.photo_cache:
+            photo = self.photo_cache[identity]
+            self.photos[key] = photo
+            self.c.create_image(x+w/2,y,image=photo,anchor="n",tags=tags)
+            return
         self.c.create_rectangle(x + 8, y + 8, x + w - 8, y + h - 8, fill="#1c1e26", outline="#2b2e39", width=2,
                                 tags=tags + (f"ph_{key}",))
         self.c.create_text(x + w / 2, y + h / 2, text="…", fill="#555a66", font=("Malgun Gothic", 14),
@@ -1035,6 +1052,12 @@ class AsyncTiles:
                 key, x, y, w, h, tags, _make = t
                 photo = ImageTk.PhotoImage(img)
                 self.photos[key] = photo
+                identity = self.cache_keys.get(key)
+                if identity is not None:
+                    self.photo_cache[identity] = photo
+                    # 지금 화면의 칸은 모두 남긴다 (다시 열 때 그림을 새로 만들지 않게)
+                    while len(self.photo_cache) > max(128, len(self.cache_keys) + 32):
+                        self.photo_cache.pop(next(iter(self.photo_cache)))
                 self.c.delete(f"ph_{key}")
                 iid = self.c.create_image(x + w / 2, y, image=photo, anchor="n", tags=tags)
                 self.c.tag_lower(iid)
@@ -1097,6 +1120,7 @@ class PreviewPanel(ttk.Frame):
             self.after_cancel(self._job)
         self._job = self.after(90, self._render)
 
+    @buffered_canvas("canvas")
     def _render(self):
         self._job = None
         item = self.item
@@ -1190,6 +1214,18 @@ class GalleryTab(ttk.Frame):
         self._pending = None
         self._photos = []
         self.tiles = AsyncTiles(self, self.canvas)
+        # 칸마다 바인딩을 새로 만들지 않고 "tile" 태그 하나에 한 번만 건다
+        c = self.canvas
+        c.tag_bind("tile", "<Button-1>", self._tile_click)
+        c.tag_bind("tile", "<Enter>", lambda _e: c.configure(cursor="hand2"))
+        c.tag_bind("tile", "<Leave>", lambda _e: c.configure(cursor=""))
+
+    def _tile_click(self, _e):
+        for t in self.canvas.gettags("current"):
+            if t.startswith("g_"):
+                _g, kind, i = t.split("_", 2)
+                self.app.goto(kind, int(i))
+                return
 
     def _wheel(self, e):
         self.canvas.yview_scroll(int(-e.delta / 120), "units")
@@ -1202,6 +1238,7 @@ class GalleryTab(ttk.Frame):
             self.after_cancel(self._pending)
         self._pending = self.after(150, self.refresh)
 
+    @buffered_canvas("canvas")
     def refresh(self):
         self._pending = None
         c = self.canvas
@@ -1221,6 +1258,11 @@ class GalleryTab(ttk.Frame):
             stacks = 3
         gap, pad = 14, 16
         y = 10
+        if game:
+            # 캐릭터·파워·테두리는 모든 칸이 같으니 한 번만 직렬화한다
+            shared = hashlib.sha1(json.dumps([P["character"], P.get("powers", []), P.get("card_frames", [])],
+                                             sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+            up_ = bool(self.app.pv_upgraded.get())
         sections = [("card", "cards", "카드", 420), ("relic", "relics", "유물", 400),
                     ("potion", "potions", "물약", 400), ("power", "powers", "파워", 400)]
         for kind, key, title, base_h in sections:
@@ -1241,24 +1283,20 @@ class GalleryTab(ttk.Frame):
                 tag = f"g_{kind}_{i}"
                 try:
                     if game:
-                        up_ = bool(self.app.pv_upgraded.get())
-                        snap = json.loads(json.dumps(it))
-                        key = json.dumps([snap, self.app.project["character"], self.app.project.get("powers", []),
-                                          self.app.project.get("card_frames", [])],
-                                         sort_keys=True, ensure_ascii=False)
-                        self.tiles.add(f"{kind}_{i}", x0, y0, tw, th, (tag,),
+                        own = json.dumps(it, sort_keys=True, ensure_ascii=False, default=str)
+                        snap = json.loads(own)   # 백그라운드 스레드용 복사본
+                        key = own + "\0" + shared
+                        self.tiles.add(f"{kind}_{i}", x0, y0, tw, th, (tag, "tile"),
                                        lambda snap_=snap, key_=key, kind_=kind, up__=up_, tw_=tw, th_=th: self.app.thumb(
-                                           key_, lambda: snap_, kind_, lang, up__, stacks, tw_, th_))
+                                           key_, lambda: snap_, kind_, lang, up__, stacks, tw_, th_),
+                                       cache_key=(key,kind,lang,up_,stacks))
                     else:
                         PV.render_item(c, P, kind, it, x0, y0, scale, lang, bool(self.app.pv_upgraded.get()), stacks,
-                                       tags=(tag,))
+                                       tags=(tag, "tile"))
                 except Exception as e:  # noqa: BLE001
-                    c.create_text(x0 + tw / 2, y0 + th / 2, text=f"오류: {e}", fill="#f66", width=tw, tags=(tag,))
+                    c.create_text(x0 + tw / 2, y0 + th / 2, text=f"오류: {e}", fill="#f66", width=tw, tags=(tag, "tile"))
                 c.create_text(x0 + tw / 2, y0 + th + 2, text=it["id"], anchor="n", fill="#777",
-                              font=("Consolas", 8), tags=(tag,))
-                c.tag_bind(tag, "<Button-1>", lambda _e, k=kind, j=i: self.app.goto(k, j))
-                c.tag_bind(tag, "<Enter>", lambda _e: c.configure(cursor="hand2"))
-                c.tag_bind(tag, "<Leave>", lambda _e: c.configure(cursor=""))
+                              font=("Consolas", 8), tags=(tag, "tile"))
             rows = (len(items) + cols - 1) // cols
             y += rows * (th + gap + 18) + 20
             if not items:
@@ -1344,6 +1382,7 @@ class ClonePanel(ttk.Frame):
         self.pool.bind("<<ComboboxSelected>>", lambda _e: self._pool_changed())
         self.columnconfigure(0, weight=1)
 
+    @stable_tree("tree")
     def set(self, item):
         self.item = item
         cl = item.get("clone") if item else None
@@ -1581,6 +1620,7 @@ class ExternalTab(ttk.Frame):
         for n in em.notes:
             self.app.log("  " + n)
 
+    @stable_listbox('listbox')
     def refresh_list(self, select=None):
         deps = {d["id"] for d in self.app.project.get("dependencies", [])}
         self.listbox.delete(0, "end")
@@ -1720,6 +1760,7 @@ class ExternalTab(ttk.Frame):
             out.append((i, it))
         return out
 
+    @buffered_canvas("canvas")
     def refresh(self):
         self._pending = None
         c = self.canvas
@@ -1751,7 +1792,8 @@ class ExternalTab(ttk.Frame):
                 key = (em.root, kind, it.get("class"))
                 self.tiles.add(f"{kind}_{i}", x0, y0, tw, th, (tag,),
                                lambda it_=it, key_=key, kind_=kind: self.app.thumb(
-                                   key_, lambda: MI.preview_item(em, it_), kind_, lang, up, 3, tw, th))
+                                   key_, lambda: MI.preview_item(em, it_), kind_, lang, up, 3, tw, th),
+                               cache_key=(key,lang,up))
             else:
                 PV.render_item(c, self.app.project, kind, MI.preview_item(em, it), x0, y0, sc, lang, up, 3, tags=(tag,))
             c.create_text(x0 + tw / 2, y0 + th + 2, text=it.get("class", ""), anchor="n", fill="#777",
@@ -1848,7 +1890,10 @@ class CardEventEffects(ttk.Frame):
         self.count_input.bind("<FocusOut>", self.change_count)
         ttk.Label(target_row, text="명").pack(side="left", padx=(2, 4))
         ttk.Label(target_row, text="블록에서 '대상'을 고르면 이 설정을 사용합니다.", foreground="#687383").pack(side="left", padx=8)
-        self.hint = ttk.Label(self, text="블록 편집을 눌러 효과를 추가하거나 수정하세요.", foreground="#687383")
+        horizontal = ttk.Scrollbar(self,orient="horizontal",command=self.tree.xview)
+        horizontal.grid(row=3,column=0,sticky="we")
+        self.tree.configure(xscrollcommand=horizontal.set)
+        self.hint = ttk.Label(self, text="블록 편집을 눌러 효과를 추가하거나 수정하세요.", foreground="#687383",wraplength=380)
         self.hint.grid(row=1, column=0, columnspan=2, sticky="w", padx=4, pady=3)
 
     def card(self):
@@ -1859,6 +1904,7 @@ class CardEventEffects(ttk.Frame):
         card = self.card()
         return card.get("event_blocks", {}).get(self.event, []) if card else []
 
+    @stable_tree("tree")
     def refresh(self, selected=None):
         import blockcode as B
         self.tree.delete(*self.tree.get_children())
@@ -1955,6 +2001,7 @@ class ItemTab(ttk.Frame):
         self.item_panes = pw
         pw.pack(fill="both", expand=True)
         left = pw.add_panel(lambda parent:ttk.Frame(parent, padding=(8, 8, 4, 8), width=300), self.noun + " 목록", weight=0)
+        self.item_list = left
         head = ttk.Frame(left)
         head.pack(fill="x", pady=(0, 6))
         ttk.Label(head, text=f"{self.noun} 목록", style="Head.TLabel").pack(side="left")
@@ -1970,9 +2017,11 @@ class ItemTab(ttk.Frame):
         self.build_list_filters(left)
         lf = ttk.Frame(left)
         lf.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(lf, columns=("id",), show="tree", selectmode="extended")
-        self.tree.column("#0", width=190, stretch=True)
-        self.tree.column("id", width=110, stretch=False, anchor="w")
+        self.tree = ttk.Treeview(lf, columns=("id",), show="tree headings", selectmode="extended")
+        self.tree.heading("#0",text="이름",anchor="w")
+        self.tree.heading("id",text="ID",anchor="w")
+        self.tree.column("#0", width=170, stretch=True)
+        self.tree.column("id", width=100, stretch=False, anchor="w")
         self.tree.tag_configure("muted", foreground=UX.C["muted"])
         tsb = ttk.Scrollbar(lf, command=self.tree.yview)
         self.tree.configure(yscrollcommand=tsb.set)
@@ -1997,26 +2046,51 @@ class ItemTab(ttk.Frame):
             .pack(side="left", expand=True, fill="x", padx=(0, 3))
         UX.tip(ttk.Button(lb, text="복제", command=self.duplicate), "선택한 항목을 복사합니다 (Ctrl+D).") \
             .pack(side="left", expand=True, fill="x", padx=3)
-        UX.tip(ttk.Button(lb, text="삭제", command=self.delete), "선택한 항목을 지웁니다 (Delete). Ctrl+Z 로 되돌릴 수 있습니다.") \
+        UX.tip(ttk.Button(lb, text="삭제", style="Danger.TButton", command=self.delete), "선택한 항목을 지웁니다 (Delete). Ctrl+Z 로 되돌릴 수 있습니다.") \
             .pack(side="left", expand=True, fill="x", padx=(3, 0))
         ttk.Label(left, text="끌어서 순서 변경 · Ctrl/Shift+클릭 여러 개\n오른쪽 클릭 = 메뉴 · Ctrl+Z 되돌리기",
                   style="Muted.TLabel", justify="left").pack(anchor="w", pady=(6, 0))
 
-        right = pw.add_panel(lambda parent:ScrollFrame(parent), self.noun + " 편집기", weight=1)
+        right = pw.add_panel(lambda parent:ScrollFrame(parent,x=False), self.noun + " 편집기", weight=1)
         self.item_editor = right
-        self.form = ttk.Frame(right.inner, padding=8)
+        editor_head = ttk.Frame(right.inner,padding=(14,12,14,8))
+        editor_head.pack(fill="x")
+        editor_title_row = ttk.Frame(editor_head)
+        editor_title_row.pack(fill="x")
+        layout = ttk.Menubutton(editor_title_row,text="화면 구성 ▾",style="Small.TButton")
+        layout.pack(side="right")
+        layout_menu = tk.Menu(layout,tearoff=False)
+        layout_menu.add_command(label="편집에 집중",command=lambda:self.set_editor_layout(True))
+        layout_menu.add_command(label="목록 · 편집 · 미리보기",command=lambda:self.set_editor_layout(False))
+        layout.configure(menu=layout_menu)
+        self.editor_title = ttk.Label(editor_title_row,text=self.noun+" 편집",style="Brand.TLabel",wraplength=280)
+        self.editor_title.pack(side="left",fill="x",expand=True)
+        editor_note = ttk.Label(editor_head,text="기본 정보 → 효과 → 설명 · 미리보기로 확인하세요.",
+                                style="Muted.TLabel",wraplength=400)
+        editor_note.pack(anchor="w",pady=(3,0))
+        editor_head.bind("<Configure>",lambda e:editor_note.configure(wraplength=max(160,e.width-28))
+                         if e.widget is editor_head else None,add="+")
+        ttk.Separator(right.inner).pack(fill="x",padx=12)
+        self.form = ttk.Frame(right.inner, padding=(10,12))
         self.form.pack(fill="both", expand=True)
         for c in (1, 3):
             self.form.columnconfigure(c, weight=1)
         self.build_form(self.form)
+        self.responsive_form = UX.ResponsiveForm(self.form,right.canvas)
         self.pv = pw.add_panel(lambda parent:PreviewPanel(parent, app, self.kind), self.noun + " 미리보기", weight=0)
+
+    def set_editor_layout(self, focused):
+        for panel in (self.item_list,self.pv):
+            self.item_panes.set_visible(panel,not focused)
+        self.item_panes.set_visible(self.item_editor,True)
+        self.responsive_form.schedule()
 
     # ---- 폼 구성 도우미 ----
     def _field_label(self, parent, label, key, **grid):
         """칸 이름. 설명이 있으면 ⓘ 를 붙이고 마우스를 올리면 말풍선을 띄운다."""
         self.var_labels[key] = label.replace("\n", " ")
         help_text = UX.field_help(self.kind, key)
-        lab = ttk.Label(parent, text=label + ("  ⓘ" if help_text else ""))
+        lab = ttk.Label(parent, text=label + ("  ⓘ" if help_text else ""), style="Muted.TLabel")
         lab.grid(**grid)
         if help_text:
             UX.tip(lab, help_text)
@@ -2261,6 +2335,7 @@ class ItemTab(ttk.Frame):
     def _extra_filter_active(self):
         return False
 
+    @stable_tree("tree")
     def refresh_list(self, select=None):
         """목록을 다시 그린다. select = 고를 항목 번호 (하나 또는 여러 개)."""
         self.tree.delete(*self.tree.get_children())
@@ -2433,6 +2508,7 @@ class ItemTab(ttk.Frame):
     def load(self, idx):
         self.cur = idx
         it = self.items[idx]
+        self.editor_title.configure(text=it.get("name_ko") or it.get("id") or self.noun+" 편집")
         self._loading = True
         try:
             self.set_form_state(True)
@@ -2457,6 +2533,7 @@ class ItemTab(ttk.Frame):
             self.clone_panel.set(it)
         finally:
             self._loading = False
+        self.responsive_form.schedule()
         self.update_preview()
 
     def load_extra(self, it):
@@ -2756,6 +2833,14 @@ class CardTab(ItemTab):
                   foreground="#777", justify="left", wraplength=600).grid(row=6, column=0, columnspan=4, sticky="w", padx=4)
 
     def _build_tags(self, it):
+        tags = GM.tags(self.app.project)
+        signature = tuple((t["id"], t.get("name_ko") or t["id"]) for t in tags)
+        if getattr(self, "_tag_signature", None) == signature:
+            selected = set(it.get("gtags") or [])
+            for key, variable in self.tag_vars.items():
+                variable.set(key in selected)
+            return
+        self._tag_signature = signature
         for w in self.tag_frame.winfo_children():
             w.destroy()
         self.tag_vars = {}
@@ -3127,6 +3212,7 @@ class GimmickTab(ttk.Frame):
         self.refresh_orbs()
         self.refresh_pets()
 
+    @stable_listbox('tag_list')
     def refresh_tags(self, select=None):
         self.tag_list.delete(0, "end")
         for t in self.g["tags"]:
@@ -3138,6 +3224,7 @@ class GimmickTab(ttk.Frame):
         else:
             self.tag_cur = None
 
+    @stable_listbox('sum_list')
     def refresh_summons(self, select=None):
         self.sum_list.delete(0, "end")
         for x in self.g["summons"]:
@@ -3346,6 +3433,8 @@ class GimmickTab(ttk.Frame):
         self.pet_cur = None
         self._pet_photo = None
 
+    @buffered_canvas("pet_canvas")
+    @stable_listbox('pet_list')
     def refresh_pets(self, select=None):
         self.pet_list.delete(0, "end")
         for p in self.g["pets"]:
@@ -3508,6 +3597,7 @@ class GimmickTab(ttk.Frame):
         self.orb_desc = ttk.Label(of, text="", foreground="#2d4f6a", wraplength=900, justify="left")
         self.orb_desc.grid(row=8, column=0, columnspan=4, sticky="w", pady=4)
 
+    @stable_listbox('orb_list')
     def refresh_orbs(self, select=None):
         self.orb_list.delete(0, "end")
         for o in self.g["orbs"]:
@@ -3619,6 +3709,7 @@ class GimmickTab(ttk.Frame):
         messagebox.showinfo(APP_TITLE, "추가했습니다:\n\n• " + "\n• ".join(added), parent=self)
 
 
+@buffered_canvas()
 def pet_preview(canvas, app, image, scale, flip, lift, label):
     """게임 배경 위에 그림을 발밑 기준으로 세워 보여 준다 (전투 화면과 같은 크기 비율)."""
     from PIL import Image, ImageDraw, ImageTk
@@ -4110,6 +4201,7 @@ class CharacterTab(ttk.Frame):
         self.refresh_motion_lists()
         self.update_combat_preview()
 
+    @buffered_canvas("combat_canvas")
     def update_combat_preview(self):
         if self.motion_job is not None:
             self.after_cancel(self.motion_job)
@@ -4122,6 +4214,7 @@ class CharacterTab(ttk.Frame):
             self.combat_canvas.delete("all")
             self.combat_canvas.create_text(150, 160, text="(그림 없음 — 임시 외형\n캐릭터의 애니메이션)", fill="#9ab", justify="center")
 
+    @buffered_canvas("pv_canvas")
     def update_preview(self):
         self.pv_canvas.delete("all")
         try:
@@ -4145,6 +4238,7 @@ class CharacterTab(ttk.Frame):
         cardframeui.FrameStyleDialog(self.app, self.ch().get("frame_style") or None,
                                      on_close=self.app.frames_changed)
 
+    @stable_tree("deck_tree")
     def refresh_refs(self):
         ch = self.ch()
         cards = list(self.app.project["cards"])
@@ -4166,6 +4260,7 @@ class CharacterTab(ttk.Frame):
         ] + [("game:" + k, label + " · 원작") for k, label in ch.get("game_relics", {}).items()])
         self.refresh_start_relics()
 
+    @stable_listbox('start_relic_list')
     def refresh_start_relics(self):
         self.start_relic_list.delete(0, "end")
         relics = {r["id"]: r for r in self.app.project["relics"]}
@@ -4309,7 +4404,10 @@ class ModTab(ttk.Frame):
         self.app = app
         self._loading = False
         self.v = {}
-        info = ttk.LabelFrame(self, text="모드 정보", padding=8)
+        ttk.Label(self,text="모드를 만들고 게임으로 보내기",style="Brand.TLabel").pack(anchor="w",pady=(2,4))
+        ttk.Label(self,text="모드 정보와 제작 환경을 확인한 뒤, 검사부터 게시까지 차례로 진행하세요.",
+                  style="Muted.TLabel").pack(anchor="w",pady=(0,14))
+        info = ttk.LabelFrame(self, text="01  모드 정보", padding=12)
         info.pack(fill="x")
         info.columnconfigure(1, weight=1)
         info.columnconfigure(3, weight=1)
@@ -4325,7 +4423,7 @@ class ModTab(ttk.Frame):
             var.trace_add("write", lambda *_: self.changed())
             self.v[key] = var
 
-        env = ttk.LabelFrame(self, text="환경 설정 (이 PC에 저장)", padding=8)
+        env = ttk.LabelFrame(self, text="02  제작 환경 · 이 PC에 저장", padding=12)
         env.pack(fill="x", pady=8)
         env.columnconfigure(1, weight=1)
         self.s = {}
@@ -4348,7 +4446,7 @@ class ModTab(ttk.Frame):
         ttk.Button(env, text="자동 찾기", command=self.autodetect).grid(row=1, column=3, padx=2)
         ttk.Button(env, text="MegaDot 받기", command=lambda: webbrowser.open(MEGADOT_URL)).grid(row=2, column=3, padx=2)
 
-        chk = ttk.LabelFrame(self, text="상태 점검", padding=8)
+        chk = ttk.LabelFrame(self, text="03  준비 상태", padding=12)
         chk.pack(fill="x")
         self.check_lbl = ttk.Label(chk, text="", justify="left", font=("Malgun Gothic", 9))
         self.check_lbl.pack(side="left", anchor="w")
@@ -4357,14 +4455,17 @@ class ModTab(ttk.Frame):
         ttk.Button(cb, text="다시 점검", command=self.run_checks).pack(fill="x", pady=1)
         ttk.Button(cb, text="BaseLib 받기", command=lambda: webbrowser.open(BASELIB_URL)).pack(fill="x", pady=1)
 
-        act = ttk.LabelFrame(self, text="만드는 순서 (위쪽 도구 막대의 버튼)", padding=8)
+        act = ttk.LabelFrame(self, text="04  검사하고 게임에 적용하기", padding=12)
         act.pack(fill="x", pady=8)
         steps = [("① 검사", "입력 내용에 문제가 없는지 확인"),
                  ("② 생성", "출력 폴더에 C# / Godot 모드 프로젝트 파일 쓰기"),
                  ("③ 빌드", "dotnet build → 게임 mods 폴더에 dll 복사 (코드만)"),
                  ("④ 게시", "③ + MegaDot로 그림/텍스트가 든 .pck 생성 (게임에서 쓰려면 필요)")]
+        actions = [self.app.do_validate,self.app.do_generate,
+                   lambda:self.app.do_build(False),lambda:self.app.do_build(True)]
         for i, (t, desc) in enumerate(steps):
-            ttk.Label(act, text=t, width=8).grid(row=i, column=0, sticky="w", pady=1)
+            ttk.Button(act,text=t,width=10,command=actions[i],
+                       style="Accent.TButton" if i==3 else "Step.TButton").grid(row=i, column=0, sticky="w", pady=1)
             ttk.Label(act, text=desc, foreground="#555").grid(row=i, column=1, sticky="w", padx=8)
         of = ttk.Frame(act)
         of.grid(row=0, column=2, rowspan=4, sticky="ne", padx=20)
@@ -4480,17 +4581,34 @@ class App(tk.Tk):
         self._tcache = {}
 
         self.build_menu()
-        UX.install_wheel(self, on_zoom=self.zoom_step)
-        tb = ttk.Frame(self, padding=(10, 6), style="Toolbar.TFrame")
+        header = ttk.Frame(self, padding=(14,9), style="Toolbar.TFrame")
+        header.pack(fill="x")
+        tk.Label(header,text="S2",background=UX.C["accent"],foreground="white",
+                 font=(UX.FONT,13,"bold"),padx=9,pady=7).pack(side="left",padx=(0,10))
+        identity = ttk.Frame(header)
+        identity.pack(side="left")
+        ttk.Label(identity,text=APP_TITLE,style="Brand.TLabel").pack(anchor="w")
+        self.project_caption = ttk.Label(identity,text="새 프로젝트",style="Project.TLabel")
+        self.project_caption.pack(anchor="w",pady=(2,0))
+        UX.tip(self.project_caption,lambda:self.project_path or "아직 저장하지 않은 새 프로젝트입니다.")
+        self.save_badge = ttk.Label(header,text="저장됨",style="Saved.Badge.TLabel")
+        self.save_badge.pack(side="left",padx=14)
+        self.top_search = UX.SearchEntry(header,"전체에서 찾기  Ctrl+P",None,width=24,
+                                         on_enter=lambda:self.open_find(self.top_search.get()))
+        self.top_search.pack(side="right",padx=(10,0))
+        footer = ttk.Frame(self,padding=(12,5),style="Footer.TFrame")
+        footer.pack(side="bottom",fill="x")
+        self.workspace_hint = ttk.Label(footer,text="Ctrl+S 저장 · Ctrl+Z 되돌리기",style="Footer.TLabel")
+        self.workspace_hint.pack(side="right",padx=(12,0))
+        self.status_lbl = ttk.Label(footer,text="준비됨",width=1,anchor="w",style="Footer.TLabel")
+        self.status_lbl.pack(side="left",fill="x",expand=True)
+        UX.tip(self.status_lbl,lambda:self.status_lbl.cget("text"))
+        header.bind("<Configure>",lambda e:self.workspace_hint.pack_forget() if e.width<960 else
+                    self.workspace_hint.pack(side="right",padx=(12,0)),add="+")
+        tb = ttk.Frame(self, padding=(12, 7), style="Toolbar.TFrame")
         tb.pack(fill="x")
         self._tb, self._tb_short, self._tb_full_w = tb, False, None
         self._tb_texts, self._tb_hide = [], []   # 창이 좁을 때: (위젯, 원래 글자, 짧은 글자) / 숨길 위젯
-        # 오른쪽(찾기·상태)을 먼저 넣어야 좁아져도 잘리지 않는다
-        self.status_lbl = ttk.Label(tb, text="", width=12, anchor="e", style="Toolbar.TLabel")
-        self.status_lbl.pack(side="right", padx=(10, 0))
-        self.top_search = UX.SearchEntry(tb, "전체에서 찾기  Ctrl+P", None, width=24,
-                                         on_enter=lambda: self.open_find(self.top_search.get()))
-        self.top_search.pack(side="right")
         b = UX.tip(ttk.Button(tb, text="💾 저장", style="Toolbar.TButton", command=self.save), "저장 (Ctrl+S)")
         b.pack(side="left")
         self._tb_texts.append((b, "💾 저장", "💾"))
@@ -4513,7 +4631,7 @@ class App(tk.Tk):
                 arrow = ttk.Label(tb, text="›", style="Toolbar.TLabel")
                 arrow.pack(side="left", padx=1)
                 self._tb_hide.append(arrow)
-            b = UX.tip(ttk.Button(tb, text=t, style="Step.TButton", command=cmd), h)
+            b = UX.tip(ttk.Button(tb, text=t, style="Accent.TButton" if i==3 else "Step.TButton", command=cmd), h)
             b.pack(side="left", padx=2)
             self._tb_texts.append((b, t, t.split(" (")[0]))
         ttk.Separator(tb, orient="vertical", style="Toolbar.TSeparator").pack(side="left", fill="y", padx=10, pady=2)
@@ -4574,8 +4692,8 @@ class App(tk.Tk):
         self.nb.install_view_menu(self.view_menu)
         UX.install_panel_menu(self.view_menu, self)
 
-        logf = main.add_panel(lambda parent:ttk.Frame(parent), "로그", weight=1)
-        self.log_text = tk.Text(logf, height=5, wrap="word", background=UX.C["console"], foreground=UX.C["console_fg"],
+        logf = main.add_panel(lambda parent:ttk.Frame(parent), "실행 기록", weight=0)
+        self.log_text = tk.Text(logf, height=3, wrap="word", background=UX.C["console"], foreground=UX.C["console_fg"],
                                 font=("Consolas", 10), state="disabled", padx=8, pady=4, highlightthickness=0,
                                 insertbackground=UX.C["console_fg"])
         sb = ttk.Scrollbar(logf, command=self.log_text.yview)
@@ -4606,6 +4724,8 @@ class App(tk.Tk):
         self.after_idle(self._fit_toolbar)
         self.after_idle(self._fit_tabs)
         self.mod_tab.run_checks()
+        # Install after native controls have loaded their class bindings.
+        UX.install_wheel(self,on_zoom=self.zoom_step)
         self.log("슬더스2 모드 메이커를 시작했습니다. 카드/유물/물약/캐릭터를 만든 뒤 '모드 / 빌드' 탭에서 ②→③→④ 순서로 진행하세요.")
 
     # ---- 메뉴 / 파일 ----
@@ -4704,6 +4824,10 @@ class App(tk.Tk):
     def update_title(self):
         name = os.path.basename(self.project_path) if self.project_path else "새 프로젝트"
         self.title(f"{'*' if self.dirty else ''}{name} - {APP_TITLE} v{UP.VERSION}")
+        if hasattr(self,"project_caption"):
+            self.project_caption.configure(text=name if len(name)<=38 else name[:35]+"…")
+            self.save_badge.configure(text="저장 필요" if self.dirty else "저장됨" if self.project_path else "새 프로젝트",
+                                      style="Unsaved.Badge.TLabel" if self.dirty else "Saved.Badge.TLabel")
 
     def mark_dirty(self):
         if not self.dirty:
@@ -4826,7 +4950,7 @@ class App(tk.Tk):
         job = getattr(self, "_status_job", None)
         if job:
             self.after_cancel(job)
-        self._status_job = self.after(ms, lambda: self.status_lbl.configure(text=""))
+        self._status_job = self.after(ms, lambda: self.status_lbl.configure(text="준비됨"))
 
     def _main_focus(self, e):
         """메인 창과 분리한 작업 창에서 프로젝트 단축키를 사용한다."""
@@ -4869,13 +4993,27 @@ class App(tk.Tk):
         """창이 좁으면 도구 막대 글자를 줄이고 덜 중요한 버튼을 숨긴다."""
         tb = self._tb
         if self._tb_full_w is None:
-            self._tb_full_w = tb.winfo_reqwidth()
+            # Measure full captions even if the previous scale used compact
+            # captions. Temporarily expanding the actual toolbar would flash.
+            style = ttk.Style(self)
+            full_text = {widget:full for widget,full,_ in self._tb_texts}
+            width = 24
+            for widget in tb.winfo_children():
+                if widget is self.more_tools:
+                    continue
+                requested = widget.winfo_reqwidth()
+                if widget in full_text:
+                    font = style.lookup(widget.cget("style") or "TButton","font") or "TkDefaultFont"
+                    requested += int(self.tk.call("font","measure",font,full_text[widget]))-int(
+                        self.tk.call("font","measure",font,widget.cget("text")))
+                width += requested+(20 if isinstance(widget,ttk.Separator) else 4)
+            self._tb_full_w = width
         short = tb.winfo_width() < self._tb_full_w
         if short == self._tb_short:
             return
         self._tb_short = short
         if short:
-            self.more_tools.pack(side="right", before=self.status_lbl)
+            self.more_tools.pack(side="right")
         else:
             self.more_tools.pack_forget()
         for w, full, sh in self._tb_texts:
@@ -4913,16 +5051,16 @@ class App(tk.Tk):
 
     # ---- 화면 배율 ----
     def zoom_step(self, d):
-        """Ctrl+휠·단축키: 한 단계 크게/작게 (잠깐 멈추면 적용)."""
+        """Ctrl+휠·단축키: 다음 화면 갱신에 최신 배율 적용."""
         cur = getattr(self, "_pending_scale", None) or self.ui_scale
         i = min(range(len(UI_SCALES)), key=lambda k: abs(UI_SCALES[k] - cur))
         nxt = UI_SCALES[max(0, min(len(UI_SCALES) - 1, i + d))]
         self._pending_scale = nxt
         self.status(f"화면 배율 {round(nxt * 100)}% …", 1500)
-        job = getattr(self, "_scale_job", None)
-        if job:
-            self.after_cancel(job)
-        self._scale_job = self.after(450, lambda: self.set_scale(self._pending_scale))
+        # Apply the latest requested scale on the next frame. More wheel
+        # events update the target without postponing that frame indefinitely.
+        if getattr(self,"_scale_job",None) is None:
+            self._scale_job = self.after(16,lambda:self.set_scale(self._pending_scale))
         return "break"
 
     def persist_settings(self):
@@ -4952,11 +5090,32 @@ class App(tk.Tk):
         for name in self.tk.splitlist(self.tk.call("font", "names")):
             size = self.tk.call("font", "configure", name, "-size")
             self.tk.call("font", "configure", name, "-size", size)
-        UX.apply_theme(self)
+        # The theme and controls already exist. Only pixel-based row metrics
+        # need refreshing; reapplying every style emits a global theme change.
+        ttk.Style(self).configure("Treeview", rowheight=max(
+            int(self.winfo_fpixels("1i") / 96 * 29),
+            int(10 * float(self.tk.call("tk", "scaling"))) + 12))
+        self._tb_full_w = None
+        self._tab_full_w = None
+        self.after_idle(self._fit_toolbar)
+        self.after_idle(self._fit_tabs)
+        for tab in (self.card_tab,self.relic_tab,self.potion_tab,self.power_tab):
+            tab.responsive_form.schedule()
+            tab.item_editor._later()
         self.char_tab.pv_canvas.configure(width=int(310*self.ui), height=int(570*self.ui))
         for tab in (self.card_tab, self.relic_tab, self.potion_tab, self.power_tab):
-            for row in tab.tree.get_children():
-                tab.tree.item(row, image=UX.item_icon(tab.kind, tab.items[int(row)], self.ui))
+            tab.pv.cw,tab.pv.ch = int(360*self.ui),int(480*self.ui)
+            tab.pv.canvas.configure(width=tab.pv.cw,height=tab.pv.ch)
+            tab.pv.info.configure(wraplength=tab.pv.cw)
+            # Reuse cached icons. Font-only scale changes often leave the
+            # physical icon size unchanged, so avoid touching every row then.
+            icon_size = max(16,int(18*self.ui))
+            if getattr(tab,"_scale_icon_size",None) != icon_size:
+                for row in tab.tree.get_children():
+                    image = UX.item_icon(tab.kind, tab.items[int(row)], self.ui)
+                    if tuple(tab.tree.item(row,"image")) != (str(image),):
+                        tab.tree.item(row,image=image)
+                tab._scale_icon_size = icon_size
         self.refresh_previews()
         self.status(f"화면 배율 {round(v*100)}%")
 

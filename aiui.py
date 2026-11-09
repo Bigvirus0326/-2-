@@ -1,6 +1,7 @@
 """AI(채팅) 복붙 연동 창 — ① 설명서 복사  ② AI 결과 붙여넣기 (검사·미리보기·합치기)."""
 from __future__ import annotations
 
+from uxkit import buffered_canvas, stable_tree
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -225,6 +226,8 @@ class PastePage(ttk.Frame):
             row["take"] = True
         self.recheck()
 
+    @buffered_canvas("canvas")
+    @stable_tree("tree")
     def _render_empty(self):
         self.dep_btn.pack_forget()
         self.tree.delete(*self.tree.get_children())
@@ -241,6 +244,8 @@ class PastePage(ttk.Frame):
     def _all_errors(self):
         return (self.patch.errors if self.patch else []) + self.errors
 
+    @buffered_canvas("canvas")
+    @stable_tree("tree")
     def _render(self):
         p = self.patch
         self.tree.delete(*self.tree.get_children())
@@ -298,6 +303,7 @@ class PastePage(ttk.Frame):
         self.recheck()
         self.tree.selection_set(row)
 
+    @buffered_canvas("canvas")
     def show(self):
         sel = self.tree.selection()
         if not sel or self.patch is None:

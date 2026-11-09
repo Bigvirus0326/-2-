@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+from uxkit import buffered_canvas
 import copy
 import hashlib
 import os
@@ -17,7 +18,7 @@ import traceback
 import tkinter as tk
 from tkinter import simpledialog, filedialog, messagebox, ttk
 
-from uxkit import Tooltip, DockPanedWindow, install_panel_menu
+from uxkit import C, Tooltip, DockPanedWindow, install_panel_menu, scroll_command
 import blockcode as B
 from winpos import center_window
 import modgen as M
@@ -58,6 +59,17 @@ def _darker(hexcol, k=0.75):
     r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
     return "#%02x%02x%02x" % (int(r * k), int(g * k), int(b * k))
 
+def _block_color(category):
+    color = B.CATS[category][1]
+    def luminance(value):
+        channels = [int(value[i:i+2],16)/255 for i in (1,3,5)]
+        linear = [v/12.92 if v<=.04045 else ((v+.055)/1.055)**2.4 for v in channels]
+        return sum(v*k for v,k in zip(linear,(.2126,.7152,.0722)))
+    while 1.05/(luminance(color)+.05)<4.5:
+        color = _darker(color,.92)
+    return color
+
+
 
 # ---------------------------------------------------------------------------
 # 값 / 조건 고르기 창
@@ -70,10 +82,12 @@ VALUE_TYPES = [("num", "숫자"), ("stack", "파워 수"), ("stat", "체력 / �
                ("orbs", "구체 수 / 구체 슬롯 수"), ("orb_passive", "이 구체의 지속 수치 (구체 전용, 밀집 적용)"),
                ("orb_evoke", "이 구체의 발현 수치 (구체 전용, 밀집 적용)"), ("stars", "별 수"),
                ("energy_x", "X (이 카드에 쓴 에너지, X 비용 카드 전용)"),
-               ("star_x", "X (이 카드에 쓴 별, 별 X 카드 전용)"), ("osty", "골골이 체력"), ("pet", "동료(골골이형) 체력")]
+               ("star_x", "X (이 카드에 쓴 별, 별 X 카드 전용)"), ("osty", "골골이 체력"), ("pet", "동료(골골이형) 체력"),
+               ("card_state", "카드 변수 값 (이 카드 / 고른 카드 한 장마다 따로)")]
 COND_TYPES = [("cmp", "비교 (값 ○ 값)"), ("chance", "확률 %"), ("has", "파워를 가지고 있음"),
               ("and", "그리고 (둘 다)"), ("or", "또는 (하나라도)"), ("not", "아니다"),
-              ("osty_alive", "골골이가 살아 있음"), ("pet_alive", "동료(골골이형)가 살아 있음")]
+              ("osty_alive", "골골이가 살아 있음"), ("pet_alive", "동료(골골이형)가 살아 있음"),
+              ("card_var_has", "카드에 변수가 있음 (그 한 장)"), ("card_is", "카드가 ~이다 (키워드·태그·종류·인챈트)")]
 
 
 class _Combo(ttk.Combobox):
@@ -163,6 +177,9 @@ class SlotDialog(tk.Toplevel):
             "num": {"v": 0}, "stack": {"who": "self", "power": "Strength"}, "stat": {"who": "self", "stat": "hp"},
             "count": {"what": "hand"}, "rand": {"min": {"t": "num", "v": 1}, "max": {"t": "num", "v": 3}},
             "var": {"name": "a"}, "played": {"scope": "turn", "filter": "Any"},
+            "card_state": {"card": "this" if self.editor.owner_kind == "card" else "picked", "key": "count"},
+            "card_var_has": {"card": "this" if self.editor.owner_kind == "card" else "picked", "key": "count"},
+            "card_is": {"card": "this" if self.editor.owner_kind == "card" else "picked", "filter": "kw:Retain"},
             "orbs": {"what": "count", "orb": ""}, "osty": {"what": "hp"},
             "pet": {"pet": _first_pet(self.editor.project), "what": "hp"}, "pet_alive": {"pet": _first_pet(self.editor.project)},
             "op": {"op": "+", "a": old if self.kind == "value" else {"t": "num", "v": 0},
@@ -324,6 +341,20 @@ class SlotDialog(tk.Toplevel):
             row(0, "동료", combo("pet", opts, 18))
             if t == "pet":
                 row(1, "무엇", combo("what", [("hp", "현재 체력"), ("maxhp", "최대 체력")], 12))
+        elif t == "card_is":
+            row(0, "어느 카드", combo("card", B.CARD_REFS, 26))
+            row(1, "무엇", combo("filter", B.card_is_filters(ed.project), 24))
+        elif t in ("card_state", "card_var_has"):
+            row(0, "어느 카드", combo("card", B.CARD_REFS, 26))
+            kv = tk.StringVar(value=str(d.get("key", "count")))
+
+            def upd_key(*_):
+                d["key"] = kv.get().strip() or "count"
+                self._update_preview()
+            kv.trace_add("write", upd_key)
+            row(1, "상태 이름", ttk.Entry(f, textvariable=kv, width=12))
+            ttk.Label(f, text="같은 카드가 여러 장이어도 한 장마다 따로 저장됩니다 (처음엔 0).", foreground="#777").grid(
+                row=2, column=0, columnspan=2, sticky="w")
         elif t == "osty":
             row(0, "무엇", combo("what", B.OSTY_STATS, 18))
             ttk.Label(f, text="골골이가 없으면 0입니다.", foreground="#777").grid(row=1, column=0, columnspan=2, sticky="w")
@@ -651,21 +682,28 @@ class BlockEditor(tk.Toplevel):
         except tk.TclError:
             pass
         self.transient(master.winfo_toplevel())
+        self.minsize(760,480)
 
-        top = ttk.Frame(self, padding=(8, 6))
+        top = ttk.Frame(self, padding=(12, 10))
         top.pack(fill="x")
         where = where or {"card": "카드를 낼 때", "relic": "유물이 발동할 때", "potion": "물약을 쓸 때",
                           "power": "파워가 발동할 때", "summon": "소환수가 행동할 때",
                           "orb": "구체가 발동할 때", "button": "버튼을 눌렀을 때",
                           "pet": "동료가 행동할 때"}[owner_kind]
-        self.mode_hint = ttk.Label(self, text="왼쪽 블록을 작업 공간으로 끌어다 놓으세요.")
-        self.mode_hint.pack(fill="x", before=top, padx=8)
-        ttk.Label(top, text=where, font=FONT_B).pack(side="left")
+        self.mode_hint = ttk.Label(self, text="왼쪽 블록을 작업 공간으로 끌어다 놓으세요.", style="Footer.TLabel")
+        self.mode_hint.pack(side="bottom",fill="x",padx=12,pady=(0,6))
+        self.bind("<Configure>",lambda e:self.mode_hint.configure(wraplength=max(200,e.width-24))
+                  if e.widget is self else None,add="+")
+        ttk.Label(top, text=where, style="Brand.TLabel").pack(side="left")
         ttk.Button(top, text="되돌리기 (Ctrl+Z)", command=self.undo).pack(side="right", padx=2)
-        ttk.Button(top, text="모두 지우기", command=self.clear_all).pack(side="right", padx=2)
+        ttk.Button(top, text="모두 지우기", style="Danger.TButton", command=self.clear_all).pack(side="right", padx=2)
         if on_decompose:
-            ttk.Button(top, text="🔍 다시 분석해 블록으로 풀기", command=self.redecompose).pack(side="right", padx=2)
-            ttk.Button(top, text="가져온 효과 하나로 접기", command=self.collapse_original).pack(side="right", padx=2)
+            original = ttk.Menubutton(top,text="원본 효과 ▾")
+            original.pack(side="right",padx=2)
+            original_menu = tk.Menu(original,tearoff=False)
+            original_menu.add_command(label="다시 분석해 블록으로 풀기",command=self.redecompose)
+            original_menu.add_command(label="가져온 효과 하나로 접기",command=self.collapse_original)
+            original.configure(menu=original_menu)
 
         main = ttk.PanedWindow(self, orient="vertical")
         main.pack(fill="both", expand=True)
@@ -674,20 +712,24 @@ class BlockEditor(tk.Toplevel):
         main.add(upper, weight=4)
 
         # ---- 블록 모음 ----
-        pal_outer = upper.add_panel(lambda parent:ttk.Frame(parent, padding=6), "블록 라이브러리", weight=0)
+        pal_outer = upper.add_panel(lambda parent:ttk.Frame(parent, padding=10), "블록 라이브러리", weight=0)
         self.library_panel = pal_outer
         self.browse_saved = tk.BooleanVar(self,False)
         routes = ttk.Frame(pal_outer)
         routes.pack(fill="x")
         for saved,label in ((False,"개별 블록"), (True,"저장한 묶음")):
-            ttk.Radiobutton(routes,text=label,variable=self.browse_saved,value=saved,
-                            command=self._build_palette).pack(side="left",expand=True)
+            ttk.Radiobutton(routes,text=label,style="Segment.TRadiobutton",variable=self.browse_saved,value=saved,
+                            command=self._build_palette).pack(side="left",expand=True,fill="x")
         tools = ttk.Frame(pal_outer)
         tools.pack(fill="x", pady=4)
         ttk.Button(tools,text="문장으로 만들기…",command=self.open_recipes).pack(side="left")
-        ttk.Button(tools,text="공유 블록 정의…",command=self.define_shared).pack(side="right")
+        library_tools = ttk.Menubutton(tools,text="도구 ▾",style="Small.TButton")
+        library_tools.pack(side="right")
+        library_menu = tk.Menu(library_tools,tearoff=False)
+        library_menu.add_command(label="공유 블록 정의…",command=self.define_shared)
+        library_tools.configure(menu=library_menu)
         search_row = ttk.Frame(pal_outer)
-        search_row.pack(fill="x")
+        search_row.pack(fill="x",pady=(6,4),before=tools)
         ttk.Label(search_row, text="블록 검색").pack(side="left")
         self.palette_query = tk.StringVar(self)
         search = ttk.Entry(search_row, textvariable=self.palette_query, width=18)
@@ -696,23 +738,27 @@ class BlockEditor(tk.Toplevel):
         search.bind("<Escape>", lambda _: (self.palette_query.set(""), "break")[1])
         self.show_advanced = tk.BooleanVar(self, True)
         ttk.Checkbutton(pal_outer, text="다른 효과도 모두 보기",
-                        variable=self.show_advanced, command=self._build_palette).pack(anchor="w")
-        self.pal_canvas = tk.Canvas(pal_outer, width=290, background="#f4f4f6", highlightthickness=0)
-        psb = ttk.Scrollbar(pal_outer, orient="vertical", command=self.pal_canvas.yview)
+                        variable=self.show_advanced, command=self._apply_palette_visibility).pack(anchor="w")
+        self.pal_canvas = tk.Canvas(pal_outer, width=300, background=C["surface"], highlightthickness=0)
+        psb = ttk.Scrollbar(pal_outer, orient="vertical", command=scroll_command(self.pal_canvas))
         self.pal_canvas.configure(yscrollcommand=psb.set)
         self.pal_canvas.pack(side="left", fill="both", expand=True)
         psb.pack(side="right", fill="y")
-        self.palette = tk.Frame(self.pal_canvas, background="#f4f4f6")
-        self.pal_canvas.create_window(0, 0, window=self.palette, anchor="nw")
+        self.palette = tk.Frame(self.pal_canvas, background=C["surface"])
+        palette_window = self.pal_canvas.create_window(0, 0, window=self.palette, anchor="nw")
+        self.pal_canvas.bind("<Configure>", lambda e: self.pal_canvas.itemconfigure(
+            palette_window, width=max(1, e.width)))
         self.palette.bind("<Configure>", lambda _e: self.pal_canvas.configure(scrollregion=self.pal_canvas.bbox("all")))
         self.palette_query.trace_add("write", lambda *_: self._build_palette())
         self.preset_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "sts2_mod_maker" / "block_presets"
         self.favorite_file = self.preset_dir.parent / "favorite_blocks.json"
+        saved = []
         try:
             saved = json.loads(self.favorite_file.read_text("utf8"))
             self.favorites = {op for op in saved if isinstance(op,str) and op in B.SPECS} if isinstance(saved,list) else set()
         except (ValueError,OSError):
             self.favorites = set()
+        self.favorite_order = list(dict.fromkeys(op for op in saved if isinstance(op,str) and op in self.favorites)) if isinstance(saved, list) else []
         self.saved_presets = {}
         for preset_file in sorted(self.preset_dir.glob("*.json")):
             try:
@@ -727,9 +773,9 @@ class BlockEditor(tk.Toplevel):
         # ---- 작업 공간 ----
         ws = upper.add_panel(lambda parent:ttk.Frame(parent), "블록 작업 공간", weight=1)
         self.workspace_panel = ws
-        self.canvas = tk.Canvas(ws, background="#fbfbfd", highlightthickness=0)
-        vsb = ttk.Scrollbar(ws, orient="vertical", command=self.canvas.yview)
-        hsb = ttk.Scrollbar(ws, orient="horizontal", command=self.canvas.xview)
+        self.canvas = tk.Canvas(ws, background=C["workspace"], highlightthickness=0)
+        vsb = ttk.Scrollbar(ws, orient="vertical", command=scroll_command(self.canvas))
+        hsb = ttk.Scrollbar(ws, orient="horizontal", command=scroll_command(self.canvas, True))
         self.canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         vsb.pack(side="right", fill="y")
         hsb.pack(side="bottom", fill="x")
@@ -839,19 +885,18 @@ class BlockEditor(tk.Toplevel):
             command = self.register(handler, self._substitute)
             self.tk.call("bind", self.select_bindtag, sequence,
                          f'if {{"[{command} {self._subst_format_str}]" == "break"}} break')
-        footer = ttk.Frame(self, padding=4)
+        footer = ttk.Frame(self, padding=(10,8))
         footer.pack(side="bottom", fill="x", before=main)
         presets = ttk.Frame(footer)
-        presets.pack(side="bottom", anchor="w")
-        ttk.Label(presets, text="빈 곳에서 드래그해 선택").pack(side="left")
-        self.group_delete = ttk.Button(presets, text="선택 삭제 (Del)", command=self._delete_group, state="disabled")
+        presets.pack(side="left")
+        self.group_delete = ttk.Button(presets, text="선택 삭제 (Del)", style="Danger.TButton", command=self._delete_group, state="disabled")
         self.group_delete.pack(side="left")
         self.group_save = ttk.Button(presets, text="라이브러리에 저장", state="disabled", command=self._save_group)
         self.group_save.pack(side="left", padx=3)
         ttk.Button(presets, text="파일 가져오기…", command=self.load_blocks).pack(side="left")
         btns = ttk.Frame(footer)
-        btns.pack(side="top", anchor="e")
-        ttk.Button(btns, text="확인", command=self.ok).pack(side="left", padx=4)
+        btns.pack(side="right")
+        ttk.Button(btns, text="효과 적용", style="Accent.TButton", command=self.ok).pack(side="left", padx=4)
         ttk.Button(btns, text="취소", command=self.destroy).pack(side="left")
         self.canvas.bind("<Delete>", self._delete_selection_key)
         self.bind("<Control-z>", lambda _e: self.undo())
@@ -861,6 +906,27 @@ class BlockEditor(tk.Toplevel):
         self.render()
         center_window(self)
         self.grab_set()
+
+    def destroy(self):
+        if getattr(self,"_closing",False) or not self.winfo_exists():
+            return
+        self._closing = True
+        if self.grab_current() is self:
+            self.grab_release()
+        self.configure(menu="")
+        self.transient("")
+        self.withdraw()
+        # Break Canvas window-item links before Tk destroys embedded controls.
+        # After wm manage/forget, pending geometry work can otherwise outlive
+        # those controls on Windows. Settle it while the whole editor is alive.
+        if hasattr(self,"canvas"):
+            self._clear_drag_feedback()
+            self._restore_drag_windows()
+            self.canvas.delete("all")
+            # Process pending native reparent/unmap messages while all controls
+            # still exist. The withdrawn editor cannot receive new edits.
+            self.update()
+        super().destroy()
 
     # ---------------- 블록 모음 ----------------
     def define_shared(self):
@@ -967,18 +1033,60 @@ class BlockEditor(tk.Toplevel):
         self.wait_window(win)
         self.grab_set()
 
-    def _toggle_favorite(self, op):
-        updated = self.favorites ^ {op}
+    def _save_favorites(self, order):
+        order = list(dict.fromkeys(order))
         try:
             self.favorite_file.parent.mkdir(parents=True,exist_ok=True)
             tmp = self.favorite_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(sorted(updated)),encoding="utf8")
+            tmp.write_text(json.dumps(order),encoding="utf8")
             tmp.replace(self.favorite_file)
         except OSError as exc:
             messagebox.showerror("즐겨찾기 저장 실패",str(exc),parent=self)
+            return False
+        self.favorite_order = order
+        self.favorites = set(order)
+        return True
+
+    def _toggle_favorite(self, op):
+        order = [key for key in self.favorite_order if key in self.favorites and key != op]
+        order += sorted(self.favorites - set(order) - {op})
+        if op not in self.favorites:
+            order.append(op)
+        if not self._save_favorites(order):
             return
-        self.favorites = updated
-        self._build_palette()
+        # Keep the category widgets and scroll position intact when pinning.
+        for block_op, star in self._palette_stars:
+            if star.winfo_exists():
+                pinned = block_op in self.favorites
+                star.configure(text="★" if pinned else "☆",
+                               foreground="#895000" if pinned else "#4c5665")
+        self._refresh_favorites()
+
+    def _refresh_favorites(self):
+        candidates = {op:(caption,color) for op,caption,color in self._favorite_candidates}
+        order = [op for op in self.favorite_order + sorted(self.favorites-set(self.favorite_order))
+                 if op in self.favorites and op in candidates]
+        previous = getattr(self, "_favorite_rows", {})
+        rows = {op:row for op,row in previous.items()
+                if op in order and row.winfo_exists() and row.master == self._favorites_frame}
+        for widget in self._favorites_frame.winfo_children():
+            if widget not in rows.values():
+                widget.destroy()
+        self._palette_stars = [(op,star) for op,star in self._palette_stars if star.winfo_exists()]
+        self._favorite_rows = {}
+        for op in order:
+            caption,color = candidates[op]
+            row = rows.get(op)
+            if row is None:
+                row = self._palette_block(self._favorites_frame,op,caption,color)
+            self._favorite_rows[op] = row
+        for row in self._favorite_rows.values():
+            row.pack_forget()
+        for row in self._favorite_rows.values():
+            row.pack(fill="x",padx=5,pady=2)
+        if not order:
+            ttk.Label(self._favorites_frame, text="☆를 눌러 즐겨찾기에 추가하세요.",
+                      padding=5, wraplength=170).pack(anchor="w")
 
     def _palette_block(self, parent, op, caption, color):
         row = ttk.Frame(parent)
@@ -986,23 +1094,41 @@ class BlockEditor(tk.Toplevel):
         pinned = op in self.favorites
         star = tk.Button(row,text="★" if pinned else "☆",width=2,relief="flat",cursor="hand2",
                          foreground="#895000" if pinned else "#4c5665",command=lambda:self._toggle_favorite(op))
-        star.pack(side="right",fill="y")
-        Tooltip(star,"즐겨찾기 해제" if pinned else "즐겨찾기 추가")
+        star.pack(side="left",fill="y")
+        self._palette_stars.append((op, star))
+        Tooltip(star,lambda: "즐겨찾기 해제" if op in self.favorites else "즐겨찾기 추가")
         lab = tk.Label(row,text=caption,font=FONT,background=color,foreground="white",anchor="w",
                        padx=8,pady=5,cursor="hand2",wraplength=225,justify="left")
         lab.pack(fill="x",expand=True)
-        lab.bind("<ButtonPress-1>",lambda e:self.start_drag(e,new=op))
+        lab.bind("<Configure>", lambda e: lab.configure(wraplength=max(1,e.width-16)))
+        def begin(e):
+            self.start_drag(e,new=op)
+            self.drag["favorite"] = parent == self._favorites_frame
+        lab.bind("<ButtonPress-1>",begin)
         lab.bind("<B1-Motion>",self.on_drag)
         lab.bind("<ButtonRelease-1>",self.end_drag)
+        return row
+
+    def _apply_palette_visibility(self):
+        # Reuse widgets and preserve the viewport; Tk paints after this batch.
+        for widget, advanced in self._palette_visibility:
+            widget.pack_forget()
+        for widget, advanced in self._palette_visibility:
+            if not advanced or self.show_advanced.get() or self.palette_query.get().strip():
+                widget.pack(**widget._palette_pack)
 
     def _build_palette(self):
         for widget in self.palette.winfo_children():
             widget.destroy()
+        self._palette_stars = []
+        self._palette_visibility = []
+        self._favorite_candidates = []
         terms = self.palette_query.get().casefold().split()
         matches = 0
         self.pal_canvas.yview_moveto(0)
         is_manosaba = (self.project.get("takeover") or {}).get("mod", "").casefold() == "manosaba"
         favorites = ttk.LabelFrame(self.palette,text="★ 즐겨찾기")
+        self._favorites_frame = favorites
         if not self.browse_saved.get():
             favorites.pack(fill="x",padx=4,pady=4)
         for key, preset in sorted(self.saved_presets.items(), key=lambda pair: pair[1]["name"].casefold()):
@@ -1032,12 +1158,12 @@ class BlockEditor(tk.Toplevel):
         for cat, ops in B.PALETTE:
             if cat == "mod_api" and not is_manosaba:
                 continue
-            name, color = B.CATS[cat]
+            name, _ = B.CATS[cat]
+            color = _block_color(cat)
             show_heading = True
+            category_rows = []
             for op in ops:
                 spec = B.SPECS[op]
-                if not terms and not self.show_advanced.get() and _advanced_palette_block(op, spec):
-                    continue
                 if op == "kotodama_gain" and self.owner_kind not in ("card", "relic", "potion", "power"):
                     continue
                 if op in ("manosaba_ema_summon", "manosaba_novel_summon", "manosaba_ignite",
@@ -1059,30 +1185,38 @@ class BlockEditor(tk.Toplevel):
                                                     if op in ("pick", "picked_action")))).casefold()
                 if not all(term in keywords for term in terms):
                     continue
+                caption = ("⊓ " if spec.get("body") else "") + caption
+                self._favorite_candidates.append((op, caption, color))
                 matches += 1
                 if show_heading:
-                    tk.Label(self.palette, text=name, font=FONT_B, background="#f4f4f6", foreground=_darker(color, 0.8),
-                             anchor="w").pack(fill="x", padx=6, pady=(10, 2))
+                    heading = tk.Label(self.palette, text=name, font=FONT_B, background=C["surface"], foreground=_darker(color, 0.8),
+                             anchor="w")
+                    heading.pack(fill="x", padx=6, pady=(10, 2))
                     show_heading = False
-                caption = ("⊓ " if spec.get("body") else "") + caption
-                self._palette_block(self.palette, op, caption, color)
-                if op in self.favorites:
-                    self._palette_block(favorites, op, caption, color)
-        if not favorites.winfo_children():
-            if terms:
-                favorites.pack_forget()
-            else:
-                ttk.Label(favorites,text="자주 쓰는 블록 옆 ☆를 눌러 추가하세요.",padding=5).pack(anchor="w")
+                row = self._palette_block(self.palette, op, caption, color)
+                category_rows.append((row, _advanced_palette_block(op, spec)))
+            if category_rows:
+                self._palette_visibility.append((heading, all(advanced for _, advanced in category_rows)))
+                self._palette_visibility.extend(category_rows)
+        self._refresh_favorites()
         if terms and not matches:
             ttk.Label(self.palette, text="검색 결과가 없습니다." if self.show_advanced.get() else "검색 결과가 없습니다. 고급 블록도 확인해 보세요.").pack(padx=8, pady=12)
             return
         tk.Label(self.palette, text="\n블록을 여기로 끌어오면 라이브러리에 복사합니다.\n오른쪽 클릭: 연결(가져온 호출) / 복제 / 삭제",
-                 font=("Malgun Gothic", 9), background="#f4f4f6", foreground="#888", justify="left").pack(fill="x", padx=6)
+                 font=("Malgun Gothic", 9), background=C["surface"], foreground=C["muted"], justify="left").pack(fill="x", padx=6)
+        flags = dict(self._palette_visibility)
+        self._palette_visibility = [(w,flags.get(w,False)) for w in self.palette.pack_slaves()]
+        for widget, _ in self._palette_visibility:
+            widget._palette_pack = widget.pack_info()
+            widget._palette_pack.pop("in", None)
+        self._apply_palette_visibility()
+
 
     # ---------------- 그리기 ----------------
     def _wheel(self, e):
         self.canvas.yview_scroll(int(-e.delta / 120), "units")
 
+    @buffered_canvas("canvas", defer_new=True)
     def render(self):
         self.block_headers = []
         self.group_blocks = []
@@ -1090,14 +1224,17 @@ class BlockEditor(tk.Toplevel):
         self.group_delete.configure(state="disabled")
         self.group_save.configure(state="disabled")
         self.mode_hint.configure(text="왼쪽 블록을 작업 공간으로 끌어다 놓으세요.")
-        for f in self.frames:
-            f.destroy()
+        old_frames = self.frames
         self.frames = []
         self.canvas.delete("all")
         self.slots = []
+        self._pending_block_windows = []
         y = self._layout_list(self.blocks, 16, 16, top=True)
         w = max([f.winfo_reqwidth() + 80 for f in self.frames] + [400])
         self.canvas.configure(scrollregion=(0, 0, w + 200, y + 200))
+        for x, y, frame in self._pending_block_windows:
+            self.canvas.create_window(x,y,window=frame,anchor="nw")
+        self._pending_block_windows = []
         def bind_selection(widget):
             if self.select_bindtag not in widget.bindtags():
                 widget.bindtags((self.select_bindtag,) + widget.bindtags())
@@ -1105,6 +1242,8 @@ class BlockEditor(tk.Toplevel):
                 bind_selection(child)
         bind_selection(self.canvas)
         self.refresh_outputs()
+        for frame in old_frames:
+            frame.destroy()
 
     def _layout_list(self, lst, x, y, top=False):
         if not lst:
@@ -1127,9 +1266,9 @@ class BlockEditor(tk.Toplevel):
         spec = B.SPECS.get(b["op"])
         if not spec:
             return y
-        color = B.CATS[spec["cat"]][1]
+        color = _block_color(spec["cat"])
         frame = self._block_frame(b, spec, color)
-        self.canvas.create_window(x, y, window=frame, anchor="nw")
+        self._pending_block_windows.append((x,y,frame))
         frame.update_idletasks()
         h = frame.winfo_reqheight()
         self._bind_drag(frame, b, lst)
@@ -1141,7 +1280,7 @@ class BlockEditor(tk.Toplevel):
             for key, label in spec.get("sections", []):
                 self.canvas.create_rectangle(x, inner_top, x + 14, y2, fill=color, outline="")
                 ef = self._section_frame(b, spec, label, color)
-                self.canvas.create_window(x, y2, window=ef, anchor="nw")
+                self._pending_block_windows.append((x,y2,ef))
                 ef.update_idletasks()
                 self._bind_drag(ef, b, lst)
                 inner_top = y2 + ef.winfo_reqheight()
@@ -1379,6 +1518,21 @@ class BlockEditor(tk.Toplevel):
             return _Combo(parent, B.EVOKE_WHICH, a.get(key), 6, set_)
         if kind == "pick_pile":
             return _Combo(parent, B.PICK_PILES, a.get(key), 12, set_)
+        if kind == "card_ref":
+            return _Combo(parent, B.CARD_REFS, a.get(key), 22, set_)
+        if kind == "clone_policy":
+            return _Combo(parent, B.CLONE_POLICIES, a.get(key), 12, set_)
+        if kind == "end_policy":
+            return _Combo(parent, B.END_POLICIES, a.get(key), 18, set_)
+        if kind == "draw_pos":
+            return _Combo(parent, B.DRAW_POS, a.get(key), 10, set_)
+        if kind == "enchant":
+            return _Combo(parent, B.ENCHANTS, a.get(key), 20, set_)
+        if kind == "gtag":
+            import gimmick as G
+            opts = [(t["id"], "#" + (t.get("name_ko") or t["id"])) for t in G.tags(self.project)] or \
+                [("", "('🎲 기믹' 탭에서 태그를 만드세요)")]
+            return _Combo(parent, opts, a.get(key), 16, set_)
         if kind == "pick_action":
             return _Combo(parent, B.PICK_ACTIONS, a.get(key), 16, set_)
         if kind == "delay_when":
@@ -1642,6 +1796,9 @@ class BlockEditor(tk.Toplevel):
             for block,_,_,(left,top,right,bottom) in self.block_headers:
                 if block is d["block"]:
                     self.canvas.create_rectangle(left-3,top-3,right+3,bottom+3,outline="#175ac1",width=3,dash=(5,3),tags="drag_origin")
+        if d.get("favorite") and self._favorite_drop_index(e) is not None:
+            self._show_drag_feedback(e,"즐겨찾기 순서 변경",1,"move",self._favorites_frame)
+            return
         if d["block"] is not None and self._over_library(e):
             self._show_drag_feedback(e,title,count,"save",self.library_panel)
             return
@@ -1671,6 +1828,35 @@ class BlockEditor(tk.Toplevel):
                 best, bd = s, dist
         return best
 
+    def _favorite_drop_index(self, e):
+        frame = self._favorites_frame
+        if not frame.winfo_ismapped():
+            return None
+        x,y = e.x_root-frame.winfo_rootx(), e.y_root-frame.winfo_rooty()
+        if not (0 <= x < frame.winfo_width() and 0 <= y < frame.winfo_height()):
+            return None
+        rows = list(self._favorite_rows.values())
+        return sum(e.y_root >= row.winfo_rooty()+row.winfo_height()/2 for row in rows)
+
+    def _move_favorite(self, op, index):
+        visible = list(self._favorite_rows)
+        if op not in visible:
+            return
+        old = visible.index(op)
+        visible.remove(op)
+        visible.insert(max(0,index-(old<index)),op)
+        # Preserve positions of favorites hidden by search/context filters.
+        sequence = iter(visible)
+        order = [next(sequence) if key in visible else key for key in self.favorite_order]
+        if not self._save_favorites(order):
+            return
+        self._favorite_rows = {key:self._favorite_rows[key] for key in visible}
+        for row in self._favorite_rows.values():
+            row.pack_forget()
+        for row in self._favorite_rows.values():
+            row.pack(fill="x",padx=5,pady=2)
+        self.mode_hint.configure(text="즐겨찾기 순서를 저장했습니다.")
+
     def end_drag(self, e):
         d, self.drag = self.drag, None
         over_library = self._over_library(e)
@@ -1679,6 +1865,9 @@ class BlockEditor(tk.Toplevel):
         self._restore_drag_windows()
         self.canvas.delete("drag")
         if not d or not d["moved"]:
+            return
+        if d.get("favorite") and self._favorite_drop_index(e) is not None:
+            self._move_favorite(d["new"], self._favorite_drop_index(e))
             return
         if over_library:
             if d["block"] is not None:
@@ -1954,7 +2143,7 @@ class BlockEditor(tk.Toplevel):
         compatible = len({id(siblings) for siblings,_ in selected}) <= 1
         self.canvas.delete("selection_marks")
         for block, _, frame, (a,b,c,d) in self.block_headers:
-            color = B.CATS[B.SPECS[block["op"]]["cat"]][1]
+            color = _block_color(B.SPECS[block["op"]]["cat"])
             active = id(block) in covered
             accent = "#064eb5" if compatible else "#9b4411"
             fill = accent if active else color
@@ -2157,10 +2346,14 @@ class BlockEditor(tk.Toplevel):
     def refresh_outputs(self):
         C = M.card_event_context(self.item, self.card_event) if self.card_event else M._Ctx(self.owner_kind, self.item)
         lines, errs = B.compile_blocks(self.blocks, self.project, C, "", allow_event=self.allow_event)
-        self.code.configure(state="normal")
-        self.code.delete("1.0", "end")
-        self.code.insert("1.0", "\n".join(lines))
-        self.code.configure(state="disabled")
+        code = "\n".join(lines)
+        if self.code.get("1.0", "end-1c") != code:
+            view = self.code.yview()
+            self.code.configure(state="normal")
+            self.code.delete("1.0", "end")
+            self.code.insert("1.0", code)
+            self.code.configure(state="disabled")
+            self.code.yview_moveto(view[0])
         self.err.configure(text="\n".join("⚠ " + x for x in dict.fromkeys(errs)))
         if self.auto.get():
             for t, lang in ((self.desc_ko, "ko"), (self.desc_en, "en"), (self.desc_zh, "zh")):
