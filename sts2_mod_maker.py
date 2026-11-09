@@ -440,6 +440,12 @@ class EffectDialog(tk.Toplevel):
         self.text_zh = tk.StringVar(value=e.get("text_zh", ""))
         self.text_zh_entry = ttk.Entry(self.code_frame, textvariable=self.text_zh, width=60)
         self.text_zh_entry.grid(row=5, column=1, sticky="we", pady=2)
+        self.upgraded_text = {}
+        for row, lang in enumerate(("ko", "en", "zh"), 6):
+            ttk.Label(self.code_frame, text={"ko":"강화 설명 (한국어)", "en":"강화 설명 (영어)", "zh":"강화 설명 (중국어)"}[lang]).grid(row=row, column=0, sticky="w")
+            var = tk.StringVar(value=e.get("upgraded_text", {}).get(lang, ""))
+            ttk.Entry(self.code_frame, textvariable=var, width=60).grid(row=row, column=1, sticky="we", pady=2)
+            self.upgraded_text[lang] = var
         self._sync_block_ui()
 
         self.note = ttk.Label(body, text="", foreground="#777", wraplength=560, justify="left")
@@ -494,7 +500,7 @@ class EffectDialog(tk.Toplevel):
         import blockui
         ed = blockui.BlockEditor(self, self.project, self.owner_kind, self.item, self.blocks,
                                  self.text_ko.get(), self.text_en.get(), self.auto_text if self.blocks else True,
-                                 text_zh=self.text_zh.get())
+                                 text_zh=self.text_zh.get(), upgraded_text={lang: var.get() for lang, var in self.upgraded_text.items()})
         self.wait_window(ed)
         try:
             self.grab_set()
@@ -504,6 +510,8 @@ class EffectDialog(tk.Toplevel):
             return
         self.blocks = ed.result["blocks"]
         self.auto_text = ed.result["auto_text"]
+        for lang, var in self.upgraded_text.items():
+            var.set(ed.result.get("upgraded_text", {}).get(lang, ""))
         if not self.auto_text:
             self.text_ko.set(ed.result["text_ko"])
             self.text_en.set(ed.result["text_en"])
@@ -589,6 +597,7 @@ class EffectDialog(tk.Toplevel):
             "blocks": self.blocks if use_blocks else [],
             "auto_text": self.auto_text if use_blocks else False,
             # 설명 자동이면 비워 두고 빌드 때 블록에서 만듭니다 (블록과 설명이 어긋나지 않게)
+            "upgraded_text": {lang: var.get().strip() for lang, var in self.upgraded_text.items()} if keep_text else {},
             "text_ko": self.text_ko.get().strip() if keep_text else "",
             "text_en": self.text_en.get().strip() if keep_text else "",
             "text_zh": self.text_zh.get().strip() if keep_text else "",
@@ -1199,7 +1208,7 @@ class GalleryTab(ttk.Frame):
         c.delete("all")
         self._photos = []
         self.tiles.begin()
-        if self.app.nb.select() != str(self):
+        if not self.app.nb.is_visible(self):
             return
         game = self.app.pv_mode.get() == "game" and self.app.game_assets() is not None
         P = self.app.project
@@ -1404,10 +1413,9 @@ class ExternalTab(ttk.Frame):
         ttk.Button(bar, text="파일 열기 (.dll/.pck/.json)…", command=self.open_file).pack(side="left", padx=2)
         self.status = ttk.Label(bar, text="", foreground="#555")
         self.status.pack(side="left", padx=12)
-        pw = ttk.PanedWindow(self, orient="horizontal")
+        pw = UX.DockPanedWindow(self, title="다른 모드", orient="horizontal")
         pw.pack(fill="both", expand=True)
-        left = ttk.Frame(pw, padding=6, width=300)
-        pw.add(left, weight=0)
+        left = pw.add_panel(lambda parent:ttk.Frame(parent, padding=6, width=300), "모드 목록", weight=0)
         self.listbox = tk.Listbox(left, exportselection=False, width=34, activestyle="none", height=10)
         self.listbox.pack(fill="x")
         self.listbox.bind("<<ListboxSelect>>", lambda _e: self.on_select())
@@ -1423,8 +1431,7 @@ class ExternalTab(ttk.Frame):
         ttk.Label(left, text="참조하면 그 모드의 파워를 내 카드 효과(◆ 표시)에서 쓸 수 있고, 생성되는 모드가 그 모드를 필요로 하게 됩니다.",
                   foreground="#777", wraplength=300, justify="left").pack(fill="x")
         ttk.Button(left, text="목록에서 닫기", command=self.close_mod).pack(fill="x", pady=(12, 2))
-        right = ttk.Frame(pw)
-        pw.add(right, weight=1)
+        right = pw.add_panel(lambda parent:ttk.Frame(parent), "모드 내용", weight=1)
         fb = ttk.Frame(right, padding=(6, 4))
         fb.pack(fill="x")
         self.kind = tk.StringVar(value="card")
@@ -1720,7 +1727,7 @@ class ExternalTab(ttk.Frame):
         self.tiles.begin()
         self._tile_pos = {}
         self._update_sel_label()
-        if not self.cur or self.app.nb.select() != str(self):
+        if not self.cur or not self.app.nb.is_visible(self):
             return
         kind = self.kind.get()
         lang = self.app.pv_lang.get()
@@ -1808,6 +1815,127 @@ class ExternalTab(ttk.Frame):
 # ---------------------------------------------------------------------------
 # 카드 / 유물 / 물약 공통 편집 탭
 # ---------------------------------------------------------------------------
+class CardEventEffects(ttk.Frame):
+    """Card event blocks displayed alongside the normal on-play effect list."""
+    def __init__(self, parent, tab, event, label):
+        super().__init__(parent)
+        self.tab, self.event, self.label = tab, event, label
+        self.columnconfigure(0, weight=1)
+        self.tree = ttk.Treeview(self, columns=("effect",), show="headings", height=6, selectmode="browse")
+        self.tree.heading("effect", text=label + " 실행할 효과 (위에서부터 순서대로)")
+        self.tree.column("effect", width=570, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.bind("<Double-1>", lambda e:self.edit())
+        buttons = ttk.Frame(self)
+        buttons.grid(row=0, column=1, sticky="ns", padx=(4, 0))
+        self.buttons = []
+        for text, command in (("블록 편집", self.edit), ("삭제", self.remove),
+                              ("▲", lambda:self.move(-1)), ("▼", lambda:self.move(1))):
+            button = ttk.Button(buttons, text=text, width=9, command=command)
+            button.pack(pady=1)
+            self.buttons.append(button)
+        target_row = ttk.Frame(self)
+        target_row.grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=3)
+        ttk.Label(target_row, text="이벤트 대상").pack(side="left", padx=(0, 6))
+        self.target = LabeledCombo(target_row, M.CARD_EVENT_TARGETS, width=22)
+        self.target.pack(side="left")
+        self.target.bind("<<ComboboxSelected>>", self.change_target)
+        ttk.Label(target_row, text="선택 수").pack(side="left", padx=(8, 3))
+        self.target_count = tk.StringVar(self, "1")
+        self.count_input = ttk.Spinbox(target_row, from_=1, to=99, width=4, textvariable=self.target_count, command=self.change_count)
+        self.count_input.pack(side="left")
+        self.count_input.bind("<KeyRelease>", self.change_count)
+        self.count_input.bind("<FocusOut>", self.change_count)
+        ttk.Label(target_row, text="명").pack(side="left", padx=(2, 4))
+        ttk.Label(target_row, text="블록에서 '대상'을 고르면 이 설정을 사용합니다.", foreground="#687383").pack(side="left", padx=8)
+        self.hint = ttk.Label(self, text="블록 편집을 눌러 효과를 추가하거나 수정하세요.", foreground="#687383")
+        self.hint.grid(row=1, column=0, columnspan=2, sticky="w", padx=4, pady=3)
+
+    def card(self):
+        index = self.tab.cur
+        return self.tab.items[index] if index is not None and index < len(self.tab.items) else None
+
+    def blocks(self):
+        card = self.card()
+        return card.get("event_blocks", {}).get(self.event, []) if card else []
+
+    def refresh(self, selected=None):
+        import blockcode as B
+        self.tree.delete(*self.tree.get_children())
+        card = self.card()
+        blocks = self.blocks()
+        for i, block in enumerate(blocks):
+            description = B.describe([block], self.tab.app.project, "card", "ko")
+            description = PV.fill_values(self.tab.app.project, description, card)
+            plain = "".join(text for text, _ in PV.parse_bbcode(description))
+            self.tree.insert("", "end", iid=str(i), values=(plain or B.SPECS.get(block.get("op"), {}).get("ko", "효과"),))
+        if blocks and selected is not None:
+            index = str(min(selected, len(blocks)-1))
+            self.tree.selection_set(index)
+            self.tree.see(index)
+        enabled = card is not None and not card.get("clone")
+        self.target.set_value(card.get("event_targets", {}).get(self.event, "random") if card else "random")
+        self.target.configure(state="readonly" if enabled else "disabled")
+        self.target_count.set(str(card.get("event_target_counts", {}).get(self.event, 1)) if card else "1")
+        self.count_input.configure(state="normal" if enabled and self.target.get_value() == "choose" else "disabled")
+        for button in self.buttons:
+            button.configure(state="normal" if enabled else "disabled")
+        self.hint.configure(text=("가져온 원본 카드는 이 시점의 효과 편집을 지원하지 않습니다." if card and card.get("clone") else
+                                  f"적을 최대 {self.target_count.get()}명 차례로 선택하세요. 중복 선택은 불가하며, 취소하면 선택한 적까지만 적용합니다." if card and card.get("event_targets", {}).get(self.event) == "choose" else
+                                  "블록 편집을 눌러 효과를 추가하거나 수정하세요."))
+        self.tab.effect_tabs.tab(self, text=self.label + (f" ({len(blocks)})" if blocks else ""))
+
+    def change_count(self, event=None):
+        card = self.card()
+        if not card or card.get("clone") or self.target.get_value() != "choose":
+            return
+        try:
+            count = M.card_event_target_count({"event_target_counts": {self.event:self.target_count.get()}}, self.event)
+        except ValueError:
+            if event is not None and event.type == tk.EventType.FocusOut:
+                self.target_count.set(str(card.get("event_target_counts", {}).get(self.event, 1)))
+            return
+        if count != card.get("event_target_counts", {}).get(self.event, 1):
+            card.setdefault("event_target_counts", {})[self.event] = count
+            self.hint.configure(text=f"적을 최대 {count}명 차례로 선택하세요. 중복 선택은 불가하며, 취소하면 선택한 적까지만 적용합니다.")
+            self.tab.changed()
+
+    def change_target(self, _=None):
+        card = self.card()
+        if card and not card.get("clone"):
+            card.setdefault("event_targets", {})[self.event] = self.target.get_value()
+            self.refresh()
+            self.tab.changed()
+
+    def edit(self):
+        card = self.card()
+        if card and not card.get("clone"):
+            self.tab.edit_event(self.event, self.label)
+
+    def remove(self):
+        selection = self.tree.selection()
+        card = self.card()
+        if not selection or not card or card.get("clone"):
+            return
+        index = int(selection[0])
+        del self.blocks()[index]
+        self.refresh(index)
+        self.tab.changed()
+
+    def move(self, direction):
+        selection = self.tree.selection()
+        card = self.card()
+        if not selection or not card or card.get("clone"):
+            return
+        index = int(selection[0])
+        dest = index + direction
+        blocks = self.blocks()
+        if 0 <= dest < len(blocks):
+            blocks[index], blocks[dest] = blocks[dest], blocks[index]
+            self.refresh(dest)
+            self.tab.changed()
+
+
 class ItemTab(ttk.Frame):
     kind = "card"          # card / relic / potion
     key = "cards"
@@ -1823,11 +1951,10 @@ class ItemTab(ttk.Frame):
         self.query = ""
         self._drag = None
 
-        pw = ttk.PanedWindow(self, orient="horizontal")
+        pw = UX.DockPanedWindow(self, title=self.noun, orient="horizontal")
         self.item_panes = pw
         pw.pack(fill="both", expand=True)
-        left = ttk.Frame(pw, padding=(8, 8, 4, 8), width=300)
-        pw.add(left, weight=0)
+        left = pw.add_panel(lambda parent:ttk.Frame(parent, padding=(8, 8, 4, 8), width=300), self.noun + " 목록", weight=0)
         head = ttk.Frame(left)
         head.pack(fill="x", pady=(0, 6))
         ttk.Label(head, text=f"{self.noun} 목록", style="Head.TLabel").pack(side="left")
@@ -1875,16 +2002,14 @@ class ItemTab(ttk.Frame):
         ttk.Label(left, text="끌어서 순서 변경 · Ctrl/Shift+클릭 여러 개\n오른쪽 클릭 = 메뉴 · Ctrl+Z 되돌리기",
                   style="Muted.TLabel", justify="left").pack(anchor="w", pady=(6, 0))
 
-        right = ScrollFrame(pw)
+        right = pw.add_panel(lambda parent:ScrollFrame(parent), self.noun + " 편집기", weight=1)
         self.item_editor = right
-        pw.add(right, weight=1)
         self.form = ttk.Frame(right.inner, padding=8)
         self.form.pack(fill="both", expand=True)
         for c in (1, 3):
             self.form.columnconfigure(c, weight=1)
         self.build_form(self.form)
-        self.pv = PreviewPanel(pw, app, self.kind)
-        pw.add(self.pv, weight=0)
+        self.pv = pw.add_panel(lambda parent:PreviewPanel(parent, app, self.kind), self.noun + " 미리보기", weight=0)
 
     # ---- 폼 구성 도우미 ----
     def _field_label(self, parent, label, key, **grid):
@@ -1927,7 +2052,16 @@ class ItemTab(ttk.Frame):
 
     def textbox(self, parent, row, label, key, height=3, font=("Malgun Gothic", 10), wrap="word"):
         self._field_label(parent, label, key, row=row, column=0, sticky="nw", padx=4, pady=2)
-        t = tk.Text(parent, height=height, width=60, wrap=wrap, font=font, undo=True)
+        if key.startswith(("desc_", "upgrade_desc_")):
+            from descriptionui import DescriptionText
+            lang = key.rsplit("_", 1)[-1]
+            def context():
+                item = self.items[self.cur] if self.cur is not None and self.cur < len(self.items) else {}
+                return self.app.project, item, lang, key.startswith("upgrade_desc_")
+            t = DescriptionText(parent, context, height=height, width=60, wrap=wrap, font=font,
+                                exportselection=False, background="#ffffff", padx=8, pady=6)
+        else:
+            t = tk.Text(parent, height=height, width=60, wrap=wrap, font=font, undo=True, exportselection=False)
         t.grid(row=row, column=1, columnspan=3, sticky="we", padx=4, pady=2)
         t.bind("<KeyRelease>", lambda _e: self.changed())
         self.vars[key] = ("text", t)
@@ -1935,9 +2069,24 @@ class ItemTab(ttk.Frame):
 
     def common_bottom(self, f, row):
         ttk.Label(f, text="효과").grid(row=row, column=0, sticky="nw", padx=4, pady=(8, 2))
-        self.effects = EffectList(f, self.kind, self.changed, self.app,
+        effects_parent = f
+        if self.kind == "card":
+            self.effect_tabs = ttk.Notebook(f)
+            self.effect_tabs.grid(row=row, column=1, columnspan=3, sticky="we", padx=4, pady=(8, 2))
+            effects_parent = ttk.Frame(self.effect_tabs)
+            self.effect_tabs.add(effects_parent, text="사용할 때")
+            effects_parent.columnconfigure(0, weight=1)
+        self.effects = EffectList(effects_parent, self.kind, self.changed, self.app,
                                   lambda: self.items[self.cur] if self.cur is not None else {})
-        self.effects.grid(row=row, column=1, columnspan=3, sticky="we", padx=4, pady=(8, 2))
+        if self.kind == "card":
+            self.effects.grid(row=0, column=0, sticky="we")
+            self.event_panels = {}
+            for event, label in (("draw", "뽑을 때"), ("discard", "버릴 때"), ("exhaust", "소멸할 때")):
+                panel = CardEventEffects(self.effect_tabs, self, event, label)
+                self.effect_tabs.add(panel, text=label)
+                self.event_panels[event] = panel
+        else:
+            self.effects.grid(row=row, column=1, columnspan=3, sticky="we", padx=4, pady=(8, 2))
         self.clone_panel = ClonePanel(self.effects, self)
         self.clone_panel.grid(row=1, column=0, columnspan=2, sticky="we")
         self.clone_panel.grid_remove()
@@ -1953,19 +2102,134 @@ class ItemTab(ttk.Frame):
         ttk.Label(f, text="설명은 효과에서 자동으로 만들어집니다. 직접 쓰고 싶을 때만 아래 칸을 채우세요.",
                   foreground="#777").grid(row=row, column=0, columnspan=4, sticky="w", padx=4)
         row += 1
-        self.textbox(f, row, "설명 직접 입력\n(한국어)", "desc_ko")
-        row += 1
-        self.textbox(f, row, "설명 직접 입력\n(영어)", "desc_en")
-        row += 1
-        self.textbox(f, row, "설명 직접 입력\n(중국어 간체)", "desc_zh")
-        row += 1
-        row += 1
+        for lang, label in (("ko", "한국어"), ("en", "영어"), ("zh", "중국어 간체")):
+            field = self.textbox(f, row, f"설명 직접 입력\n({label})", "desc_" + lang)
+            row += 1
+            self.description_tools(f, row, field)
+            row += 1
+            if self.kind == "card":
+                upgraded = self.textbox(f, row, f"강화 설명 직접 입력\n({label})", "upgrade_desc_" + lang)
+                row += 1
+                self.description_tools(f, row, upgraded)
+                row += 1
+        if self.kind == "card":
+            ttk.Label(f, text="강화 설명을 비우면 기본 설명을 사용합니다. 수치는 효과에서 가져오거나 기본·강화 값을 직접 정할 수 있습니다.").grid(row=row,column=1,columnspan=3,sticky="w")
+            row += 1
         ttk.Separator(f).grid(row=row, column=0, columnspan=4, sticky="we", pady=8)
         row += 1
         ttk.Label(f, text="고급: 클래스 안에 그대로 추가할 C# 코드 (다른 훅 override, 필드, 메서드 등). 비워 두면 무시됩니다.",
                   foreground="#777").grid(row=row, column=0, columnspan=4, sticky="w", padx=4)
         row += 1
         self.textbox(f, row, "추가 C# 코드", "extra_code", height=7, font=("Consolas", 10), wrap="none")
+
+    def description_tools(self, parent, row, field):
+        from descriptionui import GameColorBar
+        tools = ttk.Frame(parent)
+        tools.grid(row=row, column=1, columnspan=3, sticky="w", padx=4)
+        actions = ttk.Frame(tools)
+        actions.pack(fill="x")
+        if self.kind == "card":
+            ttk.Button(actions, text="수치 넣기…", command=lambda:self.insert_description_number(field)).pack(side="left")
+        ttk.Button(actions, text="태그·파워·기믹 넣기…", command=lambda:self.insert_description_reference(field)).pack(side="left", padx=3)
+        GameColorBar(tools, field, self.changed).pack(fill="x", pady=(3, 0))
+
+    def color_description(self, field):
+        try:
+            start, end = field.index("sel.first"), field.index("sel.last")
+        except tk.TclError:
+            messagebox.showinfo("글자 색", "색을 바꿀 글자를 먼저 드래그해서 선택하세요.", parent=self)
+            return
+        color = colorchooser.askcolor(parent=self, title="설명 글자 색 선택")[1]
+        if color:
+            field.apply_color(start, end, color)
+            self.changed()
+
+    def insert_description_reference(self, field):
+        win = tk.Toplevel(self)
+        win.title("태그·파워·기믹 넣기")
+        win.transient(self.winfo_toplevel())
+        query = tk.StringVar()
+        ttk.Entry(win, textvariable=query, width=52).pack(fill="x", padx=10, pady=6)
+        listing = tk.Listbox(win, width=64, height=16, exportselection=False)
+        listing.pack(fill="both", expand=True, padx=10)
+        rows = M.description_reference_options(self.app.project)
+        visible = []
+        def refresh(*_):
+            visible[:] = [r for r in rows if query.get().casefold() in r[0].casefold()]
+            listing.delete(0, "end")
+            for label, _, _ in visible:
+                listing.insert("end", label)
+            if visible:
+                listing.selection_set(0)
+        query.trace_add("write", refresh)
+        refresh()
+        def insert(*_):
+            if not listing.curselection():
+                return
+            _, kind, ident = visible[listing.curselection()[0]]
+            token = "{MakerName:" + kind + ":" + ident.encode("utf8").hex() + "}"
+            field.insert_source("insert", token)
+            self.changed()
+            win.destroy()
+        listing.bind("<Double-1>", insert)
+        ttk.Button(win, text="커서 위치에 넣기", command=insert).pack(pady=8)
+        center_window(win)
+        win.grab_set()
+
+    def insert_description_number(self, field):
+        if self.cur is None:
+            return
+        item = self.items[self.cur]
+        win = tk.Toplevel(self)
+        win.title("설명에 수치 넣기")
+        win.transient(self.winfo_toplevel())
+        options = {"직접 입력한 기본·강화 수치": None}
+        for effect in item.get("effects", []):
+            kind = effect.get("kind")
+            name = M.VAR_NAME.get(kind)
+            if kind == "power":
+                name = M.power_meta(self.app.project, effect.get("power"))["var"]
+            if name:
+                options[f"효과 수치: {name} ({effect.get('amount',0)} → {effect.get('amount',0)+effect.get('upgrade',0)})"] = "{" + name + ":diff()}"
+        for value in item.get("raw_vars", []):
+            name = value.get("name", "")
+            if name:
+                options["원본 수치: " + name] = "{" + name + ":diff()}"
+        for label, block, path in M.block_description_values(item):
+            options["블록 수치: " + label] = (block, path)
+        picker = ttk.Combobox(win, state="readonly", values=list(options), width=48)
+        picker.current(0)
+        picker.pack(padx=12,pady=8)
+        values = []
+        for label in ("기본 수치", "강화 수치"):
+            row = ttk.Frame(win)
+            row.pack(fill="x",padx=12,pady=3)
+            ttk.Label(row,text=label).pack(side="left")
+            value = ttk.Entry(row)
+            value.insert(0,"0")
+            value.pack(side="right")
+            values.append(value)
+        def insert():
+            token = options[picker.get()]
+            if token is None:
+                try:
+                    base, upgraded = (str(float(v.get())) if "." in v.get() else str(int(v.get())) for v in values)
+                except ValueError:
+                    messagebox.showwarning("수치 입력", "숫자를 입력하세요.", parent=win)
+                    return
+                token = "{IfUpgraded:show:" + upgraded + "|" + base + "}"
+            if isinstance(token, tuple):
+                import uuid
+                block, path = token
+                ident = block.setdefault("description_id", uuid.uuid4().hex)
+                token = "{BlockValue:" + ident + ":" + ".".join(path) + "}"
+            field.insert_source("insert", token)
+            self.changed()
+            win.destroy()
+        ttk.Label(win,text="직접 입력한 수치는 설명에만 표시됩니다. 실제 효과는 효과/블록에서 수정하세요.",wraplength=400).pack(padx=12,pady=6)
+        ttk.Button(win,text="커서 위치에 넣기",command=insert).pack(pady=8)
+        center_window(win)
+        win.grab_set()
 
     image_hint = ""
 
@@ -2179,12 +2443,17 @@ class ItemTab(ttk.Frame):
                 elif typ == "combo":
                     w.set_value(val)
                 elif typ == "text":
-                    w.delete("1.0", "end")
-                    w.insert("1.0", val or "")
+                    if hasattr(w, "set_source"):
+                        w.set_source(val or "")
+                    else:
+                        w.delete("1.0", "end")
+                        w.insert("1.0", val or "")
                 elif typ == "bool":
                     w.set(bool(val))
             self.load_extra(it)
             self.effects.set(it["effects"])
+            for panel in getattr(self, "event_panels", {}).values():
+                panel.refresh()
             self.clone_panel.set(it)
         finally:
             self._loading = False
@@ -2212,7 +2481,7 @@ class ItemTab(ttk.Frame):
             elif typ == "combo":
                 it[key] = w.get_value()
             elif typ == "text":
-                it[key] = w.get("1.0", "end").strip()
+                it[key] = (w.source() if hasattr(w, "source") else w.get("1.0", "end")).strip()
             elif typ == "bool":
                 it[key] = bool(w.get())
         self.dump_extra(it)
@@ -2225,6 +2494,9 @@ class ItemTab(ttk.Frame):
         self.update_preview()
 
     def update_preview(self):
+        for typ, widget in self.vars.values():
+            if typ == "text" and hasattr(widget, "refresh_labels"):
+                widget.refresh_labels()
         self.pv.show(self.items[self.cur] if self.cur is not None and self.cur < len(self.items) else None)
 
     def new_item(self, iid):
@@ -2384,10 +2656,6 @@ class CardTab(ItemTab):
         self.entry(f, 2, 0, "이름 (한국어)", "name_ko")
         self.entry(f, 2, 2, "이름 (영어)", "name_en")
         self.entry(f, 3, 0, "이름 (중국어 간체)", "name_zh")
-        evt = ttk.Frame(f)
-        evt.grid(row=0, column=2, columnspan=2)
-        for event, label in (("draw","뽑을 때"), ("discard","버릴 때"), ("exhaust","소멸할 때")):
-            ttk.Button(evt, text=label, command=lambda e=event,l=label:self.edit_event(e,l)).pack(side="left")
         self.combo(f, 4, 0, "종류", "type", M.CARD_TYPES)
         self.combo(f, 4, 2, "희귀도", "rarity", M.CARD_RARITIES)
         self.spin(f, 5, 0, "비용", "cost")
@@ -2516,11 +2784,13 @@ class CardTab(ItemTab):
             return
         import blockui
         dialog = blockui.BlockEditor(self, self.app.project, "card", card,
-                                     card.get("event_blocks", {}).get(event, []), where=label, show_text=False)
+                                     card.get("event_blocks", {}).get(event, []), where=label, show_text=False, card_event=event)
         self.wait_window(dialog)
         if dialog.result is not None:
             card.setdefault("event_blocks", {})[event] = dialog.result["blocks"]
+            self.event_panels[event].refresh()
             self.app.mark_dirty()
+            self.update_preview()
 
     def edit_cond(self, key):
         if self.cur is None:
@@ -3388,6 +3658,7 @@ def pet_preview(canvas, app, image, scale, flip, lift, label):
 
 
 def rename_gimmick_ref(project, kind, old, new):
+    M.rename_description_references(project, kind, old, new)
     """태그/소환수 ID 가 바뀌거나(new) 지워질 때(None) 프로젝트 안의 참조를 고친다."""
     if kind == "tag":
         for c in project.get("cards", []):
@@ -3500,12 +3771,10 @@ class CharacterTab(ttk.Frame):
         super().__init__(master)
         self.app = app
         self._loading = False
-        outer = ttk.PanedWindow(self, orient="horizontal")
+        outer = UX.DockPanedWindow(self, title="캐릭터", orient="horizontal")
         outer.pack(fill="both", expand=True)
-        sf = ScrollFrame(outer)
-        outer.add(sf, weight=1)
-        pvf = ttk.Frame(outer, padding=6)
-        outer.add(pvf, weight=0)
+        sf = outer.add_panel(lambda parent:ScrollFrame(parent), "캐릭터 편집기", weight=1)
+        pvf = outer.add_panel(lambda parent:ttk.Frame(parent, padding=6), "캐릭터 미리보기", weight=0)
         top = ttk.Frame(pvf)
         top.pack(fill="x")
         ttk.Label(top, text="미리보기", font=("Malgun Gothic", 10, "bold")).pack(side="left")
@@ -4278,11 +4547,10 @@ class App(tk.Tk):
             more.add_command(label=label,command=lambda a=attr:self.nb.select(getattr(self,a)))
         tb.bind("<Configure>", self._fit_toolbar, add="+")
         ttk.Separator(self, orient="horizontal").pack(fill="x")
-        main = ttk.PanedWindow(self, orient="vertical")
+        main = UX.DockPanedWindow(self, title="메인 작업 공간", orient="vertical")
         main.pack(fill="both", expand=True)
         # 탭마다 자동 스크롤바: 창이 작으면 아래·오른쪽 스크롤바로 전부 볼 수 있다
-        self.nb = UX.ScrollNotebook(main)
-        main.add(self.nb, weight=5)
+        self.nb = main.add_panel(lambda parent:UX.ScrollNotebook(parent), "작업 탭", weight=5)
         import fxui
         add = self.nb.add_scrolled
         self.mod_tab = add(lambda m: ModTab(m, self), "모드 / 빌드")
@@ -4303,9 +4571,10 @@ class App(tk.Tk):
         self._tab_full_w = None
         self.nb.bind("<Configure>", self._fit_tabs, add="+")
         self.nb.bind("<<NotebookTabChanged>>", lambda _e: self.on_tab())
+        self.nb.install_view_menu(self.view_menu)
+        UX.install_panel_menu(self.view_menu, self)
 
-        logf = ttk.Frame(main)
-        main.add(logf, weight=1)
+        logf = main.add_panel(lambda parent:ttk.Frame(parent), "로그", weight=1)
         self.log_text = tk.Text(logf, height=5, wrap="word", background=UX.C["console"], foreground=UX.C["console_fg"],
                                 font=("Consolas", 10), state="disabled", padx=8, pady=4, highlightthickness=0,
                                 insertbackground=UX.C["console_fg"])
@@ -4345,11 +4614,11 @@ class App(tk.Tk):
         library = getattr(self, "_card_library", None)
         tab = self.card_tab
         self.nb.select(tab)
+        tab.item_panes.forget(tab.item_editor)
         if library is None or not library.winfo_exists():
-            library = self._card_library = CardLibrary(self, _resolve_project_image_paths, ingame)
-        if str(library) not in tab.item_panes.panes():
-            tab.item_panes.forget(tab.item_editor)
-            tab.item_panes.add(library,weight=1)
+            library = self._card_library = tab.item_panes.add_panel(
+                lambda parent:CardLibrary(self, _resolve_project_image_paths, ingame, parent=parent), "카드 라이브러리", default_visible=False, weight=1)
+        tab.item_panes.add(library,weight=1,before=tab.pv)
         library.show_card()
 
     def close_card_library(self):
@@ -4402,6 +4671,7 @@ class App(tk.Tk):
         vm.add_command(label="크게", command=lambda: self.zoom_step(1), accelerator="Ctrl+=  /  Ctrl+휠↑")
         vm.add_command(label="작게", command=lambda: self.zoom_step(-1), accelerator="Ctrl+-  /  Ctrl+휠↓")
         vm.add_command(label="기본 크기 (100%)", command=lambda: self.set_scale(1.0), accelerator="Ctrl+0")
+        self.view_menu = vm
         mb.add_cascade(label="보기", menu=vm)
         for seq, fn in (("<Control-equal>", lambda _e: self.zoom_step(1)), ("<Control-plus>", lambda _e: self.zoom_step(1)),
                         ("<Control-minus>", lambda _e: self.zoom_step(-1)), ("<Control-0>", lambda _e: self.set_scale(1.0))):
@@ -4559,9 +4829,10 @@ class App(tk.Tk):
         self._status_job = self.after(ms, lambda: self.status_lbl.configure(text=""))
 
     def _main_focus(self, e):
-        """단축키가 메인 창에서 눌렸는지 (대화 상자는 자기 단축키를 쓴다)."""
+        """메인 창과 분리한 작업 창에서 프로젝트 단축키를 사용한다."""
         try:
-            return e.widget.winfo_toplevel() is self
+            top = e.widget.winfo_toplevel()
+            return top is self or self.nb.is_detached_window(top) or UX.is_panel_window(self,top)
         except (AttributeError, tk.TclError, KeyError):
             return False
 
@@ -5422,6 +5693,7 @@ class App(tk.Tk):
         return ids
 
     def rename_ref(self, kind, old, new):
+        M.rename_description_references(self.project, kind, old, new)
         for ch in [self.project["character"]] + M.imported_characters(self.project):
             if kind == "card":
                 if new is None:

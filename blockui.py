@@ -17,7 +17,7 @@ import traceback
 import tkinter as tk
 from tkinter import simpledialog, filedialog, messagebox, ttk
 
-from uxkit import Tooltip
+from uxkit import Tooltip, DockPanedWindow, install_panel_menu
 import blockcode as B
 from winpos import center_window
 import modgen as M
@@ -626,11 +626,12 @@ class LabelDialog(tk.Toplevel):
 # ---------------------------------------------------------------------------
 class BlockEditor(tk.Toplevel):
     def __init__(self, master, project, owner_kind, item, blocks, text_ko="", text_en="", auto_text=True,
-                 where=None, allow_event=False, show_text=True, text_zh="", on_decompose=None):
+                 where=None, allow_event=False, show_text=True, text_zh="", on_decompose=None, upgraded_text=None, card_event=None):
         super().__init__(master)
         self.title(f"{TITLE} — 새 능력 만들기")
         self.project, self.owner_kind, self.item = project, owner_kind, item or {}
         self.app = getattr(master, "app", None)
+        self.card_event = card_event
         self.allow_event = allow_event
         self.on_decompose = on_decompose
         B.set_project_hint(project)
@@ -640,6 +641,8 @@ class BlockEditor(tk.Toplevel):
         self.slots = []
         self.frames = []
         self.drag = None
+        self._drag_window_owners = {}
+        self._drag_feedback = None
         self.history = []
         self.pending_call_mappings = []
         try:
@@ -666,13 +669,13 @@ class BlockEditor(tk.Toplevel):
 
         main = ttk.PanedWindow(self, orient="vertical")
         main.pack(fill="both", expand=True)
-        upper = ttk.PanedWindow(main, orient="horizontal")
+        upper = DockPanedWindow(main, title="블록 코딩", orient="horizontal")
+        self.block_panes = upper
         main.add(upper, weight=4)
 
         # ---- 블록 모음 ----
-        pal_outer = ttk.LabelFrame(upper, text="블록 라이브러리", padding=6)
+        pal_outer = upper.add_panel(lambda parent:ttk.Frame(parent, padding=6), "블록 라이브러리", weight=0)
         self.library_panel = pal_outer
-        upper.add(pal_outer, weight=0)
         self.browse_saved = tk.BooleanVar(self,False)
         routes = ttk.Frame(pal_outer)
         routes.pack(fill="x")
@@ -722,8 +725,8 @@ class BlockEditor(tk.Toplevel):
         self._build_palette()
 
         # ---- 작업 공간 ----
-        ws = ttk.Frame(upper)
-        upper.add(ws, weight=1)
+        ws = upper.add_panel(lambda parent:ttk.Frame(parent), "블록 작업 공간", weight=1)
+        self.workspace_panel = ws
         self.canvas = tk.Canvas(ws, background="#fbfbfd", highlightthickness=0)
         vsb = ttk.Scrollbar(ws, orient="vertical", command=self.canvas.yview)
         hsb = ttk.Scrollbar(ws, orient="horizontal", command=self.canvas.xview)
@@ -736,6 +739,7 @@ class BlockEditor(tk.Toplevel):
         views = tk.Menu(menu, tearoff=False)
         menu.add_cascade(label="보기", menu=views)
         self.configure(menu=menu)
+        install_panel_menu(views, self._root(), scope=self)
         def output_window(title, size):
             window = tk.Toplevel(self)
             window.withdraw()
@@ -769,7 +773,11 @@ class BlockEditor(tk.Toplevel):
         self.err = ttk.Label(code_win, foreground="#c0392b", wraplength=660, justify="left")
         self.err.grid(row=2,column=0,sticky="w")
 
-        lower = output_window("카드 설명", "640x410")
+        from uxkit import AutoScroll
+        description_window = output_window("카드 설명", "720x650")
+        description_scroll = AutoScroll(description_window)
+        description_scroll.pack(fill="both", expand=True)
+        lower = description_scroll.inner
         lower.columnconfigure(1, weight=1)
         for row in (2,3,4):
             lower.rowconfigure(row,weight=1)
@@ -781,28 +789,41 @@ class BlockEditor(tk.Toplevel):
             fr = ttk.Frame(lower)
             fr.grid(row=row, column=1, sticky="nsew", pady=2)
             ttk.Label(fr, text=tag, width=7, foreground="#6b7280").pack(side="left", anchor="n", pady=2)
-            t = tk.Text(fr, height=height, font=FONT, wrap="word")
-            t.pack(side="left", fill="both", expand=True)
+            from descriptionui import DescriptionText, GameColorBar
+            content = ttk.Frame(fr)
+            content.pack(side="left", fill="both", expand=True)
+            lang = {2:"ko", 3:"en", 4:"zh", 6:"ko", 7:"en", 8:"zh"}[row]
+            t = DescriptionText(content, lambda:(self.project, self.item, lang, row >= 6),
+                                height=height, font=FONT, wrap="word", exportselection=False,
+                                background="white", padx=8, pady=6)
+            t.pack(fill="both", expand=True)
+            GameColorBar(content, t, lambda:self.auto.set(False)).pack(fill="x", pady=(3, 0))
             return t
         self.desc_ko = desc_box(2, "한국어", 4)
         self.desc_en = desc_box(3, "English", 3)
         self.desc_zh = desc_box(4, "中文", 3)
-        self.desc_ko.insert("1.0", text_ko or "")
-        self.desc_en.insert("1.0", text_en or "")
-        self.desc_zh.insert("1.0", text_zh or "")
+        self.desc_ko.set_source(text_ko or "")
+        self.desc_en.set_source(text_en or "")
+        self.desc_zh.set_source(text_zh or "")
+        self.upgraded_desc = {}
+        for row, lang in enumerate(("ko", "en", "zh"), 6):
+            field = desc_box(row, {"ko":"한국어 +", "en":"English +", "zh":"中文 +"}[lang], 2)
+            field.set_source((upgraded_text or {}).get(lang, ""))
+            self.upgraded_desc[lang] = field
+        ttk.Label(lower, text="강화 설명을 비워 두면 기본 설명을 사용합니다.").grid(row=9, column=1, sticky="w")
         def typed(e):
             # 글자를 실제로 고칠 때만 자동 설명을 끕니다 (화살표·Ctrl 키는 무시)
             if (e.char and e.char.isprintable() and not (e.state & 0x4)) or e.keysym in ("BackSpace", "Delete"):
                 self.auto.set(False)
-        for t in (self.desc_ko, self.desc_en, self.desc_zh):
+        for t in (self.desc_ko, self.desc_en, self.desc_zh, *self.upgraded_desc.values()):
             t.bind("<Key>", typed)
-        ttk.Label(lower, text="[gold]글자[/gold] = 금색 강조,  {IfUpgraded:show:5|3} = 강화하면 5, 아니면 3",
+        ttk.Label(lower, text="글자를 선택하고 게임 기본 색을 누르세요. 다른 색은 직접 선택할 수 있습니다.",
                   foreground="#777", font=("Malgun Gothic", 8)).grid(row=5, column=1, sticky="w")
         if not show_text:
             # 원본 카드: 설명은 원본 문구를 그대로 쓰므로 자동 설명 칸을 숨긴다
             self.auto.set(False)
             for w in lower.grid_slaves(column=1):
-                if int(w.grid_info().get("row", 0)) in (1, 2, 3, 4, 5):
+                if int(w.grid_info().get("row", 0)) in (1, 2, 3, 4, 5, 6, 7, 8, 9):
                     w.grid_remove()
             ttk.Label(lower, text="원본 카드의 설명 문구를 그대로 씁니다.\n수치는 원본 변수(V0 등)를 바꾸면 설명 숫자도 함께 바뀝니다.\n"
                                   "블록 위 이름에 마우스를 올리면 그 블록의 C# 이 보입니다.",
@@ -834,6 +855,8 @@ class BlockEditor(tk.Toplevel):
         ttk.Button(btns, text="취소", command=self.destroy).pack(side="left")
         self.canvas.bind("<Delete>", self._delete_selection_key)
         self.bind("<Control-z>", lambda _e: self.undo())
+        self.bind("<Escape>", self._cancel_block_drag)
+        self.bind("<Destroy>", self._cleanup_drag_on_destroy, add="+")
         self.canvas.bind("<Configure>", lambda _e: None)
         self.render()
         center_window(self)
@@ -1229,7 +1252,14 @@ class BlockEditor(tk.Toplevel):
             a[key] = v
             changed()
         if kind in ("who_multi", "who_one"):
-            return _Combo(parent, B.who_options(self.owner_kind, kind == "who_multi"), a.get(key), 15, set_)
+            options = B.who_options(self.owner_kind, kind == "who_multi")
+            if self.card_event:
+                target = self.item.get("event_targets", {}).get(self.card_event, "random")
+                target_label = dict(M.CARD_EVENT_TARGETS).get(target, target)
+                if target == "choose":
+                    target_label = f"직접 고른 적 최대 {M.card_event_target_count(self.item, self.card_event)}명"
+                options = [(code, "이벤트 대상 · " + target_label if code == "target" else label) for code, label in options]
+            return _Combo(parent, options, a.get(key), 15, set_)
         if kind == "choice":
             s = B.slot_info(b, key)
             opts = [tuple(o) for o in s.get("options", [])] or [(a.get(key, ""), a.get(key, ""))]
@@ -1456,7 +1486,139 @@ class BlockEditor(tk.Toplevel):
                 w.bind("<ButtonRelease-1>", self.end_drag)
                 w.bind("<Button-3>", lambda e, b_=b, l_=lst: self.context_menu(e, b_, l_))
 
+    def _cleanup_drag_on_destroy(self, event):
+        if event.widget is self:
+            self._clear_drag_feedback()
+            self._restore_drag_windows()
+
+    def _clear_drag_feedback(self):
+        feedback, self._drag_feedback = self._drag_feedback, None
+        if feedback:
+            for widget in [feedback["window"], *feedback["marks"]]:
+                try:
+                    widget.destroy()
+                except tk.TclError:
+                    pass
+        try:
+            self.canvas.delete("drag_origin")
+        except tk.TclError:
+            pass
+
+    def _show_drag_feedback(self, event, title, count, action, target=None):
+        colors = {"save": ("#15803d", "#ecfdf3", "＋ 묶음으로 저장"),
+                  "move": ("#175ac1", "#eef5ff", "↕ 여기에 이동"),
+                  "add": ("#175ac1", "#eef5ff", "＋ 여기에 추가"),
+                  "invalid": ("#b43b37", "#fff1f0", "× 여기에 놓을 수 없습니다")}
+        color, background, caption = colors[action]
+        feedback = self._drag_feedback
+        if feedback is None:
+            window = tk.Toplevel(self)
+            window.withdraw()
+            window.overrideredirect(True)
+            window.attributes("-topmost", True)
+            frame = tk.Frame(window, background=background, highlightthickness=2, highlightbackground=color)
+            frame.pack(fill="both", expand=True)
+            badge = tk.Label(frame, font=FONT_B, anchor="w", background=background, foreground=color, padx=10, pady=4)
+            badge.pack(fill="x")
+            detail = tk.Label(frame, font=FONT, anchor="w", justify="left", wraplength=260, background=background, foreground="#253345", padx=10, pady=4)
+            detail.pack(fill="x")
+            feedback = self._drag_feedback = dict(window=window, frame=frame, badge=badge, detail=detail, target=None, marks=[])
+        feedback["frame"].configure(background=background, highlightbackground=color)
+        feedback["badge"].configure(text=f"{caption} · {count}개", background=background, foreground=color)
+        feedback["detail"].configure(text=title, background=background)
+        feedback["window"].geometry(f"+{max(0,event.x_root+18)}+{max(0,event.y_root+18)}")
+        feedback["window"].deiconify()
+        feedback["window"].lift()
+        if feedback["target"] is not target:
+            for widget in feedback["marks"]:
+                widget.destroy()
+            feedback["marks"] = []
+            feedback["target"] = target
+            if target is not None:
+                for position in ("top", "bottom", "left", "right"):
+                    edge = tk.Frame(target, background=color)
+                    if position in ("top", "bottom"):
+                        edge.place(relx=0, rely=0 if position=="top" else 1, relwidth=1, height=4, anchor="nw" if position=="top" else "sw")
+                    else:
+                        edge.place(relx=0 if position=="left" else 1, rely=0, relheight=1, width=4, anchor="nw" if position=="left" else "ne")
+                    feedback["marks"].append(edge)
+                banner = tk.Label(target, font=FONT_B, background=background, foreground=color, padx=12, pady=7, relief="solid", borderwidth=1)
+                banner.place(relx=.5, y=7, anchor="n")
+                feedback["marks"].append(banner)
+        if target is not None:
+            for edge in feedback["marks"][:-1]:
+                edge.configure(background=color)
+                edge.lift()
+            feedback["marks"][-1].configure(text=f"{caption} · 블록 {count}개", background=background, foreground=color)
+            feedback["marks"][-1].lift()
+        self.mode_hint.configure(text=caption + f" · 블록 {count}개" + (" (원본은 유지됩니다)" if action=="save" else ""))
+
+    def _over_workspace(self, event):
+        x,y = event.x_root-self.canvas.winfo_rootx(),event.y_root-self.canvas.winfo_rooty()
+        if not (0 <= x < self.canvas.winfo_width() and 0 <= y < self.canvas.winfo_height()):
+            return False
+        widget = self.winfo_containing(event.x_root,event.y_root)
+        feedback = self._drag_feedback
+        if feedback and feedback["target"] is self.workspace_panel and widget in feedback["marks"]:
+            return True
+        while widget is not None:
+            if widget is self.canvas:
+                return True
+            widget = widget.master
+        return False
+
+    def _drag_title(self, blocks):
+        import preview as PV
+        names = []
+        for block in blocks[:3]:
+            text = B.describe([block], self.project, self.owner_kind, "ko", self.item)
+            text = PV.fill_values(self.project, text, self.item)
+            plain = "".join(part for part, _ in PV.parse_bbcode(text))
+            names.append(plain[:90] or re.sub(r"\{\w+\}", "▢", B.block_caption(block)))
+        return "\n".join(names) + (f"\n외 {len(blocks)-3}개" if len(blocks)>3 else "")
+
+    def _keep_drop_window_visible(self, event, to_library):
+        target = self.library_panel if to_library else self.workspace_panel
+        window = self.block_panes.floating_window(target)
+        if window is None:
+            return
+        try:
+            source = event.widget.winfo_toplevel()
+            if window is source:
+                return
+            if window not in self._drag_window_owners:
+                self._drag_window_owners[window] = window.transient()
+                # Owned palettes stay above the drag source without taking keyboard focus
+                # or making the palette globally topmost over other applications.
+                window.transient(source)
+            window.lift()
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _restore_drag_windows(self):
+        owners, self._drag_window_owners = self._drag_window_owners, {}
+        for window, owner in owners.items():
+            try:
+                if window.winfo_exists():
+                    if owner and not self.tk.getboolean(self.tk.call("winfo", "exists", owner)):
+                        owner = ""
+                    window.transient(owner)
+            except tk.TclError:
+                pass
+
+    def _cancel_block_drag(self, event=None):
+        self.drag = None
+        self.group_moving = False
+        self.selection_origin = None
+        self.canvas.delete("drag", "group_box")
+        self._clear_drag_feedback()
+        self._restore_drag_windows()
+        self.mode_hint.configure(text="드래그를 취소했습니다.")
+        return "break"
+
     def start_drag(self, e, new=None, block=None, src=None, preset=None):
+        self._clear_drag_feedback()
+        self._restore_drag_windows()
         self.drag = {"preset": preset, "new": new, "block": block, "src": src, "x0": e.x_root, "y0": e.y_root, "moved": False}
 
     def _canvas_xy(self, e):
@@ -1467,23 +1629,31 @@ class BlockEditor(tk.Toplevel):
         d = self.drag
         if not d:
             return
-        if not d["moved"] and abs(e.x_root - d["x0"]) + abs(e.y_root - d["y0"]) < 6:
+        if not d["moved"] and abs(e.x_root-d["x0"])+abs(e.y_root-d["y0"]) < 6:
             return
         d["moved"] = True
-        x, y = self._canvas_xy(e)
-        self.canvas.delete("drag")
+        self._keep_drop_window_visible(e, to_library=d["block"] is not None)
+        x,y = self._canvas_xy(e)
+        self.canvas.delete("drag", "drag_origin")
+        blocks = d["preset"]["blocks"] if d["preset"] else [d["block"]] if d["block"] is not None else [B.new_block(d["new"])]
+        title = d["preset"]["name"] + "\n" + self._drag_title(blocks) if d["preset"] else self._drag_title(blocks)
+        count = len(blocks)
+        if d["block"] is not None:
+            for block,_,_,(left,top,right,bottom) in self.block_headers:
+                if block is d["block"]:
+                    self.canvas.create_rectangle(left-3,top-3,right+3,bottom+3,outline="#175ac1",width=3,dash=(5,3),tags="drag_origin")
         if d["block"] is not None and self._over_library(e):
-            self.mode_hint.configure(text="여기에 놓으면 라이브러리에 복사합니다.")
+            self._show_drag_feedback(e,title,count,"save",self.library_panel)
             return
-        name = d["preset"]["name"] if d["preset"] else B.SPECS[d["new"]]["ko"] if d["new"] else B.block_caption(d["block"])
-        self.canvas.create_text(x + 14, y + 10, anchor="nw", text="✥ " + re.sub(r"\{\w+\}", "▢", name)[:30],
-                                font=FONT_B, fill="#555", tags="drag")
-        slot = self._nearest_slot(x, y, d)
+        slot = self._nearest_slot(x,y,d) if self._over_workspace(e) else None
         if slot:
-            _l, _i, sx, sy = slot
-            self.canvas.create_text(sx,sy-2,anchor="sw",text="여기에 1개 이동" if d["block"] is not None else "여기에 추가",
-                                    fill="#124585",tags="drag")
-            self.canvas.create_line(sx - 4, sy, sx + 260, sy, fill="#ff5a36", width=4, tags="drag")
+            _,_,sx,sy = slot
+            action = "move" if d["block"] is not None else "add"
+            self._show_drag_feedback(e,title,count,action,self.workspace_panel)
+            self.canvas.create_text(sx,sy-3,anchor="sw",text=f"여기에 블록 {count}개 " + ("이동" if action=="move" else "추가"),fill="#175ac1",tags="drag")
+            self.canvas.create_line(sx-4,sy,sx+260,sy,fill="#175ac1",width=5,tags="drag")
+        else:
+            self._show_drag_feedback(e,title,count,"invalid")
 
     def _nearest_slot(self, x, y, d):
         best, bd = None, 1e9
@@ -1503,18 +1673,23 @@ class BlockEditor(tk.Toplevel):
 
     def end_drag(self, e):
         d, self.drag = self.drag, None
+        over_library = self._over_library(e)
+        over_workspace = self._over_workspace(e)
+        self._clear_drag_feedback()
+        self._restore_drag_windows()
         self.canvas.delete("drag")
         if not d or not d["moved"]:
             return
-        if self._over_library(e):
+        if over_library:
             if d["block"] is not None:
                 self._save_group([d["block"]])
+            else:
+                self.mode_hint.configure(text="라이브러리의 블록은 작업 공간에 놓으세요.")
+            return
+        if not over_workspace:
+            self.mode_hint.configure(text="드래그를 취소했습니다. 놓을 수 있는 영역을 선택하세요.")
             return
         x, y = self._canvas_xy(e)
-        if not (0 <= e.x_root - self.canvas.winfo_rootx() <= self.canvas.winfo_width()):
-            return
-        if not 0 <= e.y_root - self.canvas.winfo_rooty() < self.canvas.winfo_height():
-            return
         slot = self._nearest_slot(x, y, d)
         if not slot:
             return
@@ -1541,6 +1716,8 @@ class BlockEditor(tk.Toplevel):
                 idx -= 1
             lst.insert(idx, blk)
         self.render()
+        count = len(d["preset"]["blocks"]) if d["preset"] else 1
+        self.mode_hint.configure(text=f"블록 {count}개를 " + ("이동했습니다." if d["block"] is not None else "추가했습니다."))
 
     def context_menu(self, e, b, lst):
         m = tk.Menu(self, tearoff=0)
@@ -1710,8 +1887,9 @@ class BlockEditor(tk.Toplevel):
 
     def _over_library(self, event):
         widget = self.winfo_containing(event.x_root, event.y_root)
+        floating = self.block_panes.floating_window(self.library_panel)
         while widget is not None:
-            if widget is self.library_panel:
+            if widget is self.library_panel or widget is floating:
                 return True
             widget = widget.master
         return False
@@ -1740,18 +1918,23 @@ class BlockEditor(tk.Toplevel):
 
     def _group_motion(self, event):
         if self.group_moving:
-            if self._over_library(event):
-                self.canvas.delete("group_box")
-                self.mode_hint.configure(text="여기에 놓으면 선택한 블록을 라이브러리에 저장합니다.")
+            x,y = self._canvas_xy(event)
+            if abs(x-self.group_anchor[0])+abs(y-self.group_anchor[1]) < 6:
                 return "break"
-            self.mode_hint.configure(text=f"여기에 놓으면 {len(self.group_blocks)}개 이동 · 왼쪽에 놓으면 라이브러리에 복사")
-            slot = self._group_slot(event)
+            self._keep_drop_window_visible(event, to_library=True)
             self.canvas.delete("group_box")
+            title,count = self._drag_title(self.group_blocks),len(self.group_blocks)
+            if self._over_library(event):
+                self._show_drag_feedback(event,title,count,"save",self.library_panel)
+                return "break"
+            slot = self._group_slot(event) if self._over_workspace(event) else None
             if slot:
                 _,_,x,y = slot
-                self.canvas.create_text(x,y-2,anchor="sw",text=f"여기에 {len(self.group_blocks)}개 이동",
-                                        fill="#124585",tags="group_box")
-                self.canvas.create_line(x,y,x+220,y,fill="#175ac1",width=4,tags="group_box")
+                self._show_drag_feedback(event,title,count,"move",self.workspace_panel)
+                self.canvas.create_text(x,y-3,anchor="sw",text=f"여기에 블록 {count}개 이동",fill="#175ac1",tags="group_box")
+                self.canvas.create_line(x,y,x+260,y,fill="#175ac1",width=5,tags="group_box")
+            else:
+                self._show_drag_feedback(event,title,count,"invalid")
             return "break"
         if self.selection_origin is None:
             return
@@ -1795,26 +1978,32 @@ class BlockEditor(tk.Toplevel):
 
     def _group_end(self, event):
         if self.group_moving:
+            over_library = self._over_library(event)
+            over_workspace = self._over_workspace(event)
+            self._clear_drag_feedback()
+            self._restore_drag_windows()
             self.group_moving = False
             self.canvas.delete("group_box")
             x,y = self._canvas_xy(event)
-            if self._over_library(event):
+            if over_library:
                 self.mode_hint.configure(text=f"선택한 묶음: 블록 {len(self.group_blocks)}개")
                 self._save_group()
                 return "break"
             slot = self._group_slot(event)
-            if (slot and abs(x-self.group_anchor[0])+abs(y-self.group_anchor[1]) > 5
-                    and 0 <= event.x_root-self.canvas.winfo_rootx() < self.canvas.winfo_width()
-                    and 0 <= event.y_root-self.canvas.winfo_rooty() < self.canvas.winfo_height()):
+            if (slot and over_workspace and abs(x-self.group_anchor[0])+abs(y-self.group_anchor[1]) > 5):
                 dest,index,_,_ = slot
                 src = self.group_source
                 ids = {id(b) for b in self.group_blocks}
                 if dest is src:
                     index -= sum(id(b) in ids for b in src[:index])
+                moved_count = len(self.group_blocks)
                 self._push_history()
                 src[:] = [b for b in src if id(b) not in ids]
                 dest[index:index] = self.group_blocks
                 self.render()
+                self.mode_hint.configure(text=f"블록 {moved_count}개를 이동했습니다.")
+            else:
+                self.mode_hint.configure(text="이동을 취소했습니다. 블록은 원래 위치에 있습니다.")
             return "break"
         if self.selection_origin is not None:
             self._group_motion(event)
@@ -1966,7 +2155,7 @@ class BlockEditor(tk.Toplevel):
         self.refresh_outputs()
 
     def refresh_outputs(self):
-        C = M._Ctx(self.owner_kind, self.item)
+        C = M.card_event_context(self.item, self.card_event) if self.card_event else M._Ctx(self.owner_kind, self.item)
         lines, errs = B.compile_blocks(self.blocks, self.project, C, "", allow_event=self.allow_event)
         self.code.configure(state="normal")
         self.code.delete("1.0", "end")
@@ -1975,11 +2164,10 @@ class BlockEditor(tk.Toplevel):
         self.err.configure(text="\n".join("⚠ " + x for x in dict.fromkeys(errs)))
         if self.auto.get():
             for t, lang in ((self.desc_ko, "ko"), (self.desc_en, "en"), (self.desc_zh, "zh")):
-                t.delete("1.0", "end")
-                t.insert("1.0", B.describe(self.blocks, self.project, "power" if self.owner_kind == "summon" else self.owner_kind, lang))
+                t.set_source(B.describe(self.blocks, self.project, "power" if self.owner_kind == "summon" else self.owner_kind, lang))
 
     def ok(self):
-        C = M._Ctx(self.owner_kind, self.item)
+        C = M.card_event_context(self.item, self.card_event) if self.card_event else M._Ctx(self.owner_kind, self.item)
         lines, errs = B.compile_blocks(self.blocks, self.project, C, "", allow_event=self.allow_event)
         if errs and not messagebox.askyesno(TITLE, "블록에 문제가 있습니다:\n\n" + "\n".join(dict.fromkeys(errs)) +
                                             "\n\n그래도 저장할까요?", parent=self):
@@ -2012,7 +2200,8 @@ class BlockEditor(tk.Toplevel):
                 rules[:] = [old for old in rules if not isinstance(old, dict) or old.get("signature") != rule.get("signature")]
                 rules.append(rule)
         self.result = {"blocks": self.blocks, "code": "\n".join(lines), "auto_text": bool(self.auto.get()),
-                       "text_ko": self.desc_ko.get("1.0", "end").strip(),
-                       "text_en": self.desc_en.get("1.0", "end").strip(),
-                       "text_zh": self.desc_zh.get("1.0", "end").strip()}
+                       "upgraded_text": {lang: field.source().strip() for lang, field in self.upgraded_desc.items()},
+                       "text_ko": self.desc_ko.source().strip(),
+                       "text_en": self.desc_en.source().strip(),
+                       "text_zh": self.desc_zh.source().strip()}
         self.destroy()

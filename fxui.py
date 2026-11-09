@@ -16,6 +16,7 @@ import types
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 import fxbtn as FX
+from docking import DockPanedWindow
 
 APP_TITLE = "StS2 모드 메이커"
 CW, CH = 900, 520                     # 무대 크기 (게임 좌표 1:1)
@@ -179,9 +180,10 @@ class EffectPainter(ttk.Frame):
         self._photo = None
         self._after = None
 
+        panels = DockPanedWindow(self, title="이펙트 그리기", orient="horizontal")
+        panels.pack(fill="both", expand=True)
         # ---- 왼쪽: 이펙트 목록 ----
-        left = ttk.Frame(self, padding=6)
-        left.pack(side="left", fill="y")
+        left = panels.add_panel(lambda parent:ttk.Frame(parent, padding=6), "이펙트 목록", weight=0)
         ttk.Label(left, text="이펙트", font=("Malgun Gothic", 10, "bold")).pack(anchor="w")
         self.lst = tk.Listbox(left, width=26, height=12, exportselection=False, activestyle="none")
         self.lst.pack(fill="y")
@@ -206,8 +208,7 @@ class EffectPainter(ttk.Frame):
                   foreground="#555", justify="left").pack(anchor="w")
 
         # ---- 가운데: 도구 + 무대 + 재생 ----
-        mid = ttk.Frame(self, padding=6)
-        mid.pack(side="left", fill="both", expand=True)
+        mid = panels.add_panel(lambda parent:ttk.Frame(parent, padding=6), "그리기 작업 공간", weight=1)
         tb = ttk.Frame(mid)
         tb.pack(fill="x")
         for val, label in TOOLS:
@@ -254,8 +255,7 @@ class EffectPainter(ttk.Frame):
         self.hint.pack(anchor="w")
 
         # ---- 오른쪽: 도형 목록 + 움직임 ----
-        right = ttk.Frame(self, padding=6)
-        right.pack(side="left", fill="y")
+        right = panels.add_panel(lambda parent:ttk.Frame(parent, padding=6), "도형·움직임", weight=0)
         ttk.Label(right, text="도형", font=("Malgun Gothic", 10, "bold")).pack(anchor="w")
         self.shapes = tk.Listbox(right, width=30, height=9, exportselection=False, activestyle="none")
         self.shapes.pack(fill="x")
@@ -867,8 +867,9 @@ class ButtonDesigner(ttk.Frame):
         self._photo = None
         self._after = None
 
-        left = ttk.Frame(self, padding=6)
-        left.pack(side="left", fill="y")
+        panels = DockPanedWindow(self, title="전투 버튼", orient="horizontal")
+        panels.pack(fill="both", expand=True)
+        left = panels.add_panel(lambda parent:ttk.Frame(parent, padding=6), "버튼 목록", weight=0)
         ttk.Label(left, text="버튼", font=("Malgun Gothic", 10, "bold")).pack(anchor="w")
         self.lst = tk.Listbox(left, width=26, height=8, exportselection=False, activestyle="none")
         self.lst.pack(fill="x")
@@ -878,8 +879,7 @@ class ButtonDesigner(ttk.Frame):
         ttk.Button(bf, text="새로", width=6, command=self.add).pack(side="left")
         ttk.Button(bf, text="삭제", width=6, command=self.delete).pack(side="left", padx=2)
 
-        form = ttk.Frame(self, padding=6)
-        form.pack(side="left", fill="y")
+        form = panels.add_panel(lambda parent:ttk.Frame(parent, padding=6), "버튼 편집기", weight=0)
         self.v = {}
         r = 0
 
@@ -997,8 +997,7 @@ class ButtonDesigner(ttk.Frame):
         self.desc.grid(row=r, column=0, columnspan=4, sticky="w")
 
         # ---- 시험장 (게임 전투 화면) ----
-        right = ttk.Frame(self, padding=6)
-        right.pack(side="left", fill="both", expand=True)
+        right = panels.add_panel(lambda parent:ttk.Frame(parent, padding=6), "전투 시험장", weight=1)
         top = ttk.Frame(right)
         top.pack(fill="x")
         ttk.Label(top, text="시험장 — 게임 전투 화면 그대로. 버튼을 눌러 보세요", font=("Malgun Gothic", 10, "bold")).pack(side="left")

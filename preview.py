@@ -22,8 +22,8 @@ except Exception:  # noqa: BLE001
 
 FONT = "Malgun Gothic"
 TEXT_COLORS = {
-    "gold": "#efc851", "blue": "#87ceeb", "green": "#7fff00", "red": "#ff5555", "orange": "#ffa64d",
-    "purple": "#ee82ee", "aqua": "#2aebbe", "pink": "#ff9fd6",
+    "gold": "#efc851", "blue": "#87ceeb", "green": "#7fff00", "red": "#ff5555", "orange": "#ffa518",
+    "purple": "#ee82ee", "aqua": "#2aebbe", "pink": "#ff78a0",
 }
 RARITY_COLORS = {"Basic": "#5d5d5d", "Common": "#596370", "Uncommon": "#2f6fa8", "Rare": "#b8862b",
                  "Starter": "#5d5d5d", "Shop": "#3f8f5f"}
@@ -141,6 +141,11 @@ def fill_values(project, desc, item, upgraded=False, stacks=3):
             continue
         up = int(e.get("upgrade", 0) or 0)
         values[name] = int(e.get("amount", 0) or 0) + (up if upgraded else 0)
+        ups[name] = up
+
+    for _, name, amount in M.block_damage_vars(item):
+        up = amount.get("up") or 0
+        values[name] = amount.get("v", 0) + (up if upgraded else 0)
         ups[name] = up
 
     for v in item.get("raw_vars", []) or []:
@@ -267,11 +272,15 @@ def parse_bbcode(s):
         closing, tag = m.group(1) == "/", m.group(2)
         if closing:
             for i in range(len(stack) - 1, -1, -1):
-                if stack[i] == tag:
+                if stack[i].split("=", 1)[0] == tag:
                     del stack[i]
                     break
         else:
-            stack.append(tag)
+            if tag == "color":
+                color = re.search(r"=\s*(#[a-fA-F0-9]{6})\]$", m.group(0))
+                stack.append("color=" + color[1] if color else tag)
+            else:
+                stack.append(tag)
         pos = m.end()
     if pos < len(s):
         runs.append((s[pos:], _style(stack)))
@@ -281,7 +290,9 @@ def parse_bbcode(s):
 def _style(stack):
     st = {"color": None, "bold": False, "italic": False, "energy": False}
     for t in stack:
-        if t in TEXT_COLORS:
+        if t.startswith("color="):
+            st["color"] = t.split("=", 1)[1]
+        elif t in TEXT_COLORS:
             st["color"] = TEXT_COLORS[t]
             if t == "gold":
                 st["bold"] = True

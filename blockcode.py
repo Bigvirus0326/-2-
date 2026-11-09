@@ -762,25 +762,30 @@ def _fmt(x):
 # ---------------------------------------------------------------------------
 # 설명문 자동 생성
 # ---------------------------------------------------------------------------
-def describe(blocks, project, owner_kind, lang="ko"):
+def describe(blocks, project, owner_kind, lang="ko", item=None):
     if lang == "zh":
         from card_zh import blocks_text
         return blocks_text(blocks, project, owner_kind == "card")
     card = owner_kind == "card"
     out = []
     for b in blocks or []:
-        s = _describe_one(b, project, owner_kind, lang, card)
+        s = _describe_one(b, project, owner_kind, lang, card, item)
         if s:
             out.append(s)
     return " ".join(out)
 
 
-def _describe_one(b, project, owner_kind, lang, card):
+def _describe_one(b, project, owner_kind, lang, card, item):
     a = b.get("args", {})
     V = lambda k: value_label(a.get(k), project, lang, card)  # noqa: E731
     W = lambda k: (WHO if lang == "ko" else WHO_EN).get(a.get(k, "self"), "")  # noqa: E731
     op = b["op"]
     ko = lang == "ko"
+    import modgen as M
+    damage_name = M.block_damage_name(item, b) if owner_kind == "card" else None
+    if damage_name:
+        original_v = V
+        V = lambda k: "{" + damage_name + ":diff()}" if k == "amount" else original_v(k)
     if op == "damage":
         hits = int(a.get("hits", 1) or 1)
         times = (f" {hits}번" if ko else f" {hits} times") if hits > 1 else ""
@@ -1090,7 +1095,7 @@ def _describe_one(b, project, owner_kind, lang, card):
     if op in ("if", "if_else"):
         c = a.get("cond") or {}
         cond = cond_label(c, project, lang, card)
-        body = describe(b.get("body"), project, owner_kind, lang)
+        body = describe(b.get("body"), project, owner_kind, lang, item)
         if ko and c.get("t") == "cmp":
             s = f"{cmp_text(c, project, lang, card, conditional=True)} {body}"   # '3 이상이면', '3을 초과하면', '3과 같으면'
         elif ko and cond.endswith("있음"):
@@ -1100,14 +1105,14 @@ def _describe_one(b, project, owner_kind, lang, card):
         else:
             s = f"{cond}이면 {body}" if ko else f"If {cond}: {body}"
         if op == "if_else" and b.get("else"):
-            s += (" 아니면 " if ko else " Otherwise: ") + describe(b.get("else"), project, owner_kind, lang)
+            s += (" 아니면 " if ko else " Otherwise: ") + describe(b.get("else"), project, owner_kind, lang, item)
         return s
     if op == "repeat":
-        return (f"{V('times')}번: " if ko else f"{V('times')} times: ") + describe(b.get("body"), project, owner_kind, lang)
+        return (f"{V('times')}번: " if ko else f"{V('times')} times: ") + describe(b.get("body"), project, owner_kind, lang, item)
     if op == "each_enemy":
-        return ("모든 적에게 각각: " if ko else "For each enemy: ") + describe(b.get("body"), project, owner_kind, lang)
+        return ("모든 적에게 각각: " if ko else "For each enemy: ") + describe(b.get("body"), project, owner_kind, lang, item)
     if op == "random_enemy":
-        return ("무작위 적 1명에게: " if ko else "To a random enemy: ") + describe(b.get("body"), project, owner_kind, lang)
+        return ("무작위 적 1명에게: " if ko else "To a random enemy: ") + describe(b.get("body"), project, owner_kind, lang, item)
     # ---- 기믹 ----
     if op == "summon":
         n = _summon_name(project, a.get("summon"), lang)
@@ -1122,8 +1127,8 @@ def _describe_one(b, project, owner_kind, lang, card):
         return f"[gold]{n}[/gold]{_j(n, '을', '를')} 돌려보냅니다." if ko else f"Dismiss [gold]{n}[/gold]."
     if op == "pay":
         p = _pname(project, a.get("power"), lang)
-        body = describe(b.get("body"), project, owner_kind, lang)
-        els = describe(b.get("else"), project, owner_kind, lang)
+        body = describe(b.get("body"), project, owner_kind, lang, item)
+        els = describe(b.get("else"), project, owner_kind, lang, item)
         s = f"[gold]{p}[/gold]{_j(p, '을', '를')} {V('amount')} 소모할 수 있으면 소모하고 {body}" if ko else \
             f"If you can, spend {V('amount')} [gold]{p}[/gold] to: {body}"
         if els:
@@ -1134,9 +1139,9 @@ def _describe_one(b, project, owner_kind, lang, card):
         opts = [(n, body) for n, body in opts if n]
         if ko:
             return "하나를 고릅니다: " + " / ".join(
-                f"[gold]{n}[/gold]({describe(body, project, owner_kind, lang).rstrip('.')})" for n, body in opts) + "."
+                f"[gold]{n}[/gold]({describe(body, project, owner_kind, lang, item).rstrip('.')})" for n, body in opts) + "."
         return "Choose one: " + " / ".join(
-            f"[gold]{n}[/gold] ({describe(body, project, owner_kind, lang).rstrip('.')})" for n, body in opts) + "."
+            f"[gold]{n}[/gold] ({describe(body, project, owner_kind, lang, item).rstrip('.')})" for n, body in opts) + "."
     if op == "picked_action":
         action = a.get("action")
         if ko:
@@ -1165,7 +1170,7 @@ def _describe_one(b, project, owner_kind, lang, card):
                 return f"{pile_ko}의 {G.filter_word(project, a.get('ctype'), 'ko')} 중 무작위 {V('count')}장을 {pool} 중 한 장으로 변화시킵니다."
             return f"Transform {V('count')} random {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en} into random {pool}."
         if op == "pick_each":
-            detail = describe(b.get("body"), project, owner_kind, lang)
+            detail = describe(b.get("body"), project, owner_kind, lang, item)
             return (f"{pile_ko}에서 {G.filter_word(project, a.get('ctype'), 'ko')} {V('count')}장을 골라 한 장마다 실행합니다. {detail}" if ko else
                     f"Choose {V('count')} {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en}. For each chosen card: {detail}")
         if op == "pick_transform":
@@ -1211,7 +1216,7 @@ def _describe_one(b, project, owner_kind, lang, card):
             return f"[gold]{n}[/gold] 버튼이 생깁니다." if ko else f"Gain the [gold]{n}[/gold] button."
         return f"[gold]{n}[/gold] 버튼이 사라집니다." if ko else f"Lose the [gold]{n}[/gold] button."
     if op == "delayed":
-        body = describe(b.get("body"), project, owner_kind, lang)
+        body = describe(b.get("body"), project, owner_kind, lang, item)
         tv = V("times")
         rep = "" if tv == "1" else (f" ({tv}번)" if ko else f" ({tv} times)")
         if a.get("when") == "end":
@@ -1258,7 +1263,7 @@ class _Gen:
             return C.me
         if who == "target":
             if C.kind == "relic" or not C.other:
-                self.errors.append("유물에는 '대상'이 없습니다 ('그 적'이나 '모든 적'을 쓰세요).")
+                self.errors.append("모든 적의 수치·조건은 '모든 적 각각에게' 안에서 '그 적'을 선택하세요." if getattr(C, "event_target", None) == "all" else "이 시점에는 지정된 대상이 없습니다. 자신·모든 적·무작위 적을 선택하세요.")
                 return "null"
             return C.other
         if who == "it":
@@ -1469,16 +1474,45 @@ class _Gen:
                 body_fn(v, ind + "    ") + [f"{ind}}}"]
         if who == "random":
             v = self.uid("r")
-            return [f"{ind}{{", f"{ind}    var {v} = {self.rng()}.NextItem({self.enemies()}.ToList());",
-                    f"{ind}    if ({v} != null)", f"{ind}    {{"] + body_fn(v, ind + "        ") + [f"{ind}    }}", f"{ind}}}"]
+            candidates = self.uid("enemies")
+            return [f"{ind}{{", f"{ind}    var {candidates} = {self.enemies()}.ToList();",
+                    f"{ind}    if ({candidates}.Count > 0)", f"{ind}    {{",
+                    f"{ind}        var {v} = {self.rng()}.NextItem({candidates});"] + body_fn(v, ind + "        ") + [f"{ind}    }}", f"{ind}}}"]
         cr = self.creature(who)
         if cr == self.C.me:
             return body_fn(cr, ind)
         return [f"{ind}if ({cr} != null)", f"{ind}{{"] + body_fn(cr, ind + "    ") + [f"{ind}}}"]
 
-    def stmt(self, b, ind):
+    def stmt(self, b, ind, event_bound=False):
         import modgen as M
         C, a, op = self.C, b.get("args", {}), b.get("op")
+        event_target = getattr(C, "event_target", None)
+        if event_target == "choose":
+            schema = SPECS.get(op, {}).get("args", {})
+            fields = [key for key, value in a.items() if value == "target" and schema.get(key, (None,))[0] in ("who_multi", "who_one")]
+            if fields and not event_bound:
+                selected = self.uid("eventSelected")
+                old_other, old_single = C.other, C.single
+                self.its.append(selected)
+                C.other = C.single = selected
+                try:
+                    body = self.stmt(b, ind + "    ", event_bound=True)
+                finally:
+                    C.other, C.single = old_other, old_single
+                    self.its.pop()
+                return [f"{ind}foreach (var {selected} in eventTargets.Where(enemy => enemy.IsHittable).ToList())", f"{ind}{{", *body, f"{ind}}}"]
+            if fields:
+                a = dict(a)
+                for key in fields:
+                    a[key] = "it"
+
+        if event_target in ("all", "self"):
+            schema = SPECS.get(op, {}).get("args", {})
+            a = dict(a)
+            for key, value in a.items():
+                if value == "target" and schema.get(key, (None,))[0] in ("who_multi", "who_one"):
+                    a[key] = event_target
+
         for key, value in a.items():
             if key in ("creature", "target", "attacker", "applier") and value == "@random_enemy":
                 return self.each_target("random", ind, lambda enemy, indent:
@@ -1567,6 +1601,9 @@ class _Gen:
                 self.errors.append("공격 블록은 카드 효과에서만 쓸 수 있습니다.")
                 return []
             amt = self.val(a.get("amount"))
+            name = M.block_damage_name(C.item, b)
+            if name:
+                amt = f'DynamicVars["{name}"].BaseValue'
             hval = a.get("hits", {"t": "num", "v": 1})
             hits = self.val(hval)
             chain = f"DamageCmd.Attack({amt})"
@@ -1584,6 +1621,7 @@ class _Gen:
                 chain += f".WithHitFx({', '.join(fx_args)})"
             elif sfx or fx_extra:
                 self.errors.append("공격 효과음을 입력하려면 먼저 이펙트 값을 지정하세요.")
+            guard_target = None
             who = a.get("who", "target")
             if who == "all":
                 chain += ".TargetingAllOpponents(CombatState!)"
@@ -1594,10 +1632,17 @@ class _Gen:
                 if target == "null":
                     return []
                 chain += f".Targeting({target})"
+                if target != me:
+                    guard_target = target
             chain += f".FromCard((CardModel)this).Execute({cc});"
+            if guard_target:
+                return [f"{ind}if ({guard_target} != null)", f"{ind}{{", f"{ind}    await {chain}", f"{ind}}}"]
             return [f"{ind}await {chain}"]
         if op == "damage":
             amt = self.val(a.get("amount"))
+            name = M.block_damage_name(C.item, b) if C.kind == "card" else None
+            if name:
+                amt = f'DynamicVars["{name}"].BaseValue'
             hits = max(1, int(a.get("hits", 1) or 1))
             props = "ValueProp.Move" if a.get("powered", True) else "ValueProp.Unpowered"
 
@@ -2487,10 +2532,123 @@ def _power_ctx():
     return M._Ctx("power", {"id": "x", "trigger": "none", "enemy_mode": "all"})
 
 
+def uses_event_target(blocks, project):
+    visited = set()
+    def scan(node):
+        if isinstance(node, list):
+            return any(scan(child) for child in node)
+        if not isinstance(node, dict):
+            return False
+        if any(node.get(key) == "target" for key in ("who", "target", "creature")):
+            return True
+        if node.get("op") == "shared_call":
+            name = node.get("args", {}).get("name", "")
+            if name not in visited:
+                visited.add(name)
+                if scan(project.get("shared_blocks", {}).get(name, [])):
+                    return True
+        return any(scan(value) for value in node.values())
+    return scan(blocks)
+
+
+def event_target_setup(C, blocks, project):
+    mode = getattr(C, "event_target", None)
+    if mode not in ("random", "choose") or not uses_event_target(blocks, project):
+        return []
+    player, creature, context = C.player, C.me, C.cc
+    lines = [f"var eventEnemies = {creature}.CombatState?.HittableEnemies.ToList();"]
+    if mode == "random":
+        return lines + [f"var eventTarget = eventEnemies != null && eventEnemies.Count > 0 ? {player}.RunState.Rng.CombatTargets.NextItem(eventEnemies) : null;"]
+    count = getattr(C, "event_target_count", 1)
+    lines += [
+        "var eventTargets = new global::System.Collections.Generic.List<global::MegaCrit.Sts2.Core.Entities.Creatures.Creature>();",
+        "global::MegaCrit.Sts2.Core.Entities.Creatures.Creature? eventTarget = null;",
+        "if (eventEnemies != null && eventEnemies.Count > 0 && !global::MegaCrit.Sts2.Core.Combat.CombatManager.Instance.IsOverOrEnding)",
+        "{",
+        f"    var eventMaxTargets = global::System.Math.Min({count}, eventEnemies.Count);",
+        "    var eventRun = global::MegaCrit.Sts2.Core.Runs.RunManager.Instance;",
+        "    var eventChoices = eventRun.PlayerChoiceSynchronizer;",
+        f"    var eventChoiceId = eventChoices.ReserveChoiceId({player});",
+        f"    await {context}.SignalPlayerChoiceBegun({player}, global::MegaCrit.Sts2.Core.Entities.Multiplayer.PlayerChoiceOptions.CancelPlayCardActions);",
+        "    var eventSelectedIndexes = new global::System.Collections.Generic.List<int>();",
+        "    var eventMarkedNodes = new global::System.Collections.Generic.List<global::MegaCrit.Sts2.Core.Nodes.Combat.NCreature>();",
+        "    try",
+        "    {",
+        f"        if (global::MegaCrit.Sts2.Core.Context.LocalContext.IsMe({player}) && eventRun.NetService.Type != global::MegaCrit.Sts2.Core.Multiplayer.Game.NetGameType.Replay)",
+        "        {",
+        "            try",
+        "            {",
+        "                var eventRoom = global::MegaCrit.Sts2.Core.Nodes.Rooms.NCombatRoom.Instance;",
+        "                if (eventRoom != null)",
+        "                {",
+        "                    global::MegaCrit.Sts2.Core.Nodes.Combat.NPlayerHand.Instance?.CancelAllCardPlay();",
+        "                    var eventManager = global::MegaCrit.Sts2.Core.Nodes.Combat.NTargetManager.Instance;",
+        f"                    var eventOrigin = eventRoom.GetCreatureNode({creature});",
+        "                    var eventPosition = eventOrigin != null ? eventOrigin.GlobalPosition + eventOrigin.Size / 2 : Godot.Vector2.Zero;",
+        "                    while (eventSelectedIndexes.Count < eventMaxTargets && !global::MegaCrit.Sts2.Core.Combat.CombatManager.Instance.IsOverOrEnding",
+        "                        && eventEnemies.Any(enemy => enemy.IsHittable && !eventSelectedIndexes.Contains(eventEnemies.IndexOf(enemy))))",
+        "                    {",
+        "                        var eventMode = global::MegaCrit.Sts2.Core.Nodes.CommonUi.NControllerManager.Instance?.IsUsingDirectionalNavigation == true",
+        "                            ? global::MegaCrit.Sts2.Core.Nodes.Combat.TargetMode.Controller : global::MegaCrit.Sts2.Core.Nodes.Combat.TargetMode.ClickMouseToTarget;",
+        "                        eventManager.StartTargeting(TargetType.AnyEnemy, eventPosition, eventMode,",
+        "                            () => global::MegaCrit.Sts2.Core.Combat.CombatManager.Instance.IsOverOrEnding || !eventEnemies.Any(enemy => enemy.IsHittable && !eventSelectedIndexes.Contains(eventEnemies.IndexOf(enemy))),",
+        "                            node => node is global::MegaCrit.Sts2.Core.Nodes.Combat.NCreature targetNode && targetNode.Entity.IsHittable && eventEnemies.Contains(targetNode.Entity) && !eventSelectedIndexes.Contains(eventEnemies.IndexOf(targetNode.Entity)));",
+        "                        var eventSelectionFinished = false;",
+        "                        var eventSelectedIndex = -1;",
+        "                        try",
+        "                        {",
+        "                            var eventSelectedNode = await eventManager.SelectionFinished();",
+        "                            eventSelectionFinished = true;",
+        "                            if (eventSelectedNode is global::MegaCrit.Sts2.Core.Nodes.Combat.NCreature eventNode)",
+        "                                eventSelectedIndex = eventEnemies.IndexOf(eventNode.Entity);",
+        "                        }",
+        "                        finally",
+        "                        {",
+        "                            if (!eventSelectionFinished && eventManager.IsInSelection) eventManager.CancelTargeting();",
+        "                        }",
+        "                        if (eventSelectedIndex < 0 || eventSelectedIndexes.Contains(eventSelectedIndex)) break;",
+        "                        eventSelectedIndexes.Add(eventSelectedIndex);",
+        "                        var eventMarkedNode = eventRoom.GetCreatureNode(eventEnemies[eventSelectedIndex]);",
+        "                        if (eventMarkedNode != null) eventMarkedNodes.Add(eventMarkedNode);",
+        "                        if (eventSelectedIndexes.Count < eventMaxTargets)",
+        "                        {",
+        "                            await eventManager.ToSignal(eventManager.GetTree(), Godot.SceneTree.SignalName.ProcessFrame);",
+        "                            foreach (var eventMarked in eventMarkedNodes)",
+        "                                if (Godot.GodotObject.IsInstanceValid(eventMarked)) eventMarked.ShowMultiselectReticle();",
+        "                        }",
+        "                    }",
+        "                }",
+        "            }",
+        "            finally",
+        "            {",
+        f"                eventChoices.SyncLocalChoice({player}, eventChoiceId, global::MegaCrit.Sts2.Core.GameActions.PlayerChoiceResult.FromIndexes(eventSelectedIndexes));",
+        "            }",
+        "        }",
+        "        else",
+        "        {",
+        f"            eventSelectedIndexes = (await eventChoices.WaitForRemoteChoice({player}, eventChoiceId)).AsIndexes();",
+        "        }",
+        "    }",
+        "    finally",
+        "    {",
+        "        foreach (var eventMarked in eventMarkedNodes)",
+        "            if (Godot.GodotObject.IsInstanceValid(eventMarked)) eventMarked.HideMultiselectReticle();",
+        f"        await {context}.SignalPlayerChoiceEnded();",
+        "    }",
+        "    foreach (var eventIndex in eventSelectedIndexes.Distinct().Take(eventMaxTargets))",
+        "        if (!global::MegaCrit.Sts2.Core.Combat.CombatManager.Instance.IsOverOrEnding && eventIndex >= 0 && eventIndex < eventEnemies.Count && eventEnemies[eventIndex].IsHittable)",
+        "            eventTargets.Add(eventEnemies[eventIndex]);",
+        "    eventTarget = eventTargets.FirstOrDefault();",
+        "}",
+    ]
+    return lines
+
+
 def compile_blocks(blocks, project, C, ind="        ", prefix="Blk", extras=None, allow_event=False):
     """-> (C# 줄 목록, 오류 목록). extras 목록을 주면 블록이 만든 클래스(선택지 카드·예약 파워) 정보가 쌓인다."""
     g = _Gen(project, C, prefix=prefix, extras=extras, allow_event=allow_event)
     lines = [f"{ind}{{", f"{ind}    // --- 블록 코딩 ---"]
+    lines += [ind + "    " + line for line in event_target_setup(C, blocks, project)]
     for n in _used_vars(blocks):
         lines.append(f"{ind}    decimal v_{_ident(n)} = 0m;")
     lines += g.stmts(blocks, ind + "    ")

@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from winpos import center_window
+from docking import CheckedMenu, pointer_in_workspace, DockDrag, DockPanedWindow, install_panel_menu, is_panel_window, panel_groups, position_window, prepare_float_window
 
 # ---------------------------------------------------------------------------
 # 테마
@@ -701,39 +702,453 @@ class AutoScroll(ttk.Frame):
             self.canvas.yview_moveto(0)
 
 
-class ScrollNotebook(ttk.Notebook):
-    """탭마다 AutoScroll 을 씌우는 Notebook. select()/tab()/index() 는 안쪽 탭 위젯으로 주고받는다."""
+class _TabHost(tk.Frame, tk.Wm):
+    """Native Tk frame that can become a window without recreating its children."""
 
+
+class ScrollNotebook(ttk.Notebook):
+    """Scrollable pages with stable identities, visibility, and native floating windows."""
     def __init__(self, master, **kw):
         super().__init__(master, **kw)
         self._inner_of, self._outer_of = {}, {}
+        self._pages, self._order = {}, []
+        self._visual_order = []
+        self._active_popup = None
+        self._notify_job = None
+        self._tab_drag = DockDrag(self, self._probe_tab, self._finish_tab)
+        self._tab_font = None
+        self._tab_font_spec = None
+        self.bind("<ButtonPress-1>", self._tab_press, add="+")
+        self.bind("<B1-Motion>", self._tab_drag.motion, add="+")
+        self.bind("<ButtonRelease-1>", self._tab_drag.release, add="+")
+        self.bind("<Button-3>", self._context_menu)
+        self.bind("<Button-1>", lambda e:setattr(self, "_active_popup", None), add="+")
+        self._focus_binding = self.bind_all("<FocusIn>", self._track_focus, add="+")
+        self.bind("<Destroy>",self._on_destroy,add="+")
+
+    def _on_destroy(self, event):
+        if event.widget is not self:
+            return
+        self._tab_drag.cancel()
+        if self._notify_job is not None:
+            self.after_cancel(self._notify_job)
+            self._notify_job = None
+        if self._focus_binding:
+            try:
+                self._root()._unbind(("bind","all","<FocusIn>"),self._focus_binding)
+            except (tk.TclError,ValueError):
+                pass
+            self._focus_binding = None
+
+    def _remember_tab_position(self, key, anchor):
+        if anchor == key:
+            return
+        self._visual_order.remove(key)
+        index = self._visual_order.index(anchor) if anchor in self._visual_order else len(self._visual_order)
+        self._visual_order.insert(index,key)
 
     def add_scrolled(self, factory, text, **kw):
-        box = AutoScroll(self)
+        host = _TabHost(self, background=C["bg"])
+        header = ttk.Frame(host, padding=5)
+        title_label = ttk.Label(header, text="⠿ " + text + " · 끌어서 결합", style="Head.TLabel")
+        title_label.pack(side="left")
+        ttk.Button(header, text="탭으로 되돌리기", command=lambda:self.dock(str(host))).pack(side="right")
+        ttk.Button(header, text="숨기기", command=lambda:self.set_visible(str(host), False)).pack(side="right", padx=4)
+        browse = ttk.Menubutton(header, text="보기 ▾")
+        browse.pack(side="right", padx=4)
+        box = AutoScroll(host)
+        box.pack(fill="both", expand=True)
         tab = factory(box.inner)
         tab.pack(fill="both", expand=True)
-        super().add(box, text=text, **kw)
-        self._inner_of[str(box)] = str(tab)
-        self._outer_of[str(tab)] = str(box)
+        super().add(host, text=text, **kw)
+        key = str(host)
+        self._inner_of[key] = str(tab)
+        self._outer_of[str(tab)] = key
+        self._order.append(key)
+        self._visual_order.append(key)
+        self._pages[key] = dict(host=host, box=box, header=header, browse=browse,
+                                title=text, options=dict(super().tab(host)), detached=False,
+                                visible=tk.BooleanVar(self, True), floating=tk.BooleanVar(self,False), geometry=None, close_handler=None)
+        self._tab_drag.bind(title_label,key)
+        self._tab_drag.bind(header,key)
         return tab
 
-    def _o(self, t):
-        return t if t is None or isinstance(t, int) else self._outer_of.get(str(t), t)
+    def _o(self, tab):
+        if isinstance(tab, int):
+            return self._order[tab]
+        return self._outer_of.get(str(tab), str(tab)) if tab is not None else None
+
+    def _notify(self):
+        if self._notify_job is None:
+            def emit():
+                self._notify_job = None
+                if self.winfo_exists():
+                    self.event_generate("<<NotebookTabChanged>>")
+            self._notify_job = self.after_idle(emit)
+
+    def _track_focus(self, event):
+        widget = event.widget
+        page = None
+        while isinstance(widget, tk.Misc):
+            if str(widget) in self._pages:
+                page = str(widget)
+                break
+            widget = widget.master
+        old = self._active_popup
+        if page is not None:
+            record = self._pages[page]
+            self._active_popup = page if (record["detached"] and record["visible"].get()) or is_panel_window(self._root(),event.widget.winfo_toplevel()) else None
+        else:
+            try:
+                if event.widget.winfo_toplevel() == self.winfo_toplevel():
+                    self._active_popup = None
+            except (AttributeError, tk.TclError):
+                pass
+        if self._active_popup != old:
+            self._notify()
 
     def select(self, tab_id=None):
         if tab_id is None:
+            popup = self._pages.get(self._active_popup)
+            if popup:
+                return self._inner_of[self._active_popup]
             cur = super().select()
             return self._inner_of.get(str(cur), cur)
-        return super().select(self._o(tab_id))
+        key = self._o(tab_id)
+        record = self._pages.get(key)
+        if record is None:
+            return super().select(key)
+        self.set_visible(key, True)
+        if record["detached"]:
+            self._active_popup = key
+            record["host"].lift()
+            record["host"].focus_set()
+            self._notify()
+            return None
+        self._active_popup = None
+        return super().select(key)
 
     def tab(self, tab_id, option=None, **kw):
-        return super().tab(self._o(tab_id), option, **kw)
+        key = self._o(tab_id)
+        record = self._pages.get(key)
+        if record and record["detached"]:
+            record["options"].update(kw)
+            return record["options"].get(option) if option else dict(record["options"])
+        result = super().tab(key, option, **kw)
+        if record and kw:
+            record["options"].update(kw)
+        return result
 
     def index(self, tab_id):
-        return super().index(self._o(tab_id))
+        if tab_id == "end":
+            return len(self._order)
+        if isinstance(tab_id, str) and tab_id.startswith("@"):
+            return self._order.index(super().tabs()[super().index(tab_id)])
+        if tab_id == "current":
+            tab_id = self.select()
+        key = self._o(tab_id)
+        if key in self._order:
+            return self._order.index(key)
+        return super().index(key)
 
     def tabs(self):
-        return tuple(self._inner_of.get(str(t), t) for t in super().tabs())
+        return tuple(self._inner_of[key] for key in self._order)
+
+    def is_detached_window(self, window):
+        record = self._pages.get(str(window))
+        return bool(record and record["detached"])
+
+    def page_for_widget(self, widget):
+        while isinstance(widget,tk.Misc):
+            if str(widget) in self._pages:
+                return str(widget)
+            widget = widget.master
+        return None
+
+    def is_visible(self, tab_id):
+        key = self._o(tab_id)
+        record = self._pages.get(key)
+        if record and record["visible"].get() and (record["detached"] or super().select() == key):
+            return True
+        return any(self.page_for_widget(group)==key and any(r["detached"] and r["visible"].get() for r in group._records.values()) for group in panel_groups(self._root()))
+
+    def _native_tab_at(self, x, y):
+        try:
+            index = self.tk.call(self._w,"index",f"@{int(x)},{int(y)}")
+            if str(index) == "":
+                return None
+            native = super().tabs()
+            return str(native[int(index)])
+        except (tk.TclError,ValueError,IndexError):
+            return None
+
+    def _tab_press(self, event):
+        key = self._native_tab_at(event.x,event.y)
+        if key is None:
+            self._tab_drag.cancel()
+            return
+        self._tab_drag.start(event,key)
+
+    def _tab_strip_height(self):
+        selected = str(super().select())
+        current = self._pages.get(selected)
+        if current and not current["detached"] and current["host"].winfo_ismapped():
+            return max(1,current["host"].winfo_rooty()-self.winfo_rooty())
+        import tkinter.font as tkfont
+        spec = ttk.Style(self).lookup("TNotebook.Tab","font") or "TkDefaultFont"
+        if self._tab_font is None or str(spec) != self._tab_font_spec:
+            self._tab_font = tkfont.Font(font=spec)
+            self._tab_font_spec = str(spec)
+        return self._tab_font.metrics("linespace")+14
+
+    def _tab_span(self, key, x, y):
+        # Locate the hovered tab's two edges without changing notebook state.
+        low,high = 0,int(x)
+        while low < high:
+            middle = (low+high)//2
+            if self._native_tab_at(middle,y) == key:
+                high = middle
+            else:
+                low = middle+1
+        left = low
+        low,high = int(x),self.winfo_width()
+        while low < high:
+            middle = (low+high)//2
+            if self._native_tab_at(middle,y) == key:
+                low = middle+1
+            else:
+                high = middle
+        return left,low
+
+    def _probe_tab(self, key, x, y):
+        if not self.winfo_ismapped() or key not in self._pages:
+            return None
+        left,top = self.winfo_rootx(),self.winfo_rooty()
+        width,height = self.winfo_width(),self.winfo_height()
+        bar_height = self._tab_strip_height()
+        # The content area is a tear-off area; only the tab strip accepts docking.
+        if not (left <= x < left+width and top <= y < top+bar_height):
+            return None
+        if not pointer_in_workspace(self,x,y,self._tab_drag):
+            return None
+        native = list(map(str,super().tabs()))
+        local_x, row = x-left,max(0,bar_height//2)
+        hovered = self._native_tab_at(local_x,row)
+        anchor = "end"
+        indicator = left+width-4
+        if hovered is not None:
+            start,end = self._tab_span(hovered,local_x,row)
+            before = local_x < (start+end)/2
+            index = native.index(hovered)
+            anchor = hovered if before else native[index+1] if index+1<len(native) else "end"
+            indicator = left+(start if before else end)
+        elif native:
+            first_x = next((px for px in range(0,min(width,80),4) if self._native_tab_at(px,row) is not None),None)
+            if first_x is not None and local_x < first_x:
+                anchor,indicator = native[0],left+first_x
+            else:
+                for px in range(min(width-1,local_x),-1,-4):
+                    last = self._native_tab_at(px,row)
+                    if last is not None:
+                        _,end = self._tab_span(last,px,row)
+                        indicator = left+end
+                        break
+        caption = "놓으면 이 위치에 탭으로 결합" if self._pages[key]["detached"] else "놓으면 이 위치로 탭 순서 변경"
+        return ("dock",anchor),(indicator-2,top,4,bar_height),caption
+
+    def _finish_tab(self, key, x, y, target):
+        if key not in self._pages:
+            return
+        if target is None:
+            self.detach(key,position=(x,y))
+            return
+        _,anchor = target if isinstance(target,tuple) else ("dock",target)
+        record = self._pages[key]
+        native = list(map(str,super().tabs()))
+        if not record["detached"]:
+            if anchor == key:
+                return
+            others = [page for page in native if page != key]
+            desired = len(others) if anchor in (None,"end") else others.index(anchor) if anchor in others else None
+            if desired is None or native.index(key) == desired:
+                return
+            super().insert("end" if desired==len(others) else desired,record["host"])
+            self._remember_tab_position(key,anchor)
+            super().select(key)
+            self._active_popup = None
+        else:
+            self.dock(key)
+            if anchor not in (None,key):
+                others = [str(page) for page in super().tabs() if str(page) != key]
+                desired = len(others) if anchor == "end" else others.index(anchor) if anchor in others else None
+                if desired is not None:
+                    super().insert("end" if desired==len(others) else desired,record["host"])
+                    self._remember_tab_position(key,anchor)
+
+    def set_visible(self, tab_id, show):
+        key = self._o(tab_id)
+        record = self._pages[key]
+        previous = record["options"].get("state", "normal") != "hidden"
+        record["visible"].set(bool(show))
+        record["options"]["state"] = "normal" if show else "hidden"
+        if record["detached"]:
+            if show:
+                if record["host"].state() == "withdrawn":
+                    record["host"].deiconify()
+                record["host"].lift()
+            else:
+                record["host"].withdraw()
+        elif previous != bool(show):
+            super().tab(key, state="normal" if show else "hidden")
+        if not show and self._active_popup == key:
+            self._active_popup = None
+        if previous != bool(show):
+            self._notify()
+
+    def detach(self, tab_id=None, position=None):
+        key = self._o(tab_id if tab_id is not None else self.select())
+        record = self._pages.get(key)
+        if record is None:
+            return
+        if record["detached"]:
+            if position is not None:
+                position_window(record["host"],*position)
+            self.select(key)
+            return
+        host = record["host"]
+        native = list(map(str,super().tabs()))
+        old_index = native.index(key)
+        record["dock_before"] = native[old_index+1] if old_index+1<len(native) else "end"
+        record["dock_index"] = old_index
+        old_selected,old_active = super().select(),self._active_popup
+        old_options = dict(super().tab(key))
+        record["options"] = dict(old_options)
+        super().forget(key)
+        try:
+            self.tk.call("wm", "manage", host)
+            host.withdraw()
+            record["detached"] = True
+            record["floating"].set(True)
+            record["header"].pack(fill="x", before=record["box"])
+            host.title(record["title"] + " — 슬더스2 모드 메이커")
+            if record["close_handler"] is None:
+                record["close_handler"] = host.register(lambda:self.dock(key))
+            host.protocol("WM_DELETE_WINDOW", record["close_handler"])
+            host.minsize(480, 320)
+            prepare_float_window(host,self.winfo_toplevel(),(1200,850),record["geometry"],position)
+            host.deiconify()
+            self.select(key)
+        except Exception:
+            # A failed native transition must never leave a page forgotten and invisible.
+            try:
+                self.tk.call("wm","forget",host)
+            except tk.TclError:
+                pass
+            record["header"].pack_forget()
+            record["detached"] = False
+            record["floating"].set(False)
+            record["options"] = old_options
+            record["visible"].set(old_options.get("state","normal") != "hidden")
+            super().insert(min(old_index,len(super().tabs())),host,**old_options)
+            self._active_popup = old_active
+            if str(old_selected) == key:
+                super().select(key)
+            self._notify()
+            raise
+
+    def dock(self, tab_id, select=True):
+        key = self._o(tab_id)
+        record = self._pages[key]
+        if record["detached"]:
+            host = record["host"]
+            record["geometry"] = host.geometry()
+            host.withdraw()
+            try:
+                self.tk.call("wm", "forget", host)
+                record["header"].pack_forget()
+                native = set(map(str,super().tabs()))
+                after = self._visual_order[self._visual_order.index(key)+1:]
+                before = next((page for page in after if page in native),"end")
+                options = dict(record["options"])
+                options["state"] = "normal" if record["visible"].get() else "hidden"
+                super().insert(before, host, **options)
+                record["detached"] = False
+                record["floating"].set(False)
+            except Exception:
+                if key in map(str,super().tabs()):
+                    super().forget(key)
+                self.tk.call("wm","manage",host)
+                host.withdraw()
+                record["header"].pack(fill="x",before=record["box"])
+                record["detached"] = True
+                record["floating"].set(True)
+                host.protocol("WM_DELETE_WINDOW",record["close_handler"])
+                host.title(record["title"] + " — 슬더스2 모드 메이커")
+                host.minsize(480,320)
+                host.geometry(record["geometry"])
+                if record["visible"].get():
+                    host.deiconify()
+                raise
+        if self._active_popup == key:
+            self._active_popup = None
+        if select:
+            self.select(key)
+        self._notify()
+
+    def dock_all(self):
+        for key in self._order:
+            self.dock(key, select=False)
+
+    def reset_layout(self):
+        self._visual_order[:] = self._order
+        self.dock_all()
+        for index,key in enumerate(self._order):
+            super().insert(index,self._pages[key]["host"])
+        self.show_all()
+
+    def show_all(self):
+        for key in self._order:
+            self.set_visible(key, True)
+
+    def install_view_menu(self, menu):
+        menu.add_separator()
+        toggles = CheckedMenu(menu, tearoff=False)
+        detach = CheckedMenu(menu, tearoff=False)
+        for key in self._order:
+            record = self._pages[key]
+            toggles.add_checkbutton(label=record["title"], variable=record["visible"],
+                                   command=lambda key=key:self.set_visible(key, self._pages[key]["visible"].get()))
+            detach.add_checkbutton(label=record["title"], variable=record["floating"],
+                                   command=lambda key=key:self.detach(key) if self._pages[key]["floating"].get() else self.dock(key))
+        menu.add_cascade(label="작업 탭 표시", menu=toggles)
+        menu.add_cascade(label="작업 탭 분리 (체크 = 분리됨)", menu=detach)
+        menu.add_command(label="현재 탭을 팝업으로 분리", command=self.detach)
+        menu.add_command(label="모든 팝업을 탭으로 합치기", command=self.dock_all)
+        menu.add_command(label="모든 작업 탭 표시", command=self.show_all)
+        for key in self._order:
+            record = self._pages[key]
+            popup_menu = CheckedMenu(record["browse"], tearoff=False)
+            popup_menu.add_command(label="모든 작업 탭 활성화", command=self.show_all)
+            popup_menu.add_separator()
+            for other in self._order:
+                other_record = self._pages[other]
+                popup_menu.add_checkbutton(label=other_record["title"], variable=other_record["visible"],
+                    command=lambda other=other:self.set_visible(other, self._pages[other]["visible"].get()))
+            install_panel_menu(popup_menu,self._root())
+            record["browse"].configure(menu=popup_menu)
+
+    def _context_menu(self, event):
+        try:
+            key = self._o(self.index(f"@{event.x},{event.y}"))
+        except (tk.TclError, ValueError, IndexError):
+            return
+        menu = tk.Menu(self, tearoff=False)
+        menu.add_command(label="팝업으로 분리", command=lambda:self.detach(key))
+        menu.add_command(label="숨기기", command=lambda:self.set_visible(key, False))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
 
 # ---------------------------------------------------------------------------

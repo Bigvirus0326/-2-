@@ -623,9 +623,12 @@ def _effect_sentence(project, eff, owner_kind, item, lang):
         s = (eff.get(f"text_{lang}") or "").strip()
         if not s and eff.get("blocks"):
             import blockcode
-            s = blockcode.describe(eff["blocks"], project, owner_kind, lang)
+            s = blockcode.describe(eff["blocks"], project, owner_kind, lang, item)
         if not s:
             s = (eff.get("text_ko") or eff.get("text_en") or "").strip()
+        upgraded = (eff.get("upgraded_text", {}).get(lang) or "").strip()
+        if upgraded and owner_kind == "card":
+            s = "{IfUpgraded:show:" + upgraded + "|" + s + "}"
         return _with_condition(project, eff, owner_kind, s, lang) if s else ""
     scope = _enemy_scope(owner_kind, item)
     tgt = eff.get("target", "enemy")
@@ -816,6 +819,61 @@ def modifier_sentence(m, lang, project=None):
     }[kind]
 
 
+CARD_EVENT_TARGETS = [("random", "무작위 적 한 명"), ("choose", "적 N명 직접 선택"), ("all", "모든 적"), ("self", "자신")]
+
+
+def card_event_target_count(card, event):
+    value = card.get("event_target_counts", {}).get(event, 1)
+    if isinstance(value, bool):
+        raise ValueError("선택할 적 수는 1부터 99 사이의 정수여야 합니다.")
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("선택할 적 수는 1부터 99 사이의 정수여야 합니다.") from None
+    if str(count) != str(value) or not 1 <= count <= 99:
+        raise ValueError("선택할 적 수는 1부터 99 사이의 정수여야 합니다.")
+    return count
+
+
+def card_event_context(card, event):
+    ctx = _Ctx("card", card)
+    ctx.event_target = card.get("event_targets", {}).get(event, "random")
+    if ctx.event_target not in dict(CARD_EVENT_TARGETS):
+        raise ValueError("이벤트 효과의 대상을 다시 선택하세요.")
+    ctx.single = ctx.other = "Owner.Creature" if ctx.event_target == "self" else ("eventTarget" if ctx.event_target in ("random", "choose") else None)
+    ctx.event_target_count = card_event_target_count(card, event) if ctx.event_target == "choose" else 1
+    ctx.play = "null"
+    return ctx
+
+
+def card_event_description(project, card, lang):
+    import blockcode
+    labels = {
+        "ko": {"draw": "이 카드를 뽑을 때: ", "discard": "이 카드를 버릴 때: ", "exhaust": "이 카드가 소멸할 때: "},
+        "en": {"draw": "When this card is drawn: ", "discard": "When this card is discarded: ", "exhaust": "When this card is exhausted: "},
+        "zh": {"draw": "抽到此牌时：", "discard": "此牌被丢弃时：", "exhaust": "此牌被消耗时："},
+    }
+    sentences = []
+    for event in ("draw", "discard", "exhaust"):
+        blocks = card.get("event_blocks", {}).get(event, [])
+        if blocks:
+            detail = blockcode.describe(blocks, project, "card", lang, card)
+            if detail:
+                target = card.get("event_targets", {}).get(event, "random")
+                target_names = {"ko": {"random":"무작위 적 한 명", "choose":"직접 선택한 적 한 명", "all":"모든 적", "self":"자신"},
+                                "en": {"random":"a random enemy", "choose":"an enemy you choose", "all":"all enemies", "self":"yourself"},
+                                "zh": {"random":"随机一名敌人", "choose":"自行选择一名敌人", "all":"所有敌人", "self":"自身"}}
+                if target == "choose":
+                    count = card_event_target_count(card, event)
+                    target_names["ko"]["choose"] = f"직접 선택한 적 최대 {count}명"
+                    target_names["en"]["choose"] = f"up to {count} enemies you choose"
+                    target_names["zh"]["choose"] = f"自行选择至多{count}名敌人"
+                uses_target = blockcode.uses_event_target(blocks, project)
+                suffix = "(" + target_names.get(lang, target_names["en"]).get(target, target) + ") " if uses_target else ""
+                sentences.append(labels.get(lang, labels["en"])[event] + suffix + detail)
+    return sentences
+
+
 def auto_description(project, item, owner_kind, lang):
     sentences = [effect_sentence(project, e, owner_kind, item, lang) for e in item.get("effects", [])]
     sentences = [s for s in sentences if s]
@@ -847,11 +905,140 @@ def auto_description(project, item, owner_kind, lang):
         pre = gimmick.card_prefix_text(project, item, lang)
         if pre:
             sentences = [pre] + sentences
+        if not item.get("clone"):
+            sentences.extend(card_event_description(project, item, lang))
     sep = "\n" if owner_kind == "card" else " "
     return sep.join(sentences)
 
 
+def block_damage_vars(item):
+    import blockcode as B
+    result = []
+    groups = [effect.get("blocks", []) for effect in item.get("effects", [])]
+    groups += [item.get("event_blocks", {}).get(event, []) for event in ("draw", "discard", "exhaust")]
+    for blocks in groups:
+        for block in B.walk(blocks):
+            amount = block.get("args", {}).get("amount", {})
+            if block.get("op") in ("damage", "card_attack") and isinstance(amount, dict) and amount.get("t") == "num":
+                result.append((block, "MakerBlockDamage" + str(len(result) + 1), amount))
+    return result
+
+
+def block_damage_name(item, block):
+    return next((name for candidate, name, _ in block_damage_vars(item or {}) if candidate is block), None)
+
+
+def block_damage_upgrades(item):
+    return [f'DynamicVars["{name}"].UpgradeValueBy({_num_lit(amount["up"], "m")});'
+            for _, name, amount in block_damage_vars(item) if amount.get("up")]
+
+
+def block_description_values(item):
+    """Editable numeric slots, including nested blocks and arithmetic operands."""
+    import blockcode as B
+    rows = []
+    def scan(value, path, block, label):
+        if not isinstance(value, dict):
+            return
+        if value.get("t") == "num":
+            base = value.get("v", 0)
+            upgraded = base + (value.get("up") or 0)
+            rows.append((f"{label} · {'.'.join(path)} ({base} → {upgraded})", block, path))
+            return
+        for key, child in value.items():
+            if isinstance(child, dict):
+                scan(child, path + [key], block, label)
+    for effect_index, effect in enumerate(item.get("effects", []), 1):
+        for index, block in enumerate(B.walk(effect.get("blocks", [])), 1):
+            label = f"효과 {effect_index} / 블록 {index}: " + B.SPECS.get(block.get("op"), {}).get("ko", block.get("op", ""))
+            for key, value in block.get("args", {}).items():
+                scan(value, [key], block, label)
+    return rows
+
+
+def resolve_block_description(text, item):
+    import blockcode as B
+    blocks = {block.get("description_id"): block for effect in item.get("effects", [])
+              for block in B.walk(effect.get("blocks", [])) if block.get("description_id")}
+    def resolve(match):
+        block = blocks.get(match[1])
+        value = block.get("args", {}) if block else {}
+        for key in match[2].split("."):
+            value = value.get(key, {}) if isinstance(value, dict) else {}
+        if not isinstance(value, dict) or value.get("t") != "num":
+            return "[연결된 수치 없음]"
+        damage_name = block_damage_name(item, block) if match[2] == "amount" else None
+        if damage_name:
+            return "{" + damage_name + ":diff()}"
+        base = value.get("v", 0)
+        up = value.get("up") or 0
+        return "{IfUpgraded:show:" + str(base + up) + "|" + str(base) + "}" if up else str(base)
+    return re.sub(r"\{BlockValue:([a-f0-9]+):([A-Za-z0-9_.]+)\}", resolve, text)
+
+
+DESCRIPTION_GROUPS = {"tag": ("tags", "태그"), "summon": ("summons", "소환수"),
+                      "orb": ("orbs", "구체"), "pet": ("pets", "동료"),
+                      "fx": ("effects", "이펙트"), "button": ("buttons", "버튼")}
+
+
+def description_reference_options(project):
+    rows = [("파워 · " + label, "power", ident) for ident, label in power_options(project)]
+    rows.extend(("키워드 · " + label, "keyword", ident) for ident, label in CARD_KEYWORDS)
+    for kind, (group, label) in DESCRIPTION_GROUPS.items():
+        rows.extend((label + " · " + description_gimmick_name(row, kind, "ko") + " (" + row["id"] + ")", kind, row["id"])
+                    for row in project.get("gimmicks", {}).get(group, []))
+    return rows
+
+
+def rename_description_references(project, kind, old, new):
+    if new is None:
+        return
+    old_id = "c:" + old if kind == "power" else old
+    new_id = "c:" + new if kind == "power" else new
+    old_token = "{MakerName:" + kind + ":" + old_id.encode("utf8").hex() + "}"
+    new_token = "{MakerName:" + kind + ":" + new_id.encode("utf8").hex() + "}"
+    def visit(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, str):
+                    node[key] = value.replace(old_token, new_token)
+                else:
+                    visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+    visit(project)
+
+
+def resolve_description_references(value, project, lang):
+    def resolve(match):
+        kind = match[1]
+        try:
+            ident = bytes.fromhex(match[2]).decode("utf8")
+        except (ValueError, UnicodeDecodeError):
+            return "[연결 오류]"
+        if kind == "keyword":
+            return dict(CARD_KEYWORDS).get(ident, ident) if lang == "ko" else ident
+        if kind == "power":
+            meta = power_meta(project, ident)
+            return (meta.get(lang) or meta.get("ko") or meta.get("en") or ident) if meta else "[삭제된 파워]"
+        group = DESCRIPTION_GROUPS.get(kind, ("", ""))[0]
+        row = next((r for r in project.get("gimmicks", {}).get(group, []) if r.get("id") == ident), None)
+        return description_gimmick_name(row, kind, lang) if row else "[삭제된 항목]"
+    return re.sub(r"\{MakerName:([a-z]+):([a-f0-9]+)\}", resolve, value)
+
+
 def description(project, item, owner_kind, lang):
+    return resolve_description_references(resolve_block_description(_description(project, item, owner_kind, lang), item), project, lang)
+
+
+def _description(project, item, owner_kind, lang):
+    upgraded = (item.get(f"upgrade_desc_{lang}") or "").strip() if owner_kind == "card" else ""
+    if upgraded:
+        base_item = dict(item)
+        base_item.pop(f"upgrade_desc_{lang}", None)
+        base = description(project, base_item, owner_kind, lang)
+        return "{IfUpgraded:show:" + upgraded + "|" + base + "}"
     if item.get("raw_desc_only") or item.get("clone"):
         base = text(item, "desc", lang)
         extra = [effect_sentence(project, e, owner_kind, item, lang) for e in item.get("effects", [])]
@@ -1165,6 +1352,10 @@ def _canonical_vars(project, item, owner_kind):
         elif k == "power":
             pm = power_meta(project, e["power"])
             out.append(f'new PowerVar<{pm["cls"]}>("{pm["var"]}", {_num(a)})')
+    if owner_kind == "card":
+        for block, name, amount in block_damage_vars(item):
+            props = "ValueProp.Move" if block.get("args", {}).get("powered", True) else "ValueProp.Unpowered"
+            out.append(f'new DamageVar("{name}", {_num_lit(amount.get("v", 0), "m")}, {props})')
     return out
 
 
@@ -1375,6 +1566,68 @@ def _filter_check(project, f, card_expr):
     return f"        if (!({gimmick.filter_expr(project, f, card_expr)})) return;"
 
 
+def description_references(item):
+    refs = []
+    def scan(node):
+        if isinstance(node, str):
+            for kind, encoded in re.findall(r"\{MakerName:([a-z]+):([a-f0-9]+)\}", node):
+                try:
+                    ref = (kind, bytes.fromhex(encoded).decode("utf8"))
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if ref not in refs:
+                    refs.append(ref)
+        elif isinstance(node, dict):
+            for value in node.values():
+                scan(value)
+        elif isinstance(node, list):
+            for value in node:
+                scan(value)
+    scan(item)
+    return refs
+
+
+def description_gimmick_name(row, kind, lang):
+    return (text(row, "label", lang) if kind == "button" else
+            text(row, "name", lang) or row.get("name", "")) or row.get("id", "")
+
+
+def _description_tip_key(project, kind, ident):
+    return loc_id(project, "description_" + kind + "_" + ident)
+
+
+def description_hover_tips(project, item):
+    import pets
+    tips = []
+    for kind, ident in description_references(item):
+        if kind == "power":
+            meta = power_meta(project, ident)
+            if meta:
+                tips.append(f"HoverTipFactory.FromPower<{meta['cls']}>()")
+        elif kind == "keyword" and ident in dict(CARD_KEYWORDS):
+            tips.append(f"HoverTipFactory.FromKeyword(CardKeyword.{ident})")
+        elif kind in DESCRIPTION_GROUPS:
+            group = DESCRIPTION_GROUPS[kind][0]
+            row = next((r for r in project.get("gimmicks", {}).get(group, []) if r.get("id") == ident), None)
+            if not row:
+                continue
+            if kind == "tag":
+                tips.append(f"HoverTipFactory.FromPower<{gimmick.tag_cls(project, ident)}>()")
+            elif kind == "summon":
+                tips.append(f"HoverTipFactory.FromPower<{gimmick.summon_cls(project, ident)}>()")
+            elif kind == "orb":
+                meta = gimmick.orb_meta(project, "o:" + ident)
+                tips.append(f"HoverTipFactory.FromOrb<{meta['cls']}>()")
+            elif kind == "pet":
+                tips.append(f"HoverTipFactory.FromPower<{pets.act_cls(project, ident)}>()")
+            else:
+                key = _description_tip_key(project, kind, ident)
+                tips.append('new HoverTip(new global::MegaCrit.Sts2.Core.Localization.LocString("static_hover_tips", '
+                            + json.dumps(key + ".title") + '), new global::MegaCrit.Sts2.Core.Localization.LocString("static_hover_tips", '
+                            + json.dumps(key + ".description") + '))')
+    return list(dict.fromkeys(tips))
+
+
 def _hover_tips(project, item):
     seen = []
     for e in item.get("effects", []):
@@ -1382,7 +1635,7 @@ def _hover_tips(project, item):
             pm = power_meta(project, ref)
             if pm and pm["cls"] not in seen:
                 seen.append(pm["cls"])
-    return [f"HoverTipFactory.FromPower<{c}>()" for c in seen]
+    return list(dict.fromkeys([f"HoverTipFactory.FromPower<{c}>()" for c in seen] + description_hover_tips(project, item)))
 
 
 def _extra_code(item, ind="    "):
@@ -1497,7 +1750,7 @@ def _fix_upgrade(body, item, cost_delta, add_kw):
     body = re.sub(r'DynamicVars\s*(?:\[\s*"(\w+)"\s*\]|\.(\w+))\s*\.UpgradeValueBy\(\s*(-?[\d.]+[mMfF]?)\s*\)', r1, body)
     body = re.sub(r"\s*EnergyCost\.UpgradeBy\(\s*-?\d+\s*\)\s*;", "", body)
     body = re.sub(r"\s*AddKeyword\(\s*CardKeyword\.\w+\s*\)\s*;", "", body)
-    add = []
+    add = block_damage_upgrades(item)
     for name, v in vals.items():
         if name not in seen and float(v.get("upgrade") or 0):
             add.append(f'DynamicVars["{name}"].UpgradeValueBy({_num_lit(v.get("upgrade"), "m")});')
@@ -1585,9 +1838,15 @@ def gen_clone(project, item, kind):
         L.append(f"    protected override IEnumerable<DynamicVar> CanonicalVars => [{', '.join(cv)}];")
         if any(e["kind"] == "block" for e in effs) and "GainsBlock" not in body:
             L.append("    public override bool GainsBlock => true;")
-        tips = gimmick.card_tips(project, item) + _hover_tips(project, item)
-        if tips and "ExtraHoverTips" not in body:
-            L.append(f"    protected override IEnumerable<IHoverTip> ExtraHoverTips => [{', '.join(tips)}];")
+        tips = list(dict.fromkeys(gimmick.card_tips(project, item) + _hover_tips(project, item)))
+        inherited_tips = False
+        if tips and "ExtraHoverTips" in body:
+            body, count = re.subn(r"\b(protected|public)\s+override\s+(IEnumerable<IHoverTip>)\s+ExtraHoverTips\b",
+                                  r"\1 \2 MakerOriginalExtraHoverTips", body, count=1)
+            inherited_tips = bool(count)
+        if tips and ("ExtraHoverTips" not in body or inherited_tips):
+            original = ".. MakerOriginalExtraHoverTips, " if inherited_tips else ""
+            L.append(f"    protected override IEnumerable<IHoverTip> ExtraHoverTips => [{original}{', '.join(tips)}];")
         cost_delta = int(item.get("upgrade_cost", item["cost"])) - int(item["cost"])
         add_kw = item.get("upgrade_add_keyword") if item.get("upgrade_add_keyword") not in item.get("keywords", []) else ""
         L += [""] + _indent(_fix_upgrade(cl.get("upgrade_body", ""), item, cost_delta, add_kw))
@@ -1662,7 +1921,7 @@ def gen_card(project, card):
         lines.append("    public override bool GainsBlock => true;")
     cv = _canonical_vars(project, card, "card")
     lines.append(f"    protected override IEnumerable<DynamicVar> CanonicalVars => [{', '.join(cv)}];")
-    tips = gimmick.card_tips(project, card) + _hover_tips(project, card)
+    tips = list(dict.fromkeys(gimmick.card_tips(project, card) + _hover_tips(project, card)))
     rm = gimmick._res_meta(project, card)
     if rm and f"HoverTipFactory.FromPower<{rm['cls']}>()" not in tips:
         tips.append(f"HoverTipFactory.FromPower<{rm['cls']}>()")
@@ -1687,6 +1946,7 @@ def gen_card(project, card):
             lines.append(f'        DynamicVars["{VAR_NAME[e["kind"]]}"].UpgradeValueBy({u}m);')
         elif e["kind"] == "power":
             lines.append(f'        DynamicVars["{power_meta(project, e["power"])["var"]}"].UpgradeValueBy({u}m);')
+    lines.extend("        " + line for line in block_damage_upgrades(card))
     dc = 0 if card.get("x_cost") else int(card["upgrade_cost"]) - int(card["cost"])
     if dc:
         lines.append(f"        EnergyCost.UpgradeBy({dc});")
@@ -1701,9 +1961,7 @@ def gen_card(project, card):
         blocks = card.get("event_blocks", {}).get(event)
         if not blocks:
             continue
-        ctx = _Ctx("card", card)
-        ctx.single = ctx.other = None
-        ctx.play = "null"
+        ctx = card_event_context(card, event)
         statements, errors = blockcode.compile_blocks(blocks, project, ctx, prefix=pascal(card["id"])+event)
         if errors:
             raise ValueError(f"{card['id']} {event}: " + ", ".join(errors))
@@ -2994,6 +3252,18 @@ def gen_localization(project, lang, extras=None):
             d[f"{lid}.{k}"] = v.replace("{name}", name)
         files["ancients"].update(architect_loc(ch, lid, lang))
     gimmick.localization(project, lang, files, extras or [])
+    for kind in ("fx", "button"):
+        for row in project.get("gimmicks", {}).get(DESCRIPTION_GROUPS[kind][0], []):
+            key = _description_tip_key(project, kind, row["id"])
+            files["static_hover_tips"][key + ".title"] = description_gimmick_name(row, kind, lang)
+            detail = text(row, "tip" if kind == "button" else "desc", lang)
+            if not detail and kind == "button":
+                import blockcode
+                detail = blockcode.describe(row.get("blocks", []), project, "button", lang)
+            if not detail:
+                detail = {"ko": "시각 효과입니다.", "zh": "视觉效果。"}.get(lang, "Visual effect.") if kind == "fx" else {"ko": "버튼을 눌러 효과를 실행합니다.", "zh": "点击按钮发动效果。"}.get(lang, "Press the button to activate its effect.")
+            files["static_hover_tips"][key + ".description"] = resolve_description_references(detail, project, lang)
+
     base = takeover_loc(project, lang)
     if base is not None:      # 통째로 가져온 모드: 원래 번역(캐릭터·몬스터·이벤트 등)을 바탕에 깔고 내 항목 번역을 덮어쓴다
         for name, data in files.items():

@@ -439,11 +439,16 @@ def _runs(s):
             runs.append((s[pos:m.start()], list(stack)))
         if m.group(1):
             for i in range(len(stack) - 1, -1, -1):
-                if stack[i] == m.group(2):
+                if stack[i].split("=", 1)[0] == m.group(2):
                     del stack[i]
                     break
         else:
-            stack.append(m.group(2))
+            tag = m.group(2)
+            if tag == "color":
+                match = re.search(r"=\s*(#[a-fA-F0-9]{6})\]$", m.group(0))
+                if match:
+                    tag += "=" + match[1]
+            stack.append(tag)
         pos = m.end()
     if pos < len(s):
         runs.append((s[pos:], list(stack)))
@@ -465,7 +470,9 @@ def draw_rich(cv, assets, text, rect, font_key, max_size, min_size, color, line_
         for txt, tags in runs:
             col = color
             for t in tags:
-                if t in COLORS:
+                if t.startswith("color="):
+                    col = _hex(t.split("=", 1)[1])
+                elif t in COLORS:
                     col = COLORS[t]
             f = bold if "b" in tags else font
             if "energy" in tags:

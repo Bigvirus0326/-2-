@@ -158,8 +158,8 @@ def item_sources(assets):
 
 
 class CardLibrary(ttk.Frame):
-    def __init__(self, app, resolve_paths, game_module):
-        super().__init__(app.card_tab.item_panes)
+    def __init__(self, app, resolve_paths, game_module, parent=None):
+        super().__init__(parent or app.card_tab.item_panes)
         self.app, self.resolve_paths, self.game_module = app, resolve_paths, game_module
         self.reader = ThreadPoolExecutor(max_workers=1)
         self.reading = False
