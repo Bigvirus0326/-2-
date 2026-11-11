@@ -20,7 +20,10 @@
 
 ## 단계
 
-### 0. 준비 (커밋 · 브랜치)
+### 0. 준비 (커밋 · 브랜치) — 완료
+- 기준 커밋: `main` 65c5182 (Tk 앱 최근 작업 묶음). 작업 브랜치: `qt-migration` 29d2460 (Qt 시험판 파일).
+- `requirements-optional.txt`에 `PySide6>=6.12` 추가.
+- PyInstaller 6.22.3로 최소 Qt 창을 빌드했다: 실행 파일은 오프스크린에서 정상 종료, `qwindows.dll` 포함 확인. 빌드 결과 크기 123 MB (onedir).
 - 지금 작업 폴더에 커밋되지 않은 변경이 49개 있다. 먼저 의미 단위로 커밋하거나 백업해서 기준점을 정한다.
 - `qt-migration` 브랜치를 만든다. 큰 변경은 이 브랜치에서 한다.
 - `requirements-optional.txt`에 PySide6를 추가하고, 빌드(PyInstaller)에서 Qt 플러그인이 들어가는지 확인한다.
