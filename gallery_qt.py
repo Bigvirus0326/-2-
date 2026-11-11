@@ -1,13 +1,13 @@
-"""'도감' 탭의 Qt 뼈대. 필터·크기·칸 배치·클릭해서 편집 화면으로 가기는 Tk 와 같다.
+"""'도감' 탭의 Qt 版. 필터·크기·언어·칸 배치·클릭해서 편집 화면으로 가기는 Tk 와 같다.
 
-아직 옮기지 않은 것: 칸 안의 그림. Tk 에서는 preview.py(캔버스 그리기 644줄)가 그린다.
-그 그리기 부분을 QPainter 로 옮기기 전까지는 이름과 번호만 적은 칸을 그린다 (draw_tile 을 바꾸면 된다).
+칸 그림은 preview_qt.render_item 이 그린다. 아직 없는 것: '게임 화면' 그림 방식(Tk 의 pv_mode=game).
 """
 from PySide6.QtCore import QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QHBoxLayout, QRadioButton, QScrollArea, QVBoxLayout,
-                               QWidget)
+from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QRadioButton, QScrollArea,
+                               QVBoxLayout, QWidget)
 
+import preview_qt as PQ
 import qtkit as Q
 
 SIZES = [("small", "작게", 0.5), ("medium", "보통", 0.65), ("large", "크게", 0.85)]
@@ -16,21 +16,6 @@ FILTERS = [("all", "전체"), ("card", "카드"), ("relic", "유물"), ("potion"
 SECTIONS = [("card", "cards", "카드", 420), ("relic", "relics", "유물", 400),
             ("potion", "potions", "물약", 400), ("power", "powers", "파워", 400)]
 GAP, PAD = 14, 16
-
-
-def draw_tile(painter, rect, item):
-    """칸 하나 그리기 (자리 표시: 어두운 바탕, 이름, 번호)."""
-    painter.setPen(QPen(QColor("#3a3f4b")))
-    painter.setBrush(QColor("#1d2027"))
-    painter.drawRoundedRect(rect, 10, 10)
-    painter.setPen(QColor("#e8e2d0"))
-    painter.setFont(QFont(Q.FONT, 10, QFont.Weight.Bold))
-    painter.drawText(rect.adjusted(8, 8, -8, -8), int(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter),
-                     str(item.get("name_ko") or item.get("id", "")))
-    painter.setPen(QColor("#777777"))
-    painter.setFont(QFont("Consolas", 8))
-    painter.drawText(QRect(rect.left(), rect.bottom() + 2, rect.width(), 16),
-                     int(Qt.AlignmentFlag.AlignHCenter), str(item.get("id", "")))
 
 
 class _Grid(QWidget):
@@ -50,8 +35,8 @@ class _Grid(QWidget):
         painter.setFont(QFont(Q.FONT, 13, QFont.Weight.Bold))
         for x, y, text in self.titles:
             painter.drawText(x, y, text)
-        for rect, _kind, _index, item in self.tiles:
-            draw_tile(painter, rect, item)
+        for rect, kind, _index, item in self.tiles:
+            self.owner.draw_tile(painter, rect, kind, item)
         painter.end()
 
     def mouseReleaseEvent(self, event):
@@ -71,6 +56,8 @@ class GalleryQt(QWidget):
         self.scale_ui = scale_ui
         self._filter = "all"
         self._size = "medium"
+        self.lang = "ko"
+        self.upgraded = False
 
         root = QVBoxLayout(self)
         bar = QHBoxLayout()
@@ -88,6 +75,15 @@ class GalleryQt(QWidget):
         self.size_box.setCurrentIndex(1)
         self.size_box.currentIndexChanged.connect(lambda _i: self.set_size(self.size_box.currentData()))
         bar.addWidget(self.size_box)
+        bar.addSpacing(12)
+        self.lang_box = QComboBox()
+        for val, label in (("ko", "한국어"), ("en", "English"), ("zh", "简体中文")):
+            self.lang_box.addItem(label, val)
+        self.lang_box.currentIndexChanged.connect(lambda _i: self.set_lang(self.lang_box.currentData()))
+        bar.addWidget(self.lang_box)
+        upgraded = QCheckBox("카드 강화(+)")
+        upgraded.toggled.connect(self.set_upgraded)
+        bar.addWidget(upgraded)
         bar.addStretch(1)
         root.addLayout(bar)
 
@@ -114,9 +110,31 @@ class GalleryQt(QWidget):
         self._size = value
         self.refresh()
 
+    def set_lang(self, value):
+        self.lang = value
+        self.grid.update()
+
+    def set_upgraded(self, value):
+        self.upgraded = bool(value)
+        self.grid.update()
+
     def _scale(self):
         base = {v: s for v, _l, s in SIZES}.get(self._size, 0.65)
         return base * self.scale_ui
+
+    def draw_tile(self, painter, rect, kind, item):
+        """칸 하나: 미리보기 그림 + 아래에 번호. 그리기에 실패하면 오류 글만 쓴다 (나머지 칸은 계속 그린다)."""
+        try:
+            PQ.render_item(painter, self.project, kind, item, rect.x(), rect.y(), self._scale(),
+                           self.lang, self.upgraded, stacks=3)
+        except Exception as e:  # noqa: BLE001
+            painter.setPen(QColor("#ff6666"))
+            painter.setFont(QFont(Q.FONT, 9))
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter) | int(Qt.TextFlag.TextWordWrap), f"오류: {e}")
+        painter.setPen(QColor("#777777"))
+        painter.setFont(QFont("Consolas", 8))
+        painter.drawText(QRect(rect.left(), rect.bottom() + 2, rect.width(), 16),
+                         int(Qt.AlignmentFlag.AlignHCenter), str(item.get("id", "")))
 
     # ---- 배치 ----
     def compute(self, width):

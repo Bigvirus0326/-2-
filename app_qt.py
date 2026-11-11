@@ -7,11 +7,14 @@
 import json
 import os
 import sys
+import threading
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox
+from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QLabel, QMessageBox,
+                               QPlainTextEdit)
 
+import buildrun as BR
 import modgen as M
 import projectio as IO
 import qtkit as Q
@@ -36,6 +39,8 @@ def _placeholder(title):
 
 
 class QtApp(Q.DockWorkspace):
+    log_line = Signal(str)   # 빌드 스레드에서 보낸 줄을 화면 스레드에서 받는다
+
     def __init__(self, settings=None, parent=None):
         super().__init__(parent)
         self.settings = settings if settings is not None else IO.load_settings()
@@ -50,8 +55,18 @@ class QtApp(Q.DockWorkspace):
         self._snap_timer.setInterval(SNAPSHOT_DELAY_MS)
         self._snap_timer.timeout.connect(self.commit_snapshot)
 
-        pending = "아직 Qt 앱에서는 지원하지 않습니다. 이 단계는 Tk 앱(sts2_mod_maker.py)에서 실행하세요."
-        actions = [lambda: self.status(pending)] * 4
+        self.busy = False
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(3000)
+        self.log_dock = QDockWidget("실행 기록", self)
+        self.log_dock.setObjectName("실행 기록")
+        self.log_dock.setWidget(self.log_view)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
+        self.log_line.connect(self._append_log)
+
+        actions = [self.do_validate, lambda: self.do_generate(), lambda: self.do_build(False),
+                   lambda: self.do_build(True)]
         self.mod_page = ModTabQt(self.project["mod"], self.settings, actions=actions,
                                  on_settings_change=self._settings_changed, on_mod_change=self._mod_changed)
         page = Q.ScrollPage()
@@ -183,6 +198,80 @@ class QtApp(Q.DockWorkspace):
             self._restoring = False
         self._update_undo_actions()
         self.status(msg)
+
+    # ---- 모드 / 빌드 ----
+    def log(self, msg):
+        """어느 스레드에서 불러도 된다: 실제 쓰기는 화면 스레드에서 한다."""
+        self.log_line.emit(str(msg))
+
+    def _append_log(self, msg):
+        self.log_view.appendPlainText(msg.rstrip())
+
+    def do_validate(self):
+        errors, warnings = BR.validate(self.project)
+        for w in warnings:
+            self.log("[경고] " + w)
+        for e in errors:
+            self.log("[오류] " + e)
+        if errors or warnings:
+            text = "\n".join((["오류:"] + errors if errors else []) + (["경고:"] + warnings if warnings else []))
+            (QMessageBox.warning if errors else QMessageBox.information)(self, IO.APP_TITLE, text)
+        if errors:
+            return False
+        self.log(f"검사 통과 (경고 {len(warnings)}개).")
+        if not warnings:
+            QMessageBox.information(self, IO.APP_TITLE, "문제가 없습니다.")
+        return True
+
+    def do_generate(self, quiet=False):
+        if self.busy:
+            if not quiet:
+                QMessageBox.information(self, IO.APP_TITLE, "빌드 중에는 프로젝트를 다시 생성할 수 없습니다.")
+            return None
+        errors, _ = BR.validate(self.project)
+        if errors:
+            self.do_validate()
+            return None
+        try:
+            root = BR.generate(self.project, self.settings, log=self.log)
+        except Exception as e:  # noqa: BLE001 - 사용자에게 그대로 보여 준다
+            self.log(f"[오류] 생성 실패: {e}")
+            QMessageBox.critical(self, IO.APP_TITLE, f"생성 실패:\n{e}")
+            return None
+        if not quiet:
+            QMessageBox.information(self, IO.APP_TITLE, f"프로젝트를 만들었습니다:\n{root}")
+        return root
+
+    def do_build(self, publish):
+        if self.busy:
+            QMessageBox.information(self, IO.APP_TITLE, "이미 빌드 중입니다.")
+            return
+        problem = BR.check_build_prereqs(self.settings, publish)
+        if problem:
+            QMessageBox.critical(self, IO.APP_TITLE, problem)
+            return
+        root = self.do_generate(quiet=True)
+        if not root:
+            return
+        sts2_path = self.settings.get("sts2_path", "")
+        mod_id = self.project["mod"]["id"]
+        cmd = BR.build_command(publish, sts2_path)
+        self.busy = True
+        self.log(f"$ {' '.join(cmd)}   (폴더: {root})")
+
+        def run():
+            try:
+                code = BR.run_build(cmd, root, self.log)
+                if code == 0:
+                    self.log(f"✔ {'게시' if publish else '빌드'} 성공! → {os.path.join(sts2_path, 'mods', mod_id)}")
+                    if not publish:
+                        self.log("  (그림·텍스트가 들어 있는 .pck는 ④ 게시에서 만들어집니다.)")
+                else:
+                    self.log(f"✘ 실패 (종료 코드 {code}). 위 로그의 error 줄을 확인하세요.")
+            finally:
+                self.busy = False
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ---- 파일 ----
     def confirm_discard(self):
