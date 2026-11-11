@@ -131,7 +131,10 @@ IMAGES = ImageCache()
 def fill_values(project, desc, item, upgraded=False, stacks=3):
     """{변수} 자리를 숫자로 바꾸고 BBCode는 남긴다."""
     values, ups = {"Amount": stacks}, {}
-    for e in item.get("effects", []):
+    effect_groups = [(e, "") for e in item.get("effects", [])]
+    if item.get("separate_upgrade_effect"):
+        effect_groups += [(e, "MakerUp") for e in M.upgrade_effects(item)]
+    for e, prefix in effect_groups:
         if e["kind"] == "power":
             pm = M.power_meta(project, e["power"])
             name = pm["var"] if pm else ""
@@ -139,11 +142,12 @@ def fill_values(project, desc, item, upgraded=False, stacks=3):
             name = M.VAR_NAME.get(e["kind"], "")
         if not name:
             continue
+        name = prefix + name
         up = int(e.get("upgrade", 0) or 0)
         values[name] = int(e.get("amount", 0) or 0) + (up if upgraded else 0)
         ups[name] = up
 
-    for _, name, amount in M.block_damage_vars(item):
+    for _, name, amount in M.block_number_vars(item):
         up = amount.get("up") or 0
         values[name] = amount.get("v", 0) + (up if upgraded else 0)
         ups[name] = up
@@ -438,8 +442,12 @@ def render_card(canvas, project, card, x=0, y=0, s=1.0, lang="ko", upgraded=Fals
                        font=_font(max(7, int(S(14))), True), tags=tags)
     # 종류
     tlabel = M.label_of(M.CARD_TYPES, ctype) if lang == "ko" else ctype
+    import cardkind
+    custom_kind = cardkind.definition(project, card)
     if lang == "zh":
-        tlabel = {"Attack": "攻击", "Skill": "技能", "Power": "能力"}.get(ctype, ctype)
+        tlabel = {"Attack": "攻击", "Skill": "技能", "Power": "能力", "Curse": "诅咒", "Status": "状态", "Quest": "任务"}.get(ctype, ctype)
+    if custom_kind:
+        tlabel = M.text(custom_kind, "name", lang)
     rounded_rect(canvas, x + S(112), y + S(246), x + S(188), y + S(270), S(10), fill="#1b1b22", outline=border,
                  width=1, tags=tags)
     canvas.create_text(x + S(150), y + S(258), text=tlabel, fill="#d9d2c0", font=_font(max(6, int(S(9)))), tags=tags)
@@ -459,6 +467,8 @@ def render_card(canvas, project, card, x=0, y=0, s=1.0, lang="ko", upgraded=Fals
         hgt = draw_rich(canvas, 0, 0, width, full, size, measure_only=True)
     draw_rich(canvas, (px1 + px2) / 2, py1 + max(S(4), (py2 - py1 - hgt) / 2), width, full, size, tags=tags)
     # 비용
+    if card.get("no_cost"):
+        return CARD_W * s, CARD_H * s
     cost = "X" if card.get("x_cost") else int(card.get("upgrade_cost" if upgraded else "cost", 0) or 0)
     ox, oy, r = x + S(32), y + S(34), S(24)
     canvas.create_oval(ox - r - S(3), oy - r - S(3), ox + r + S(3), oy + r + S(3), fill="#111", outline="", tags=tags)

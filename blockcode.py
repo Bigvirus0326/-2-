@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import copy
+import blockfamilies as F
 
 # ---------------------------------------------------------------------------
 # 블록 정의 (팔레트와 화면이 같이 쓴다)
@@ -81,7 +82,7 @@ SPECS = {
                           "args": {"power": ("code", "powerModel"), "creature": ("code", "target"),
                                    "amount": ("value", {"t": "num", "v": 1}), "applier": ("code", "Owner.Creature"),
                                    "source": ("code", "this")}},
-    "block_to": {"cat": "action", "ko": "생물 {creature}에게 방어도 {amount} · 힘 적용 {powered}",
+    "block_to": {"cat": "action", "ko": "생물 {creature}에게 방어도 {amount} · 상태 효과 보정 {powered}",
                  "args": {"creature": ("code", "target"), "amount": ("value", {"t": "num", "v": 5}),
                           "powered": ("bool", True), "card_play": ("bool", True)}},
     "damage_to": {"cat": "action", "ko": "생물 {creature}에게 피해 {amount} · 힘 적용 {powered} · 방어도 무시 {unblockable}",
@@ -109,7 +110,7 @@ SPECS = {
                  "args": {"card": ("card", "this"), "count": ("value", {"t": "num", "v": 1}), "pile": ("pile", "Hand")}},
     "card_exhaust": {"cat": "card", "ko": "카드 {card} 소멸 · 사용 중 {played} · 다른 효과 발동 {triggered}",
                      "args": {"card": ("code", "cardModel"), "played": ("bool", False), "triggered": ("bool", False)}},
-    "card_upgrade": {"cat": "card", "ko": "카드 {card} 강화 · 미리보기 방식 {style}",
+    "card_upgrade": {"cat": "card", "ko": "카드 {card} 강화 · 강화 후 카드 표시 {style}",
                      "args": {"card": ("code", "cardModel"), "style": ("code", "")}},
     "card_autoplay": {"cat": "card", "ko": "카드 {card} 자동 사용 · 대상 {target} · 종류 {type} · X 저장 {skip_x} · 연출 생략 {skip_visuals}",
                       "args": {"card": ("code", "cardModel"), "target": ("code", "target"),
@@ -128,10 +129,10 @@ SPECS = {
     "card_add_generated_many": {"cat": "card", "ko": "생성 카드 목록 {cards}를 {pile}에 추가 · 플레이어 {player} · 위치 {position}",
                                 "args": {"cards": ("code", "cards"), "pile": ("code", "PileType.Hand"),
                                          "player": ("code", "Owner"), "position": ("code", "CardPilePosition.Random")}},
-    "card_preview": {"cat": "card", "ko": "카드 미리보기 {cards} · 크기 {scale} · 방식 {style}",
+    "card_preview": {"cat": "card", "ko": "게임에서 카드 {cards} 보여주기 · 표시 시간 {scale}초 · 배치 {style}",
                      "args": {"cards": ("code", "cards"), "scale": ("value", {"t": "num", "v": 1}),
-                              "style": ("code", "CardPreviewStyle.Default")}},
-    "card_preview_cards": {"cat": "card", "ko": "카드 {cards} 미리보기 · 크기 {scale}",
+                              "style": ("code", "")}},
+    "card_preview_cards": {"cat": "card", "ko": "게임에서 카드 {cards} 보여주기 · 표시 시간 {scale}초",
                             "args": {"cards": ("code", "cardModel"), "scale": ("code", "")}},
     "draw_to": {"cat": "card", "ko": "플레이어 {player} 카드 {amount}장 뽑기",
                 "args": {"player": ("code", "Owner"), "amount": ("value", {"t": "num", "v": 1})}},
@@ -157,9 +158,9 @@ SPECS = {
                              "args": {"card": ("code", "cardModel")}},
     "card_notify_cost_changed": {"cat": "card", "ko": "카드 {card} 비용 변경 알림",
                                   "args": {"card": ("code", "cardModel")}},
-    "card_upgrade_internal": {"cat": "card", "ko": "카드 {card} 내부 강화 적용",
+    "card_upgrade_internal": {"cat": "card", "ko": "카드 {card} 강화 수치 적용 (직접 처리용)",
                                "args": {"card": ("code", "cardModel")}},
-    "card_finalize_upgrade_internal": {"cat": "card", "ko": "카드 {card} 내부 강화 완료",
+    "card_finalize_upgrade_internal": {"cat": "card", "ko": "카드 {card} 강화 처리 마무리 (직접 처리용)",
                                         "args": {"card": ("code", "cardModel")}},
     "card_transform_to": {"cat": "card", "ko": "카드 {card}를 카드 종류 {card_type}로 변환",
                           "args": {"card": ("code", "cardModel"), "card_type": ("code", "Strike")}},
@@ -191,40 +192,69 @@ SPECS = {
     "repeat": {"cat": "flow", "ko": "{times}번 반복", "args": {"times": ("value", {"t": "num", "v": 2})}, "body": True},
     "each_enemy": {"cat": "flow", "ko": "모든 적 각각에게 (안에서 '그 적')", "args": {}, "body": True},
     "random_enemy": {"cat": "flow", "ko": "무작위 적 1명에게 (안에서 '그 적')", "args": {}, "body": True},
+    "filtered_enemies": {"cat": "flow", "ko": "{enemy_filter} · 파워 {power} · 기준 {limit} · 여러 조건 {conditions} · {enemy_mode} {count}명 (안에서 '그 적/플레이어')", "args": {
+        "enemy_filter": ("enemy_filter", "power"), "power": ("power", "Weak"),
+        "limit": ("value", {"t": "num", "v": 30}), "enemy_mode": ("enemy_mode", "random"),
+        "count": ("value", {"t": "num", "v": 2}), "conditions": ("cond", {"t":"group", "mode":"all", "items":[]})}, "body": True},
+    "filtered_players": {"cat":"flow", "ko":"플레이어 중 {conditions} · {enemy_mode} 최대 {count}명 (안에서 '그 적/플레이어')",
+        "args":{"conditions":("cond",{"t":"group","mode":"all","items":[]}), "enemy_mode":("enemy_mode","all"),
+                "count":("value",{"t":"num","v":1})}, "body":True},
+    "edit_var": {"cat": "var", "ko": "변수 {name}을 {amount} {edit_mode}",
+                 "args": {"name": ("varname", "a"), "amount": ("value", {"t": "num", "v": 1}), "edit_mode": ("number_edit", "add")}},
     "set_var": {"cat": "var", "ko": "변수 {name} 을(를) {amount}(으)로 정하기",
                 "args": {"name": ("varname", "a"), "amount": ("value", {"t": "num", "v": 0})}},
     "change_var": {"cat": "var", "ko": "변수 {name} 에 {amount} 더하기",
                    "args": {"name": ("varname", "a"), "amount": ("value", {"t": "num", "v": 1})}},
     # ---- 카드 인스턴스 상태 (같은 카드가 여러 장이어도 한 장마다 따로) ----
-    "card_state_set": {"cat": "card", "ko": "카드 {card}의 개별 상태 {key} 을(를) {amount}(으)로 정하기",
+    "card_state_edit": {"cat": "card", "ko": "{card}의 저장 값 {key}를 {amount} {edit_mode}",
+                        "args": {"card": ("card_ref", "this"), "key": ("varname", "count"),
+                                 "amount": ("value", {"t": "num", "v": 1}), "edit_mode": ("number_edit", "add")}},
+    "card_state_set": {"cat": "card", "ko": "카드 {card}의 저장 값 {key} 을(를) {amount}(으)로 정하기",
                        "args": {"card": ("card_ref", "this"), "key": ("varname", "count"),
                                 "amount": ("value", {"t": "num", "v": 0})}},
-    "card_state_change": {"cat": "card", "ko": "카드 {card}의 개별 상태 {key} 에 {amount} 더하기",
+    "card_state_change": {"cat": "card", "ko": "카드 {card}의 저장 값 {key} 에 {amount} 더하기",
                           "args": {"card": ("card_ref", "this"), "key": ("varname", "count"),
                                    "amount": ("value", {"t": "num", "v": 1})}},
-    "card_var_new": {"cat": "card", "ko": "카드 {card}에 새 변수 {key} 만들기 · 처음 값 {amount} · 복제되면 {on_clone} · 전투가 끝나면 {on_end}",
+    "card_var_new": {"cat": "card", "ko": "카드 {card}에 저장 값 {key} 만들기 · 처음 값 {amount} · 카드 복사 시 {on_clone} · 전투 종료 시 {on_end}",
                      "args": {"card": ("card_ref", "this"), "key": ("varname", "count"),
                               "amount": ("value", {"t": "num", "v": 0}),
                               "on_clone": ("clone_policy", "copy"), "on_end": ("end_policy", "drop")}},
-    "card_var_remove": {"cat": "card", "ko": "카드 {card}의 변수 {key} 지우기",
+    "card_var_remove": {"cat": "card", "ko": "카드 {card}의 저장 값 {key} 지우기",
                         "args": {"card": ("card_ref", "this"), "key": ("varname", "count")}},
+    "aura_power_amount": {"cat":"card", "ko":"이 카드가 {active_pile}에 있는 동안 {target_pile}의 다른 {filter}가 부여하는 {power_filter} 중첩 {amount}만큼 변경",
+                          "args":{"active_pile":("aura_pile","Hand"),"target_pile":("aura_target_pile","Any"),"filter":("aura_filter","Any"),"power_filter":("aura_power_filter","Any"),"amount":("value",{"t":"num","v":2})}},
+    "aura_card_effect": {"cat":"card", "ko":"이 카드가 {active_pile}에 있을 때 {target_pile}의 다른 {filter}를 사용하면 추가 효과 실행",
+                         "args":{"active_pile":("aura_pile","Hand"),"target_pile":("aura_target_pile","Any"),"filter":("aura_filter","Any")},"body":True},
+    "hand_aura_stat": {"cat": "card", "ko": "이 카드가 {active_pile}에 있는 동안 {target_pile}의 다른 {filter}의 {stat} {amount}만큼 변경",
+                       "args": {"active_pile": ("aura_pile", "Hand"), "target_pile": ("aura_target_pile", "Any"), "filter": ("aura_filter", "Any"), "stat": ("aura_stat", "cost"),
+                                "amount": ("value", {"t": "num", "v": -1})}},
+    "card_number_edit": {"cat": "card", "ko": "{card}의 {stat}을 {amount} {edit_mode} · {duration}",
+                         "args": {"card": ("card_ref", "picked"), "stat": ("card_stat", "cost"),
+                                  "amount": ("value", {"t": "num", "v": -1}), "edit_mode": ("number_edit", "add"),
+                                  "duration": ("cost_duration", "combat")}},
+    "card_cost_edit": {"cat": "card", "ko": "{card}의 비용을 {amount} {edit_mode} · {cost_duration}",
+                       "args": {"card": ("card_ref", "picked"), "amount": ("value", {"t": "num", "v": -1}),
+                                "edit_mode": ("number_edit", "add"), "cost_duration": ("cost_duration", "combat")}},
+    "card_damage_edit": {"cat": "card", "ko": "{card}의 피해량을 {amount} {edit_mode} (이번 전투 · 모든 피해 수치)",
+                         "args": {"card": ("card_ref", "picked"), "amount": ("value", {"t": "num", "v": 3}),
+                                  "edit_mode": ("number_edit", "add")}},
     "card_do": {"cat": "card", "ko": "카드 {card}: {action}",
-                "args": {"card": ("card_ref", "this"), "action": ("pick_action", "bottom")}},
+                "args": {"card": ("card_ref", "this"), "action": ("pick_action", "draw_at")}},
     "card_ref_keyword": {"cat": "card", "ko": "카드 {card}에 키워드 {keyword} {action}",
                          "args": {"card": ("card_ref", "this"), "keyword": ("keyword", "Retain"),
                                   "action": ("kw_action", "add")}},
     "card_tag": {"cat": "gimmick", "ko": "카드 {card}에 기믹 태그 {tag} {action} (그 한 장만)",
                  "args": {"card": ("card_ref", "this"), "tag": ("gtag", ""), "action": ("kw_action", "add")}},
-    "card_enchant": {"cat": "card", "ko": "카드 {card}에 인챈트 {enchant} {amount} 부여",
+    "card_enchant": {"cat": "card", "ko": "카드 {card}에 추가 능력 (인챈트) {enchant} {amount} 부여",
                      "args": {"card": ("card_ref", "this"), "enchant": ("enchant", "Inky"),
                               "amount": ("value", {"t": "num", "v": 1})}},
-    "card_enchant_clear": {"cat": "card", "ko": "카드 {card}의 인챈트 없애기",
+    "card_enchant_clear": {"cat": "card", "ko": "카드 {card}의 추가 능력 (인챈트) 없애기",
                            "args": {"card": ("card_ref", "this")}},
-    "add_card_pos": {"cat": "card", "ko": "{card} {count}장을 뽑을 카드 더미 {pos}에 넣기",
+    "add_card_pos": {"cat": "card", "ko": "{card} {count}장을 뽑을 카드 더미 {pos}번째에 넣기 (1=맨 위 · -1=맨 아래 · 0=무작위)",
                      "args": {"card": ("card", "this"), "count": ("value", {"t": "num", "v": 1}),
-                              "pos": ("draw_pos", "Bottom")}},
-    "draw_bottom": {"cat": "card", "ko": "뽑을 카드 더미 맨 아래에서 {count}장 뽑기",
-                    "args": {"count": ("value", {"t": "num", "v": 1})}},
+                              "pos": ("value", {"t": "num", "v": -1})}},
+    "draw_bottom": {"cat": "card", "ko": "뽑을 카드 더미 {pos}번째 카드부터 {count}장 뽑기 (1=맨 위 · -1=맨 아래)",
+                    "args": {"pos": ("value", {"t": "num", "v": -1}), "count": ("value", {"t": "num", "v": 1})}},
     # ---- 기믹 ----
     "summon": {"cat": "gimmick", "ko": "{summon} 소환 (있으면 단계 상승)", "args": {"summon": ("summon", "")}},
     "command": {"cat": "gimmick", "ko": "{summon} 지금 행동시키기 (지휘)", "args": {"summon": ("summon_any", "*")}},
@@ -241,7 +271,10 @@ SPECS = {
                     "args":{"name":("shared_name",""), "first":("value",{"t":"num","v":1}), "second":("value",{"t":"num","v":1})}},
     "pick_each": {"cat": "gimmick", "ko": "{pile}에서 {ctype} {count}장 골라 한 장마다 실행",
                   "args": {"pile": ("pick_pile", "Hand"), "ctype": ("card_filter", "Any"),
-                           "count": ("value", {"t": "num", "v": 1})}, "body": True},
+                           "count": ("value", {"t": "num", "v": 1}), "conditions": ("cond", {"t":"group","mode":"all","items":[]})}, "body": True},
+    "random_each": {"cat": "gimmick", "ko": "{pile}에서 {ctype} 무작위 {count}장을 골라 한 장마다 실행",
+                    "args": {"pile": ("pick_pile", "Hand"), "ctype": ("card_filter", "Any"),
+                             "count": ("value", {"t": "num", "v": 1}), "conditions": ("cond", {"t":"group","mode":"all","items":[]})}, "body": True},
     "picked_action": {"cat": "gimmick", "ko": "고른 카드에 실행: {action}",
                       "args": {"action": ("pick_action", "upgrade")}},
     "random_transform": {"cat": "gimmick", "body": True, "ko": "{pile}의 {ctype} 중 무작위 {count}장을 {result_pool}의 {result_filter} 중 한 장으로 변화",
@@ -278,6 +311,7 @@ SPECS = {
     "pet_kill": {"cat": "class", "ko": "동료 {pet} 희생 (쓰러뜨리기)", "args": {"pet": ("pet", "")}},
     # ---- 이펙트 · 버튼 ----
     "fx": {"cat": "fx", "ko": "이펙트 {fx} 를 {who} 위치에 재생", "args": {"fx": ("fx", ""), "who": ("who_multi", "self")}},
+    "button_switch": {"cat": "fx", "ko": "버튼 {button} {switch}", "args": {"button": ("button", ""), "switch": ("switch_state", "on")}},
     "button_on": {"cat": "fx", "ko": "버튼 {button} 켜기", "args": {"button": ("button", "")}},
     "button_off": {"cat": "fx", "ko": "버튼 {button} 끄기", "args": {"button": ("button", "")}},
     "sfx": {"cat": "fx", "ko": "소리 {path} 재생 · 음량 {volume}",
@@ -376,11 +410,11 @@ PALETTE = [
                "draw_to", "shuffle_draw_pile", "autoplay_draw_pile", "potion_add_type", "potion_add_model", "potion_add_model_at", "potion_discard",
                "card_set_cost_until_played", "card_free_this_turn", "card_notify_cost_changed", "card_upgrade_internal",
                "card_finalize_upgrade_internal", "card_transform_to", "keyword_this", "keyword_cards",
-               "card_state_set", "card_state_change", "card_var_new", "card_var_remove", "card_do",
+               "card_state_edit", "card_var_new", "card_var_remove", "card_number_edit", "hand_aura_stat", "aura_power_amount", "aura_card_effect", "card_do",
                "card_ref_keyword", "card_enchant", "card_enchant_clear", "add_card_pos", "draw_bottom"]),
-    ("flow", ["shared_call", "if", "if_else", "repeat", "each_enemy", "random_enemy", "wait", "wait_scaled"]),
-    ("var", ["set_var", "change_var"]),
-    ("gimmick", ["pay", "summon", "command", "unsummon", "choice", "pick", "random_transform", "pick_transform", "pick_each", "picked_action", "card_tag", "delayed"]),
+    ("flow", ["shared_call", "if", "if_else", "repeat", "each_enemy", "random_enemy", "filtered_players", "wait", "wait_scaled"]),
+    ("var", ["edit_var"]),
+    ("gimmick", ["pay", "summon", "command", "unsummon", "choice", "pick", "random_transform", "pick_transform", "pick_each", "random_each", "picked_action", "card_tag", "delayed"]),
     ("class", ["channel", "orb_channel_model", "orb_channel_type", "orb_passive_model", "evoke", "orb_passive_all", "orb_slots", "orb_slots_to", "orb_grow", "stars", "forge",
                "osty_summon", "osty_attack", "osty_kill", "pet_summon", "pet_attack", "pet_act", "pet_kill", "add_pet_model"]),
     ("mod_api", ["kotodama_gain", "manosaba_ema_summon", "manosaba_novel_summon", "manosaba_ignite", "manosaba_attach_combust",
@@ -392,24 +426,87 @@ PALETTE = [
                  "manosaba_owner_attack_anim", "manosaba_show_button", "manosaba_power_duplicate_callback",
                  "manosaba_pet_ai_assign", "manosaba_pet_ai_advance", "manosaba_toggle_creature_node",
                  "manosaba_dying_message_upgrade", "manosaba_run_side_turn_effect"]),
-    ("fx", ["fx", "button_on", "button_off", "sfx", "play_vfx_on_creature"]),
+    ("fx", ["fx", "button_switch", "sfx", "play_vfx_on_creature"]),
 ]
+PALETTE = [(cat,[op for op in ops if op != "picked_action"]) for cat,ops in F.install(SPECS, PALETTE)]
+
 BODY_KEYS = ("body", "else", "third")
 PICK_PILES = [("Hand", "손패"), ("Draw", "뽑을 카드 더미"), ("Discard", "버린 카드 더미"), ("Exhaust", "소멸한 카드 더미")]
-PICK_ACTIONS = [("hand", "손으로 가져오기"), ("top", "뽑을 더미 맨 위에 놓기"), ("exhaust", "소멸"), ("discard", "버리기"),
-                ("upgrade", "강화 (이번 전투)"), ("random_transform", "무작위 카드로 변화"),
-                ("bottom", "뽑을 더미 맨 아래에 놓기")]
+PREVIEW_STYLES = [("", "기본 배치"),
+                  ("global::MegaCrit.Sts2.Core.Nodes.CommonUi.CardPreviewStyle.None", "보여주지 않기"),
+                  ("global::MegaCrit.Sts2.Core.Nodes.CommonUi.CardPreviewStyle.HorizontalLayout", "가로로 나란히"),
+                  ("global::MegaCrit.Sts2.Core.Nodes.CommonUi.CardPreviewStyle.MessyLayout", "겹쳐서 배치"),
+                  ("global::MegaCrit.Sts2.Core.Nodes.CommonUi.CardPreviewStyle.EventLayout", "이벤트 화면 배치"),
+                  ("global::MegaCrit.Sts2.Core.Nodes.CommonUi.CardPreviewStyle.GridLayout", "격자로 배치")]
+
+
+def preview_style_options(op):
+    # Game PreviewInternal rejects event/grid layouts for combat piles.
+    if op == "card_preview":
+        return [(value,label) for value,label in PREVIEW_STYLES if not value.endswith(("EventLayout", "GridLayout"))]
+    return list(PREVIEW_STYLES)
+
+
+def preview_style_expr(value):
+    value = str(value or "").strip()
+    if value in ("", "CardPreviewStyle.Default"):
+        return ""
+    if value.startswith("CardPreviewStyle."):
+        return "global::MegaCrit.Sts2.Core.Nodes.CommonUi." + value
+    return value
+
+
+CARD_STATS = [("cost", "비용"), ("damage", "피해량"), ("block", "방어도"),
+              ("draw", "카드 장수 (뽑기 등)"), ("energy", "에너지 획득량"), ("heal", "체력 회복량"),
+              ("lose_hp", "체력 손실량"), ("max_hp", "최대 체력 증가량"), ("gold", "골드 획득량")]
+CARD_STAT_EN = {"cost":"cost", "damage":"damage values", "block":"Block values", "draw":"card counts",
+                "energy":"Energy gained", "heal":"healing", "lose_hp":"HP loss", "max_hp":"Max HP gained", "gold":"Gold gained"}
+NUMBER_EDITS = [("add", "만큼 변경"), ("set", "으로 설정")]
+COST_DURATIONS = [("combat", "이번 전투"), ("turn", "이번 턴"), ("played", "다음 사용 시까지")]
+PICK_ACTIONS = [("hand", "손으로 가져오기"), ("draw_at", "뽑을 더미 N번째에 놓기"), ("exhaust", "소멸"), ("discard", "버리기"),
+                ("upgrade", "강화 (이번 전투)"), ("random_transform", "무작위 카드로 변화")]
+# 예전 저장본의 '맨 위/맨 아래' -> N번째 (1 = 맨 위, -1 = 맨 아래, 0 = 무작위 위치)
+OLD_POS = {"top": 1, "bottom": -1, "Top": 1, "Bottom": -1, "Random": 0, "draw_top": 1, "draw_bottom": -1}
 DELAY_WHEN = [("start", "다음 내 턴 시작에"), ("end", "이번 턴이 끝날 때")]
 # 카드 인스턴스 참조: 같은 카드가 여러 장 있어도 그 한 장(CardModel 인스턴스)을 가리킨다
 CARD_REFS = [("this", "이 카드 (지금 사용 중인 그 한 장)"), ("picked", "고른 카드 (한 장마다 실행 안)"),
-             ("draw_top", "뽑을 카드 더미 맨 위 카드"), ("draw_bottom", "뽑을 카드 더미 맨 아래 카드")]
+             ("draw_at", "뽑을 카드 더미 N번째 카드")]
 CARD_REFS_KO = {"this": "이 카드", "picked": "고른 카드", "draw_top": "뽑을 카드 더미 맨 위 카드",
                 "draw_bottom": "뽑을 카드 더미 맨 아래 카드"}
 CARD_REFS_EN = {"this": "this card", "picked": "the chosen card", "draw_top": "the top card of your draw pile",
                 "draw_bottom": "the bottom card of your draw pile"}
 CLONE_POLICIES = [("copy", "값 복사"), ("reset", "복사하지 않음")]
 END_POLICIES = [("drop", "지우기 (이번 전투만)"), ("keep", "덱의 그 카드에 남기기")]
-DRAW_POS = [("Bottom", "맨 아래"), ("Top", "맨 위"), ("Random", "무작위 위치")]
+
+
+def pos_n(kind, n):
+    """(종류, N) -> (새 종류, N). 예전 'draw_top'/'top' 등은 draw_at + N 으로."""
+    if kind in OLD_POS:
+        return "draw_at", OLD_POS[kind]
+    try:
+        n = int(float(n if n not in (None, "") else 1))
+    except (TypeError, ValueError):
+        n = 1
+    return kind, n
+
+
+def nth_word(n, lang):
+    """1 -> '1번째' / -1 -> '아래에서 1번째' / 0 -> '무작위'."""
+    if lang == "ko":
+        return "무작위 위치" if n == 0 else (f"{n}번째" if n > 0 else f"아래에서 {-n}번째")
+    if n == 0:
+        return "a random position"
+    k = abs(n)
+    suf = "th" if 10 <= k % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(k % 10, "th")
+    return f"{k}{suf} from the {'top' if n > 0 else 'bottom'}"
+
+
+def ref_word(d, lang, key="card"):
+    """카드 참조를 말로 ('이 카드' / '뽑을 카드 더미 2번째 카드')."""
+    ref, n = pos_n(d.get(key, "this"), d.get(key + "_n"))
+    if ref == "draw_at":
+        return f"뽑을 카드 더미 {nth_word(n, 'ko')} 카드" if lang == "ko" else f"the card {nth_word(n, 'en')} of your draw pile"
+    return CARD_REFS_KO.get(ref, "이 카드") if lang == "ko" else CARD_REFS_EN.get(ref, "this card")
 # 게임 인챈트 (MegaCrit.Sts2.Core.Models.Enchantments)
 ENCHANTS = [("Inky", "Inky (잉크)"), ("Sharp", "Sharp (날카로움)"), ("Swift", "Swift (신속)"), ("Steady", "Steady (안정)"),
             ("Nimble", "Nimble (민첩)"), ("Adroit", "Adroit (능숙)"), ("Vigorous", "Vigorous (활력)"),
@@ -446,9 +543,10 @@ def _card_is_word(project, who, f, lang):
     return f"{who}{_jj(who, '이', '가')} {w}" if ko else f"{who} is {w}"
 PLAYED_SCOPES = [("turn", "이번 턴에"), ("combat", "이번 전투에서")]
 
-WHO = {"self": "나", "target": "대상", "it": "그 적", "all": "모든 적", "random": "무작위 적"}
+WHO = {"self": "나", "target": "대상", "it": "그 적/플레이어", "all": "모든 적", "random": "무작위 적"}
 WHO_EN = {"self": "you", "target": "the target", "it": "that enemy", "all": "ALL enemies", "random": "a random enemy"}
-CARD_TYPES = [("Any", "아무"), ("Attack", "공격"), ("Skill", "스킬"), ("Power", "파워")]
+CARD_TYPES = [("Any", "아무"), ("Attack", "공격"), ("Skill", "스킬"), ("Power", "파워"),
+              ("Curse", "저주"), ("Status", "상태 이상"), ("Quest", "퀘스트")]
 WHICH = [("random", "무작위로"), ("all", "전부")]
 HAND_ACTIONS = [("upgrade", "강화"), ("exhaust", "소멸"), ("discard", "버리기")]
 KW_WHERE = [("hand", "손패"), ("draw", "뽑을 카드 더미"), ("discard", "버린 카드 더미"), ("all", "모든 카드 더미")]
@@ -472,13 +570,66 @@ def who_options(owner_kind, multi=True):
         opts[0] = ("self", "나(플레이어)")
     if owner_kind == "pet":
         opts[0] = ("self", "나(동료 자신)")
-    opts.append(("it", "그 적 (반복 안)"))
+    opts.append(("it", "그 적/플레이어 (반복 안)"))
     if multi:
         opts += [("all", "모든 적"), ("random", "무작위 적")]
     return opts
 
 
+COMPACT_ALIASES = {"set_var": ("edit_var", "edit_mode", "set"), "change_var": ("edit_var", "edit_mode", "add"),
+                   "card_state_set": ("card_state_edit", "edit_mode", "set"), "card_state_change": ("card_state_edit", "edit_mode", "add"),
+                   "button_on": ("button_switch", "switch", "on"), "button_off": ("button_switch", "switch", "off")}
+
+
+def compact_op(op):
+    if op in ("card_cost_edit", "card_damage_edit"):
+        return "card_number_edit"
+    mapped = COMPACT_ALIASES.get(op, (op,))[0]
+    if op == "picked_action":
+        return "card_do"
+    return F.LEGACY.get(mapped, mapped)
+
+
+def expand_compact(b):
+    if b.get("op") in F.FAMILIES:
+        original = b.get("_compact_origin", b)
+        b = dict(b, op=F.variant(b, SPECS), _compact_origin=original)
+    op, a = b.get("op"), b.get("args", {})
+    if op == "edit_var":
+        return dict(b, op="set_var" if a.get("edit_mode", "add") == "set" else "change_var")
+    if op == "card_state_edit":
+        return dict(b, op="card_state_set" if a.get("edit_mode", "add") == "set" else "card_state_change")
+    if op == "button_switch":
+        return dict(b, op="button_on" if a.get("switch", "on") == "on" else "button_off")
+    return b
+
+
+def upgrade_numeric_blocks(blocks):
+    """Migrate editable copies, including old presets, without changing references."""
+    for b in walk(blocks):
+        F.migrate(b, SPECS)
+        if b.get("op") in COMPACT_ALIASES:
+            op, field, value = COMPACT_ALIASES[b["op"]]
+            b["op"] = op
+            b.setdefault("args", {})[field] = value
+        if b.get("op") in ("card_cost_edit", "card_damage_edit"):
+            a = b.setdefault("args", {})
+            cost = b["op"] == "card_cost_edit"
+            a["stat"] = "cost" if cost else "damage"
+            a["duration"] = a.pop("cost_duration", "combat") if cost else "combat"
+            b["op"] = "card_number_edit"
+        if b.get("op") == "picked_action":
+            b["op"] = "card_do"
+            b.setdefault("args", {})["card"] = "picked"
+        F.migrate(b, SPECS)
+    return blocks
+
+
 def new_block(op):
+    if op in F.FAMILIES:
+        b = new_block(F.FAMILIES[op][1][0][0])
+        F.migrate(b, SPECS)
+        return b
     spec = SPECS[op]
     b = {"op": op, "args": {k: copy.deepcopy(v[1]) for k, v in spec["args"].items()}}
     if spec.get("body"):
@@ -497,7 +648,7 @@ def new_block(op):
         p = _PROJECT_HINT.get("p") or {}
         pt = (p.get("gimmicks") or {}).get("pets") or []
         b["args"]["pet"] = pt[0]["id"] if pt else ""
-    if op in ("button_on", "button_off"):
+    if op in ("button_switch", "button_on", "button_off"):
         p = _PROJECT_HINT.get("p") or {}
         bt = (p.get("gimmicks") or {}).get("buttons") or []
         b["args"]["button"] = bt[0]["id"] if bt else ""
@@ -526,9 +677,15 @@ def _first_custom_power():
     return "c:" + pw[0]["id"] if pw else "Strength"
 
 
+def block_spec(b):
+    return F.block_spec(b, SPECS)
+
+
 def block_caption(b):
     """블록에 보일 글 ({칸} 자리 포함). 원본에서 풀어낸 블록은 블록마다 다르다."""
     op = b.get("op")
+    if op in F.FAMILIES:
+        return F.caption(b, SPECS)
     if op == "src_call":
         return (b.get("label") or "직접 호출") + "".join(f"  {s['name']} {{{s['key']}}}" for s in b.get("slots", []))
     if op == "src_loop":
@@ -542,7 +699,7 @@ def arg_kind(b, key):
     if b.get("op") == "src_call":
         s = next((s for s in b.get("slots", []) if s["key"] == key), None)
         return s["kind"] if s else "code"
-    return SPECS[b["op"]]["args"][key][0]
+    return block_spec(b)["args"][key][0]
 
 
 def slot_info(b, key):
@@ -680,8 +837,8 @@ def value_label(v, project=None, lang="ko", card=False):
     if t == "card_state":
         k = str(v.get("key") or "count")
         if lang == "ko":
-            return f"{CARD_REFS_KO.get(v.get('card', 'this'), '이 카드')}의 {k}"
-        return f"{CARD_REFS_EN.get(v.get('card', 'this'), 'this card')}'s {k}"
+            return f"{ref_word(v, 'ko')}의 {k}"
+        return f"{ref_word(v, 'en')}'s {k}"
     if t == "played":
         import gimmick as G
         f = v.get("filter", "Any")
@@ -805,11 +962,49 @@ def _poss(who):
     return {"self": "your", "target": "the target's", "it": "that enemy's"}.get(who or "self", "your")
 
 
+def selection_condition(b):
+    """Seed the compound editor from older single-condition enemy blocks."""
+    a = b.get("args", {})
+    group = a.get("conditions")
+    if group and (group.get("t") != "group" or group.get("items")):
+        return copy.deepcopy(group) if group.get("t") == "group" else {"t":"group", "mode":"all", "items":[copy.deepcopy(group)]}
+    condition = a.get("enemy_filter", "all")
+    items = []
+    if condition in ("power", "no_power"):
+        item = {"t":"has", "who":"it", "power":a.get("power","Weak")}
+        items = [{"t":"not", "a":item} if condition == "no_power" else item]
+    elif condition in ("hp_below", "hp_above"):
+        items = [{"t":"hp_percent", "who":"it", "op":"<=" if condition == "hp_below" else ">=",
+                  "value":copy.deepcopy(a.get("limit", {"t":"num","v":30}))}]
+    return {"t":"group", "mode":"all", "items":items}
+
+
 def cond_label(c, project=None, lang="ko", card=False):
     if not isinstance(c, dict):
         return "?"
     t = c.get("t")
     V = lambda x: value_label(x, project, lang, card)  # noqa: E731
+    if t == "group":
+        items = c.get("items", [])
+        if not items:
+            return "조건 없음" if lang == "ko" else "No conditions"
+        joiner = " 그리고 " if c.get("mode", "all") == "all" else " 또는 "
+        if lang != "ko":
+            joiner = " AND " if c.get("mode", "all") == "all" else " OR "
+        return "(" + joiner.join(cond_label(x, project, lang, card) for x in items) + ")"
+    if t == "hp_percent":
+        who = (WHO if lang == "ko" else WHO_EN).get(c.get("who","it"), "")
+        return f"{who} 체력 {c.get('op','<=')} {V(c.get('value'))}%" if lang == "ko" else f"{who} HP {c.get('op','<=')} {V(c.get('value'))}%"
+    if t == "pile_count":
+        import gimmick as G
+        who = (WHO if lang == "ko" else WHO_EN).get(c.get("who","self"), "")
+        pile = dict(PILES + [("Deck","전체 덱")]).get(c.get("pile","Deck"), c.get("pile"))
+        cid = c.get("card_id")
+        name = next((x.get('name_'+lang) or x['id'] for x in (project or {}).get('cards',[]) if x['id']==cid), cid) if cid else G.filter_word(project, c.get("filter","Any"),lang)
+        return f"{who}의 {pile}에 {name} {c.get('op','>=')} {V(c.get('count'))}장" if lang == "ko" else f"{who}'s {c.get('pile','Deck')}: {name} {c.get('op','>=')} {V(c.get('count'))} cards"
+    if t == "card_identity":
+        cid = c.get("card_id", "")
+        return f"고른 카드가 {cid}" if lang == "ko" else f"Chosen card is {cid}"
     if t == "cmp":
         return cmp_text(c, project, lang, card)
     if t == "chance":
@@ -831,21 +1026,37 @@ def cond_label(c, project=None, lang="ko", card=False):
     if t == "card_var_has":
         k = str(c.get("key") or "count")
         if lang == "ko":
-            return f"{CARD_REFS_KO.get(c.get('card', 'this'), '이 카드')}에 변수 {k}{_jj(k, '이', '가')} 있음"
-        return f"{CARD_REFS_EN.get(c.get('card', 'this'), 'this card')} has {k}"
+            return f"{ref_word(c, 'ko')}에 변수 {k}{_jj(k, '이', '가')} 있음"
+        return f"{ref_word(c, 'en')} has {k}"
     if t == "card_is":
-        who = CARD_REFS_KO.get(c.get("card", "this"), "이 카드") if lang == "ko" else CARD_REFS_EN.get(c.get("card", "this"), "this card")
+        who = ref_word(c, lang)
         return _card_is_word(project or {"gimmicks": {}, "mod": {"id": "M"}}, who, c.get("filter"), lang)
     if t == "src":
         return "직접 조건 " + _short_code(c.get("code"), 48)
     return "?"
 
 
-_ACT_KO = {"hand": "손으로 가져옵니다", "top": "뽑을 카드 더미 맨 위에 놓습니다", "bottom": "뽑을 카드 더미 맨 아래에 놓습니다",
+_ACT_KO = {"hand": "손으로 가져옵니다", "draw_at": "뽑을 카드 더미 {n}에 놓습니다",
            "exhaust": "소멸시킵니다", "discard": "버립니다", "upgrade": "강화합니다", "random_transform": "무작위 카드로 변화시킵니다"}
-_ACT_EN = {"hand": "Put {w} into your hand.", "top": "Put {w} on top of your draw pile.",
-           "bottom": "Put {w} on the bottom of your draw pile.", "exhaust": "Exhaust {w}.", "discard": "Discard {w}.",
+_ACT_EN = {"hand": "Put {w} into your hand.", "draw_at": "Put {w} {n} of your draw pile.", "exhaust": "Exhaust {w}.", "discard": "Discard {w}.",
            "upgrade": "Upgrade {w}.", "random_transform": "Transform {w} into a random card."}
+
+
+def _pos_value(v):
+    """위치 칸 값 (예전 'Bottom' 같은 글자도 받음) -> 값 dict."""
+    if isinstance(v, dict):
+        return v
+    if v in OLD_POS:
+        return {"t": "num", "v": OLD_POS[v]}
+    return {"t": "num", "v": -1}
+
+
+def _pos_word(v, project, lang, card):
+    v = _pos_value(v)
+    if v.get("t") == "num":
+        return nth_word(int(float(v.get("v", 0) or 0)), lang)
+    lab = value_label(v, project, lang, card)
+    return f"{lab}번째" if lang == "ko" else f"position {lab}"
 
 
 def _describe_cardref(b, op, a, project, lang, card, V):
@@ -854,16 +1065,28 @@ def _describe_cardref(b, op, a, project, lang, card, V):
     import gimmick as G
     ko = lang == "ko"
     ref = a.get("card", "this")
-    who = CARD_REFS_KO.get(ref, "이 카드") if ko else CARD_REFS_EN.get(ref, "this card")
+    who = ref_word(a, lang)
     k = str(a.get("key") or "count")
     if op == "card_var_new":
         return f"{who}에 {k}{_jj(k, '을', '를')} 만듭니다 (처음 값 {V('amount')})." if ko else f"Give {who} {k} ({V('amount')})."
     if op == "card_var_remove":
         return f"{who}의 {k}{_jj(k, '을', '를')} 지웁니다." if ko else f"Remove {k} from {who}."
-    if op == "card_do":
+    if op in ("card_number_edit", "card_cost_edit", "card_damage_edit"):
+        cost = a.get("stat", "cost") == "cost" if op == "card_number_edit" else op == "card_cost_edit"
+        stat = a.get("stat", "cost") if op == "card_number_edit" else ("cost" if cost else "damage")
+        name = dict(CARD_STATS).get(stat, stat) if ko else CARD_STAT_EN.get(stat, stat)
+        duration = a.get("duration", "combat") if op == "card_number_edit" else (a.get("cost_duration", "combat") if cost else "combat")
+        when = dict(COST_DURATIONS).get(duration, "이번 전투") if ko else {"combat": "this combat", "turn": "this turn", "played": "until played"}.get(duration, "this combat")
+        mode = a.get("edit_mode", "add")
         if ko:
-            return f"{who}{_jj(who, '을', '를')} {_ACT_KO.get(a.get('action'), '')}."
-        return _ACT_EN.get(a.get("action"), "").replace("{w}", who)
+            verb = "으로 설정합니다" if mode == "set" else "만큼 변경합니다"
+            return f"{when} {who}의 {name}{_jj(name, '을', '를')} {V('amount')}{verb}."
+        return f"{'Set' if mode == 'set' else 'Change'} {who}'s {name} {'to' if mode == 'set' else 'by'} {V('amount')} {when}."
+    if op == "card_do":
+        act, n = pos_n(a.get("action"), a.get("action_n"))
+        if ko:
+            return f"{who}{_jj(who, '을', '를')} {_ACT_KO.get(act, '').replace('{n}', nth_word(n, 'ko'))}."
+        return _ACT_EN.get(act, "").replace("{w}", who).replace("{n}", nth_word(n, "en"))
     if op == "card_ref_keyword":
         kn = M.KEYWORD_NAMES.get(lang, M.KEYWORD_NAMES["en"]).get(a.get("keyword"), str(a.get("keyword")))
         add = a.get("action", "add") == "add"
@@ -888,14 +1111,14 @@ def _describe_cardref(b, op, a, project, lang, card, V):
         else:
             c = next((x for x in project.get("cards", []) if x["id"] == a.get("card")), None)
             nm = f"[gold]{M.text(c, 'name', lang)}[/gold]" if c else str(a.get("card"))
-        pos = a.get("pos", "Bottom")
+        where = _pos_word(a.get("pos"), project, lang, card)
         if ko:
-            where = {"Bottom": "맨 아래", "Top": "맨 위", "Random": "무작위 위치"}.get(pos, "")
             return f"{nm} {V('count')}장을 뽑을 카드 더미 {where}에 넣습니다."
-        where = {"Bottom": "on the bottom of", "Top": "on top of", "Random": "into"}.get(pos, "into")
-        return f"Put {V('count')} {nm} {where} your draw pile."
+        return f"Put {V('count')} {nm} into your draw pile ({where})."
     if op == "draw_bottom":
-        return f"뽑을 카드 더미 맨 아래에서 카드 {V('count')}장을 뽑습니다." if ko else             f"Draw {V('count')} card(s) from the bottom of your draw pile."
+        where = _pos_word(a.get("pos"), project, lang, card)
+        return f"뽑을 카드 더미 {where} 카드부터 {V('count')}장을 뽑습니다." if ko else \
+            f"Draw {V('count')} card(s) starting {where} of your draw pile."
     return ""
 
 
@@ -924,16 +1147,36 @@ def describe(blocks, project, owner_kind, lang="ko", item=None):
 
 
 def _describe_one(b, project, owner_kind, lang, card, item):
+    b = expand_compact(b)
     a = b.get("args", {})
     V = lambda k: value_label(a.get(k), project, lang, card)  # noqa: E731
     W = lambda k: (WHO if lang == "ko" else WHO_EN).get(a.get(k, "self"), "")  # noqa: E731
     op = b["op"]
     ko = lang == "ko"
     import modgen as M
-    damage_name = M.block_damage_name(item, b) if owner_kind == "card" else None
+    damage_name = M.block_number_name(item, b) if owner_kind == "card" else None
     if damage_name:
         original_v = V
         V = lambda k: "{" + damage_name + ":diff()}" if k == "amount" else original_v(k)
+    if op == "aura_power_amount":
+        meta=M.power_meta(project,a.get("power_filter")) if a.get("power_filter") not in (None,"Any") else None
+        name=(meta or {}).get("ko", "모든 파워")
+        return f"조건에 맞는 다른 카드가 부여하는 {name}의 중첩을 {V('amount')}만큼 보정합니다. 이미 부여한 파워는 유지됩니다." if ko else f"Modify matching cards' applied power stacks by {V('amount')}."
+    if op == "aura_card_effect":
+        import gimmick as G
+        source = dict(PILES).get(a.get("active_pile", "Hand"), "손패")
+        target = dict([("Any", "모든 더미")] + PILES).get(a.get("target_pile", "Any"), "모든 더미")
+        match = dict(G.tag_play_filters(project or {})).get(a.get("filter", "Any"), "아무 카드")
+        body = describe(b.get("body") or [], project, owner_kind, lang)
+        return f"이 카드가 {source}에 있을 때 {target}의 다른 {match} 카드를 사용하면: {body}" if ko else f"While in {a.get('active_pile','Hand')}, when another matching card is played: {body}"
+    if op == "hand_aura_stat":
+        import gimmick as G
+        label = dict(G.tag_play_filters(project or {})).get(a.get("filter", "Any"), a.get("filter", "Any"))
+        stat = {"cost":"비용", "damage":"피해량", "block":"방어도"}.get(a.get("stat", "cost"), "수치")
+        if ko:
+            target_pile = dict([("Any", "모든 더미")] + PILES).get(a.get("target_pile", "Any"), "선택한 더미")
+            return f"이 카드가 {dict(PILES).get(a.get('active_pile', 'Hand'), '선택한 더미')}에 있는 동안 {target_pile}에 있는 다른 카드의 {stat}을 {V('amount')}만큼 보정합니다 ({label}). 해당 더미를 떠나면 해제됩니다."
+        return f"While in {a.get('active_pile', 'Hand')}, modify other cards' {a.get('stat', 'cost')} by {V('amount')} ({a.get('filter', 'Any')})."
     if op == "damage":
         hits = int(a.get("hits", 1) or 1)
         times = (f" {hits}번" if ko else f" {hits} times") if hits > 1 else ""
@@ -1230,12 +1473,12 @@ def _describe_one(b, project, owner_kind, lang, card, item):
         if neg:
             return f"{n}에서 {val}{_jj(val, '을', '를')} 뺍니다." if ko else f"Subtract {val} from {n}."
         return f"{n}에 {val}{_jj(val, '을', '를')} 더합니다." if ko else f"Add {val} to {n}."
-    if op in ("card_var_new", "card_var_remove", "card_do", "card_ref_keyword", "card_tag", "card_enchant",
+    if op in ("card_var_new", "card_var_remove", "card_number_edit", "card_cost_edit", "card_damage_edit", "card_do", "card_ref_keyword", "card_tag", "card_enchant",
               "card_enchant_clear", "add_card_pos", "draw_bottom"):
         return _describe_cardref(b, op, a, project, lang, card, V)
     if op in ("card_state_set", "card_state_change"):
         k = str(a.get("key") or "count")
-        who = CARD_REFS_KO.get(a.get("card", "this"), "이 카드") if ko else CARD_REFS_EN.get(a.get("card", "this"), "this card")
+        who = ref_word(a, lang)
         amt = a.get("amount") or {}
         neg = op == "card_state_change" and amt.get("t") == "num" and float(amt.get("v", 0) or 0) < 0
         val = value_label(dict(amt, v=-float(amt.get("v", 0))) if neg else amt, project, lang, card)
@@ -1275,6 +1518,29 @@ def _describe_one(b, project, owner_kind, lang, card, item):
         return ("모든 적에게 각각: " if ko else "For each enemy: ") + describe(b.get("body"), project, owner_kind, lang, item)
     if op == "random_enemy":
         return ("무작위 적 1명에게: " if ko else "To a random enemy: ") + describe(b.get("body"), project, owner_kind, lang, item)
+    if op in ("filtered_enemies", "filtered_players"):
+        condition = a.get("enemy_filter", "power")
+        power = M.power_meta(project, a.get("power", "Weak"))
+        name = (power or {}).get(lang, a.get("power", "Weak"))
+        label = {"all": "모든 적", "power": f"{name} 보유 적", "no_power": f"{name} 미보유 적",
+                 "hp_below": f"체력 {V('limit')}% 이하인 적", "hp_above": f"체력 {V('limit')}% 이상인 적"}.get(condition, "조건에 맞는 적")
+        mode = {"random": "무작위", "choose": "직접 선택", "all": "모두"}.get(a.get("enemy_mode"), "무작위")
+        selection = "모두" if a.get("enemy_mode") == "all" else f"{mode} 최대 {V('count')}명"
+        group = a.get("conditions")
+        if op == "filtered_players" or (group and (group.get("t") != "group" or group.get("items"))):
+            label = "플레이어" if op == "filtered_players" else "적"
+            detail = cond_label(group, project, lang, card) if group else "조건 없음"
+            if not ko:
+                label = "players" if op == "filtered_players" else "enemies"
+                selection = "all" if a.get("enemy_mode") == "all" else ("randomly select" if a.get("enemy_mode","random") == "random" else "choose") + f" up to {V('count')}"
+                return f"From {label} matching {detail}, {selection}; for each: " + describe(b.get("body"), project, owner_kind, lang, item)
+            return f"{detail} 조건을 만족한 {label} 중 {selection}에게 각각: " + describe(b.get("body"), project, owner_kind, lang, item)
+        if not ko:
+            label = {"all": "enemies", "power": f"enemies with {name}", "no_power": f"enemies without {name}",
+                     "hp_below": f"enemies at {V('limit')}% HP or less", "hp_above": f"enemies at {V('limit')}% HP or more"}.get(condition, "matching enemies")
+            selection = "all" if a.get("enemy_mode") == "all" else ("randomly select" if a.get("enemy_mode", "random") == "random" else "choose") + f" up to {V('count')}"
+            return f"From {label}, {selection}; for each: " + describe(b.get("body"), project, owner_kind, lang, item)
+        return f"{label} 중 {selection}에게 각각: " + describe(b.get("body"), project, owner_kind, lang, item)
     # ---- 기믹 ----
     if op == "summon":
         n = _summon_name(project, a.get("summon"), lang)
@@ -1305,14 +1571,16 @@ def _describe_one(b, project, owner_kind, lang, card, item):
         return "Choose one: " + " / ".join(
             f"[gold]{n}[/gold] ({describe(body, project, owner_kind, lang, item).rstrip('.')})" for n, body in opts) + "."
     if op == "picked_action":
-        action = a.get("action")
+        action, act_n = pos_n(a.get("action"), a.get("action_n"))
+        if action == "draw_at":
+            return f"고른 카드를 뽑을 카드 더미 {nth_word(act_n, 'ko')}에 놓습니다." if ko else \
+                f"Put it {nth_word(act_n, 'en')} of your draw pile."
         if ko:
             return f"고른 카드에 {dict(PICK_ACTIONS).get(action, '')}."
-        return {"hand": "Move it to your hand.", "top": "Put it on top of your draw pile.",
-                "bottom": "Put it on the bottom of your draw pile.",
+        return {"hand": "Move it to your hand.",
                 "exhaust": "Exhaust it.", "discard": "Discard it.", "upgrade": "Upgrade it.",
                 "random_transform": "Transform it into a random card."}.get(action, "")
-    if op in ("pick", "random_transform", "pick_transform", "pick_each"):
+    if op in ("pick", "random_transform", "pick_transform", "pick_each", "random_each"):
         import gimmick as G
         pile_ko = dict(PICK_PILES).get(a.get("pile"), "")
         pile_en = {"Hand": "your hand", "Draw": "your draw pile", "Discard": "your discard pile",
@@ -1332,8 +1600,16 @@ def _describe_one(b, project, owner_kind, lang, card, item):
             if ko:
                 return f"{pile_ko}의 {G.filter_word(project, a.get('ctype'), 'ko')} 중 무작위 {V('count')}장을 {pool} 중 한 장으로 변화시킵니다."
             return f"Transform {V('count')} random {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en} into random {pool}."
+        if op == "random_each":
+            detail = describe(b.get("body"), project, owner_kind, lang, item)
+            if (a.get("conditions") or {}).get("items"):
+                detail = ("선택 조건: " if ko else "Selection conditions: ") + cond_label(a['conditions'], project, lang, card) + ". " + detail
+            return (f"{pile_ko}에서 {G.filter_word(project, a.get('ctype'), 'ko')} 무작위 {V('count')}장을 골라 한 장마다 실행합니다. {detail}" if ko else
+                    f"Choose {V('count')} random {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en}. For each chosen card: {detail}")
         if op == "pick_each":
             detail = describe(b.get("body"), project, owner_kind, lang, item)
+            if (a.get("conditions") or {}).get("items"):
+                detail = ("선택 조건: " if ko else "Selection conditions: ") + cond_label(a['conditions'], project, lang, card) + ". " + detail
             return (f"{pile_ko}에서 {G.filter_word(project, a.get('ctype'), 'ko')} {V('count')}장을 골라 한 장마다 실행합니다. {detail}" if ko else
                     f"Choose {V('count')} {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en}. For each chosen card: {detail}")
         if op == "pick_transform":
@@ -1344,13 +1620,13 @@ def _describe_one(b, project, owner_kind, lang, card, item):
                 return f"{pile_ko}에서 {G.filter_word(project, a.get('ctype'), 'ko')} {V('count')}장을 골라 {name}(으)로 변화시킵니다."
             return f"Choose {V('count')} {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en} and transform them into {name}."
         if ko:
-            act = {"hand": "손으로 가져옵니다", "top": "뽑을 카드 더미 맨 위에 놓습니다", "exhaust": "소멸시킵니다",
-                   "bottom": "뽑을 카드 더미 맨 아래에 놓습니다",
-                   "discard": "버립니다", "random_transform": "무작위 카드로 변화시킵니다", "upgrade": "강화합니다"}.get(a.get("action"), "")
+            act_key, act_n = pos_n(a.get("action"), a.get("action_n"))
+            act = {"hand": "손으로 가져옵니다", "draw_at": f"뽑을 카드 더미 {nth_word(act_n, 'ko')}에 놓습니다", "exhaust": "소멸시킵니다",
+                   "discard": "버립니다", "random_transform": "무작위 카드로 변화시킵니다", "upgrade": "강화합니다"}.get(act_key, "")
             return f"{pile_ko}에서 {G.filter_word(project, a.get('ctype'), 'ko')} {V('count')}장을 골라 {act}."
-        act = {"hand": "put it into your hand", "top": "put it on top of your draw pile", "exhaust": "Exhaust it",
-               "bottom": "put it on the bottom of your draw pile",
-               "discard": "discard it", "random_transform": "transform it into a random card", "upgrade": "Upgrade it"}.get(a.get("action"), "")
+        act_key, act_n = pos_n(a.get("action"), a.get("action_n"))
+        act = {"hand": "put it into your hand", "draw_at": f"put it {nth_word(act_n, 'en')} of your draw pile", "exhaust": "Exhaust it",
+               "discard": "discard it", "random_transform": "transform it into a random card", "upgrade": "Upgrade it"}.get(act_key, "")
         return f"Choose {V('count')} {G.filter_word(project, a.get('ctype'), 'en', plural=True)} in {pile_en} and {act}."
     if op in ("channel", "evoke", "orb_passive_all", "orb_slots", "orb_grow", "stars", "forge",
               "osty_summon", "osty_attack", "osty_kill"):
@@ -1438,12 +1714,15 @@ class _Gen:
             return self.its[-1]
         return "null"
 
-    def card_ref(self, ref):
+    def card_ref(self, ref, n=None):
         """카드 인스턴스 참조 -> C# 식 (CardModel). 같은 카드가 여러 장이어도 그 한 장.
         뽑을 더미 맨 위/아래는 없을 수 있다 (null)."""
-        if ref in ("draw_top", "draw_bottom"):
-            fn = "FirstOrDefault" if ref == "draw_top" else "LastOrDefault"   # 게임: Cards[0] = 맨 위
-            return f"{self.player()}?.PlayerCombatState?.DrawPile.Cards.{fn}()"
+        ref, n = pos_n(ref, n)
+        if ref == "draw_at":
+            if n == 0:
+                self.errors.append("뽑을 카드 더미 N번째: N 은 1(맨 위)부터, 아래에서 셀 때는 -1(맨 아래)부터입니다.")
+                return "null"
+            return f"{self.helper()}.DrawPileAt({self.player()}, {n})"
         if ref == "picked":
             if self.selected_cards:
                 return self.selected_cards[-1]
@@ -1458,7 +1737,7 @@ class _Gen:
 
     def with_card(self, ref, ind, fn):
         """카드 참조를 확인하고 (null 이면 건너뜀) fn(변수, 들여쓰기) 줄을 감싼다."""
-        expr = self.card_ref(ref)
+        expr = self.card_ref(*ref) if isinstance(ref, tuple) else self.card_ref(ref)
         if expr == "null":
             return []
         if expr == "this" or expr.isidentifier():
@@ -1536,7 +1815,7 @@ class _Gen:
                 return "0m"
             return "v_" + _ident(v.get("name", "a"))
         if t == "card_state":
-            ref = self.card_ref(v.get("card", "this"))
+            ref = self.card_ref(v.get("card", "this"), v.get("card_n"))
             return f"{self.helper()}.CardState({ref}, {_cs_str(v.get('key'))})" if ref != "null" else "0m"
         if t == "played":
             import gimmick as G
@@ -1615,6 +1894,43 @@ class _Gen:
         if not isinstance(c, dict):
             return "false"
         t = c.get("t")
+        if t == "group":
+            mode = c.get("mode", "all")
+            if mode not in ("all", "any"):
+                self.errors.append("조건 묶음의 모두/하나 이상을 다시 선택하세요.")
+                return "false"
+            items = c.get("items", [])
+            return "(" + (" && " if mode == "all" else " || ").join(self.cond(x) for x in items) + ")" if items else "true"
+        if t == "hp_percent":
+            cr = self.creature(c.get("who", "it"))
+            op = c.get("op", "<=")
+            if op not in dict(CMP_OPS):
+                self.errors.append("체력 비율의 비교 방식을 다시 선택하세요.")
+                return "false"
+            return f"({cr} != null && {cr}.MaxHp > 0 && (decimal){cr}.CurrentHp * 100m {op} (decimal){cr}.MaxHp * Math.Clamp({self.val(c.get('value'))}, 0m, 100m))"
+        if t in ("pile_count", "card_identity"):
+            import modgen as M
+            cid = c.get("card_id")
+            cv = self.uid("conditionCard")
+            if cid and not any(x['id'] == cid for x in self.project.get('cards', [])):
+                self.errors.append(f"조건에서 지정한 카드가 없습니다: {cid}")
+                return "false"
+            match = f"{cv} is {M.item_cls(self.project, 'card', cid)}" if cid else self.card_is(cv, c.get('filter','Any'))
+            if t == "card_identity":
+                if not cid:
+                    self.errors.append("조건에 사용할 카드를 고르세요.")
+                    return "false"
+                ref = self.card_ref("picked")
+                return f"({ref} is {{ }} {cv} && {match})"
+            pile = c.get("pile", "Deck")
+            op = c.get("op", ">=")
+            if pile not in {"Deck","Hand","Draw","Discard","Exhaust"} or op not in dict(CMP_OPS):
+                self.errors.append("카드 보유 조건의 더미와 비교 방식을 다시 선택하세요.")
+                return "false"
+            who = c.get("who", "self")
+            player = self.C.player if who == "self" else f"({self.creature(who)})?.Player"
+            pv = self.uid("conditionPlayer")
+            return f"({player} is {{ }} {pv} && PileType.{pile}.GetPile({pv}).Cards.Count({cv} => {match}) {op} {self.val(c.get('count'))})"
         if t == "cmp":
             return f"({self.val(c.get('a'))} {c.get('op', '>=')} {self.val(c.get('b'))})"
         if t == "chance":
@@ -1641,7 +1957,7 @@ class _Gen:
                 return "false"
             return f"{PT.helper(self.project)}.Alive<{PT.pet_cls(self.project, c.get('pet'))}>({self.player()})"
         if t in ("card_var_has", "card_is"):
-            expr = self.card_ref(c.get("card", "this"))
+            expr = self.card_ref(c.get("card", "this"), c.get("card_n"))
             if expr == "null":
                 return "false"
             cv = self.uid("cq")
@@ -1697,7 +2013,31 @@ class _Gen:
             return body_fn(cr, ind)
         return [f"{ind}if ({cr} != null)", f"{ind}{{"] + body_fn(cr, ind + "    ") + [f"{ind}}}"]
 
+    def block_amount(self, b):
+        import modgen as M
+        if not hasattr(self, "_number_names"):
+            self._number_names = {id(block): name for block,name,_ in M.block_number_vars(self.C.item or {})} if self.C.kind == "card" else {}
+        name = self._number_names.get(id(b.get("_compact_origin", b)))
+        return f'DynamicVars["{name}"].BaseValue' if name else self.val(b.get("args", {}).get("amount"))
+
     def stmt(self, b, ind, event_bound=False):
+        if b.get("op") in ("hand_aura_stat", "aura_power_amount", "aura_card_effect"):
+            if not getattr(self.C, "hand_aura", False):
+                self.errors.append("손패 지속 보정 블록은 키워드의 ‘더미에 있는 동안 지속 보정’에서 사용하세요.")
+            return []
+        if b.get("op") in F.FAMILIES:
+            options = dict(F.FAMILIES[b["op"]][1])
+            mode = b.get("args", {}).get("mode", next(iter(options)))
+            if not isinstance(mode, str) or mode not in options:
+                self.errors.append("목록에서 실행 방식을 다시 선택하세요.")
+                return []
+        if F.variant(b, SPECS) in ("edit_var", "card_state_edit") and b.get("args", {}).get("edit_mode", "add") not in ("set", "add"):
+            self.errors.append("수치 변경 방법을 다시 선택하세요.")
+            return []
+        if b.get("op") == "button_switch" and b.get("args", {}).get("switch", "on") not in ("on", "off"):
+            self.errors.append("버튼의 켜기/끄기를 다시 선택하세요.")
+            return []
+        b = expand_compact(b)
         import modgen as M
         C, a, op = self.C, b.get("args", {}), b.get("op")
         event_target = getattr(C, "event_target", None)
@@ -1727,6 +2067,34 @@ class _Gen:
                 if value == "target" and schema.get(key, (None,))[0] in ("who_multi", "who_one"):
                     a[key] = event_target
 
+        for key, value in a.items():
+            if isinstance(value, str) and value in ("@selected_creature", "@selected_player"):
+                cr = self.creature("it")
+                if cr == "null":
+                    return []
+                if value == "@selected_creature":
+                    return self.stmt({**b, "args":{**a, key:cr}}, ind)
+                pv = self.uid("selectedPlayer")
+                return [f"{ind}if ({cr}?.Player is {{ }} {pv})", f"{ind}{{", *self.stmt({**b, "args":{**a,key:pv}}, ind + "    "), f"{ind}}}"]
+            if value in ("@picked_card", "@picked_cards"):
+                card = self.card_ref("picked")
+                if card == "null":
+                    return []
+                expression = f"new[] {{ {card} }}" if value == "@picked_cards" else card
+                return self.stmt({**b, "args": {**a, key: expression}}, ind)
+            if isinstance(value, str) and value.startswith(("@own_power:", "@target_power:")):
+                meta = M.power_meta(self.project, value.split(":", 1)[1])
+                if not meta:
+                    self.errors.append("선택한 파워를 찾을 수 없습니다.")
+                    return []
+                creature = C.single if value.startswith("@target_power:") else C.me
+                if not creature:
+                    self.errors.append("이 위치에는 선택한 대상이 없습니다.")
+                    return []
+                power = self.uid("chosenPower")
+                return [f"{ind}var {power} = ({creature})?.GetPower<{meta['cls']}>();",
+                        f"{ind}if ({power} != null)", ind + "{",
+                        *self.stmt({**b, "args": {**a, key: power}}, ind + "    "), ind + "}"]
         for key, value in a.items():
             if key in ("creature", "target", "attacker", "applier") and value == "@random_enemy":
                 return self.each_target("random", ind, lambda enemy, indent:
@@ -1785,7 +2153,7 @@ class _Gen:
                 suffix = b["suffix"]
                 if suffix.startswith(("m", "M")):
                     suffix = suffix[1:]
-                amount = self.val(a.get("amount"))
+                amount = self.block_amount(b)
                 if b.get("label") == "드로우":
                     amount = f"(int)({amount})"
                 return [ind + b["prefix"] + amount + suffix]
@@ -1814,7 +2182,7 @@ class _Gen:
             if C.kind != "card":
                 self.errors.append("공격 블록은 카드 효과에서만 쓸 수 있습니다.")
                 return []
-            amt = self.val(a.get("amount"))
+            amt = self.block_amount(b)
             name = M.block_damage_name(C.item, b)
             if name:
                 amt = f'DynamicVars["{name}"].BaseValue'
@@ -1853,7 +2221,7 @@ class _Gen:
                 return [f"{ind}if ({guard_target} != null)", f"{ind}{{", f"{ind}    await {chain}", f"{ind}}}"]
             return [f"{ind}await {chain}"]
         if op == "damage":
-            amt = self.val(a.get("amount"))
+            amt = self.block_amount(b)
             name = M.block_damage_name(C.item, b) if C.kind == "card" else None
             if name:
                 amt = f'DynamicVars["{name}"].BaseValue'
@@ -1872,7 +2240,7 @@ class _Gen:
             props = ("ValueProp.Unblockable | " + ("ValueProp.Move" if a.get("powered", True) else "ValueProp.Unpowered")) \
                 if a.get("unblockable") else ("ValueProp.Move" if a.get("powered", True) else "ValueProp.Unpowered")
             context = str(a.get("context") or cc).strip()
-            args = [context, creature, self.val(a.get("amount")), props, str(a.get("attacker") or me).strip()]
+            args = [context, creature, self.block_amount(b), props, str(a.get("attacker") or me).strip()]
             if str(a.get("source_card") or "").strip():
                 args.append(str(a.get("source_card")).strip())
             if str(a.get("card_play") or "").strip():
@@ -1891,7 +2259,7 @@ class _Gen:
                 power_type = "global::" + power_type
             silent = ", silent: true" if a.get("silent") else ""
             return [f"{ind}await CommonActions.Apply<{power_type}>({cc}, {creature}, {source}, "
-                    f"{self.val(a.get('amount'))}{silent});"]
+                    f"{self.block_amount(b)}{silent});"]
         if op == "power_apply_type":
             creature = str(a.get("creature") or "target").strip()
             power_type = str(a.get("power_type") or "").strip()
@@ -1900,11 +2268,11 @@ class _Gen:
                 return []
             if not power_type.startswith("global::"):
                 power_type = "global::" + power_type
-            return [f"{ind}await PowerCmd.Apply<{power_type}>({cc}, {creature}, {self.val(a.get('amount'))}, "
+            return [f"{ind}await PowerCmd.Apply<{power_type}>({cc}, {creature}, {self.block_amount(b)}, "
                     f"{a.get('applier') or me}, {a.get('source') or C.src});"]
         if op == "power_apply_model":
             return [f"{ind}await PowerCmd.Apply({cc}, {a.get('power') or 'powerModel'}, {a.get('creature') or 'target'}, "
-                    f"{self.val(a.get('amount'))}, {a.get('applier') or me}, {a.get('source') or C.src});"]
+                    f"{self.block_amount(b)}, {a.get('applier') or me}, {a.get('source') or C.src});"]
         if op == "block_to":
             creature = str(a.get("creature") or "target").strip()
             if not creature:
@@ -1912,36 +2280,36 @@ class _Gen:
                 return []
             prop = "ValueProp.Move" if a.get("powered", True) else "ValueProp.Unpowered"
             play = C.play if a.get("card_play", True) and C.kind == "card" else "null"
-            return [f"{ind}await CreatureCmd.GainBlock({creature}, {self.val(a.get('amount'))}, {prop}, {play});"]
+            return [f"{ind}await CreatureCmd.GainBlock({creature}, {self.block_amount(b)}, {prop}, {play});"]
         if op == "heal_to":
             creature = str(a.get("creature") or "target").strip()
             if not creature:
                 self.errors.append("회복할 생물 식을 입력하세요.")
                 return []
-            return [f"{ind}await CreatureCmd.Heal({creature}, {self.val(a.get('amount'))});"]
+            return [f"{ind}await CreatureCmd.Heal({creature}, {self.block_amount(b)});"]
         if op == "block":
-            return [f"{ind}await CreatureCmd.GainBlock({me}, {self.val(a.get('amount'))}, "
+            return [f"{ind}await CreatureCmd.GainBlock({me}, {self.block_amount(b)}, "
                     f"{'ValueProp.Move' if C.kind == 'card' else 'ValueProp.Unpowered'}, {C.play});"]
         if op == "lose_block":
-            amt = self.val(a.get("amount"))
+            amt = self.block_amount(b)
             return self.each_target(a.get("who", "target"), ind,
                                     lambda t, i2: [f"{i2}await CreatureCmd.LoseBlock({cc}, {t}, {amt}, {me});"])
         if op == "lose_block_to":
-            return [f"{ind}await CreatureCmd.LoseBlock({a.get('creature') or 'target'}, {self.val(a.get('amount'))});"]
+            return [f"{ind}await CreatureCmd.LoseBlock({a.get('creature') or 'target'}, {self.block_amount(b)});"]
         if op == "kill_creature":
             return [f"{ind}await CreatureCmd.Kill({a.get('creature') or 'target'});"]
         if op == "draw":
-            return with_player([f"{ind}await CardPileCmd.Draw({cc}, {self.val(a.get('amount'))}, {C.player});"])
+            return with_player([f"{ind}await CardPileCmd.Draw({cc}, {self.block_amount(b)}, {C.player});"])
         if op == "energy":
-            return with_player([f"{ind}await PlayerCmd.GainEnergy({self.val(a.get('amount'))}, {C.player});"])
+            return with_player([f"{ind}await PlayerCmd.GainEnergy({self.block_amount(b)}, {C.player});"])
         if op == "energy_to":
-            return [f"{ind}await PlayerCmd.GainEnergy({self.val(a.get('amount'))}, {a.get('player') or C.player});"]
+            return [f"{ind}await PlayerCmd.GainEnergy({self.block_amount(b)}, {a.get('player') or C.player});"]
         if op == "gold_to":
-            return [f"{ind}await PlayerCmd.GainGold({self.val(a.get('amount'))}, {a.get('player') or C.player});"]
+            return [f"{ind}await PlayerCmd.GainGold({self.block_amount(b)}, {a.get('player') or C.player});"]
         if op == "gold":
-            return with_player([f"{ind}await PlayerCmd.GainGold({self.val(a.get('amount'))}, {C.player});"])
+            return with_player([f"{ind}await PlayerCmd.GainGold({self.block_amount(b)}, {C.player});"])
         if op == "lose_gold":
-            return [f"{ind}await PlayerCmd.LoseGold({self.val(a.get('amount'))}, {a.get('player') or C.player}, "
+            return [f"{ind}await PlayerCmd.LoseGold({self.block_amount(b)}, {a.get('player') or C.player}, "
                     f"{a.get('loss_type') or 'GoldLossType.Spent'});"]
         if op == "end_turn":
             return [f"{ind}PlayerCmd.EndTurn({a.get('player') or C.player}, canBackOut: {a.get('can_back_out') or 'false'});"]
@@ -1949,7 +2317,7 @@ class _Gen:
             return [f"{ind}await CardCmd.Exhaust({cc}, {a.get('card') or 'cardModel'}, "
                     f"{'true' if a.get('played') else 'false'}, {'true' if a.get('triggered') else 'false'});"]
         if op == "card_upgrade":
-            style = str(a.get("style") or "").strip()
+            style = preview_style_expr(a.get("style"))
             tail = f", {style}" if style else ""
             return [f"{ind}CardCmd.Upgrade({a.get('card') or 'cardModel'}{tail});"]
         if op == "card_autoplay":
@@ -1965,7 +2333,7 @@ class _Gen:
         if op == "card_add_keyword_model":
             return [f"{ind}{a.get('card') or 'cardModel'}.AddKeyword({a.get('keyword') or 'CardKeyword.Exhaust'});"]
         if op == "draw_to":
-            return [f"{ind}await CardPileCmd.Draw({cc}, {self.val(a.get('amount'))}, {a.get('player') or C.player});"]
+            return [f"{ind}await CardPileCmd.Draw({cc}, {self.block_amount(b)}, {a.get('player') or C.player});"]
         if op == "card_add_generated":
             line = f"{ind}await CardPileCmd.AddGeneratedCardToCombat({a.get('card') or 'cardModel'}, PileType.{a.get('pile', 'Hand')}, {C.player});"
             return with_player([line])
@@ -1980,8 +2348,10 @@ class _Gen:
                     f"{a.get('pile') or 'PileType.Hand'}, {a.get('player') or C.player}, "
                     f"{a.get('position') or 'CardPilePosition.Random'});"]
         if op == "card_preview":
+            if preview_style_expr(a.get("style")).endswith("CardPreviewStyle.None"):
+                return []
             return [f"{ind}CardCmd.PreviewCardPileAdd({a.get('cards') or 'cards'}, "
-                    f"(float)({self.val(a.get('scale'))}), {a.get('style') or 'CardPreviewStyle.Default'});"]
+                    f"(float)({self.val(a.get('scale'))}), {preview_style_expr(a.get('style')) or 'global::MegaCrit.Sts2.Core.Nodes.CommonUi.CardPreviewStyle.HorizontalLayout'});"]
         if op == "card_preview_cards":
             scale = str(a.get("scale") or "").strip()
             args = str(a.get("cards") or "cardModel")
@@ -2011,7 +2381,7 @@ class _Gen:
         if op == "potion_discard":
             return [f"{ind}{a.get('potion') or 'potionModel'}.Discard();"]
         if op == "card_set_cost_until_played":
-            return [f"{ind}{a.get('card') or 'cardModel'}.EnergyCost.SetThisTurnOrUntilPlayed({self.val(a.get('amount'))});"]
+            return [f"{ind}{a.get('card') or 'cardModel'}.EnergyCost.SetThisTurnOrUntilPlayed({self.block_amount(b)});"]
         if op == "card_free_this_turn":
             return [f"{ind}{a.get('card') or 'cardModel'}.SetToFreeThisTurn();"]
         if op == "card_notify_cost_changed":
@@ -2028,11 +2398,11 @@ class _Gen:
             return [f"{ind}await CardCmd.TransformTo<{card_type}>({a.get('card') or 'cardModel'});"]
         if op == "modify_power_amount":
             return [f"{ind}await PowerCmd.ModifyAmount({cc}, {a.get('power') or 'powerModel'}, "
-                    f"{self.val(a.get('amount'))}, {me}, {C.src});"]
+                    f"{self.block_amount(b)}, {me}, {C.src});"]
         if op == "remove_power_model":
             return [f"{ind}await PowerCmd.Remove({a.get('power') or 'powerModel'});"]
         if op == "set_current_hp":
-            return [f"{ind}await CreatureCmd.SetCurrentHp({a.get('creature') or me}, {self.val(a.get('amount'))});"]
+            return [f"{ind}await CreatureCmd.SetCurrentHp({a.get('creature') or me}, {self.block_amount(b)});"]
         if op == "orb_channel_model":
             return with_player([f"{ind}await OrbCmd.Channel({cc}, {a.get('orb') or 'orbModel.ToMutable()'}, {C.player});"])
         if op == "orb_channel_type":
@@ -2046,7 +2416,7 @@ class _Gen:
         if op == "orb_slots_to":
             n = self.uid("n")
             player = a.get("player") or C.player
-            return [f"{ind}var {n} = (int)({self.val(a.get('amount'))});",
+            return [f"{ind}var {n} = (int)({self.block_amount(b)});",
                     f"{ind}if ({n} > 0) await OrbCmd.AddSlots({player}, {n});",
                     f"{ind}else if ({n} < 0) OrbCmd.RemoveSlots({player}, -{n});"]
         if op == "add_pet_model":
@@ -2173,13 +2543,13 @@ class _Gen:
                 if not orb:
                     self.errors.append("층을 추가할 혈액 구체 식을 입력하세요.")
                     return []
-                return [f"{ind}{orb}.AddLayers({self.val(a.get('amount'))});"]
+                return [f"{ind}{orb}.AddLayers({self.block_amount(b)});"]
             if op == "manosaba_add_firepower":
                 relic = str(a.get("relic") or "relic").strip()
                 if not relic:
                     self.errors.append("화력을 추가할 유물 식을 입력하세요.")
                     return []
-                return [f"{ind}{relic}.AddFirepower((int)({self.val(a.get('amount'))}));"]
+                return [f"{ind}{relic}.AddFirepower((int)({self.block_amount(b)}));"]
             if op == "manosaba_maximize_firepower":
                 relic = str(a.get("relic") or "relic").strip()
                 if not relic:
@@ -2239,7 +2609,7 @@ class _Gen:
             if op == "manosaba_force_win":
                 return [f"{ind}await global::Manosaba.Characters.Common.Commands.ManosabaCombatCmd."
                         f"ForceWinWithoutDeathOrEscape({a.get('combat_state') or 'CombatState'});"]
-            amount = self.val(a.get("amount"))
+            amount = self.block_amount(b)
             if op == "kotodama_gain":
                 return with_player([f"{ind}global::manosaba.Characters.NatsumeAnan.KotodamaEnergy."
                                     f"Gain({C.player}, (int)({amount}));"])
@@ -2277,14 +2647,14 @@ class _Gen:
             if (self.project.get("takeover") or {}).get("mod", "").casefold() != "manosaba" or C.kind != "card":
                 self.errors.append("총격 블록은 Manosaba 카드 효과에서만 쓸 수 있습니다.")
                 return []
-            return [f"{ind}await ExecuteGunAttack({cc}, {a.get('target') or 'target'}, {self.val(a.get('amount'))});"]
+            return [f"{ind}await ExecuteGunAttack({cc}, {a.get('target') or 'target'}, {self.block_amount(b)});"]
         if op == "max_hp":
-            return [f"{ind}await CreatureCmd.GainMaxHp({me}, {self.val(a.get('amount'))});"]
+            return [f"{ind}await CreatureCmd.GainMaxHp({me}, {self.block_amount(b)});"]
         if op == "heal":
-            amt = self.val(a.get("amount"))
+            amt = self.block_amount(b)
             return self.each_target(a.get("who", "self"), ind, lambda t, i2: [f"{i2}await CreatureCmd.Heal({t}, {amt});"])
         if op == "lose_hp":
-            amt = self.val(a.get("amount"))
+            amt = self.block_amount(b)
             return self.each_target(a.get("who", "self"), ind, lambda t, i2: [
                 f"{i2}await CreatureCmd.Damage({cc}, {t}, {amt}, ValueProp.Unblockable | ValueProp.Unpowered, {me}, {C.src}, {C.play});"])
         if op in ("apply_power", "apply_power_to", "remove_power"):
@@ -2292,7 +2662,7 @@ class _Gen:
             if not pm:
                 self.errors.append(f"없는 파워: {a.get('power')}")
                 return []
-            amt = self.val(a.get("amount"))
+            amt = self.block_amount(b)
             if op == "apply_power_to":
                 creature = str(a.get("creature") or "target").strip()
                 if not creature:
@@ -2402,6 +2772,67 @@ class _Gen:
             i_ = self.uid("k")
             return [f"{ind}for (var {i_} = 0; {i_} < (int)({self.val(a.get('times'))}); {i_}++)", f"{ind}{{"] + \
                 self.stmts(b.get("body"), ind + "    ") + [f"{ind}}}"]
+        if op in ("filtered_enemies", "filtered_players"):
+            import modgen as M
+            import re
+            from types import SimpleNamespace
+            pool, selected, v = self.uid("enemyPool"), self.uid("enemySelection"), self.uid("it")
+            players = op == "filtered_players"
+            condition = a.get("enemy_filter", "power")
+            group = a.get("conditions")
+            if players or (group and (group.get("t") != "group" or group.get("items"))):
+                condition = "all"
+            predicate = "true"
+            if condition in ("power", "no_power"):
+                pm = M.power_meta(self.project, a.get("power", "Weak"))
+                if not pm:
+                    self.errors.append("대상 조건에 사용할 파워를 고르세요.")
+                    return []
+                predicate = f"enemy.GetPowerAmount<{pm['cls']}>() {'>' if condition == 'power' else '<='} 0"
+            elif condition in ("hp_below", "hp_above"):
+                predicate = f"enemy.MaxHp > 0 && (decimal)enemy.CurrentHp * 100m {'<=' if condition == 'hp_below' else '>='} (decimal)enemy.MaxHp * Math.Clamp({self.val(a.get('limit'))}, 0m, 100m)"
+            elif condition != "all":
+                self.errors.append("적 대상 조건을 다시 선택하세요.")
+                return []
+            if group and (group.get("t") != "group" or group.get("items")):
+                self.its.append("enemy")
+                try:
+                    predicate = self.cond(group)
+                finally:
+                    self.its.pop()
+            mode = a.get("enemy_mode", "random")
+            count = f"Math.Clamp((int)({self.val(a.get('count'))}), 0, {pool}.Count)"
+            source = f"{C.me}.CombatState!.PlayerCreatures" if players else self.enemies()
+            alive = "IsAlive" if players else "IsHittable"
+            lines = [f"{ind}{{", f"{ind}    var {pool} = {source}.Where(enemy => enemy.{alive} && ({predicate})).ToList();"]
+            if mode == "choose":
+                ctx = SimpleNamespace(event_target="choose", event_target_count=count, player=C.player, me=C.me, cc=C.cc)
+                setup = event_target_setup(ctx, [], self.project, enemy_expr=pool, force=True)
+                if players:
+                    setup = [line.replace("TargetType.AnyEnemy", "TargetType.AnyAlly").replace(".IsHittable", ".IsAlive") for line in setup]
+                names = set(re.findall(r"\bevent[A-Z]\w*", "\n".join(setup)))
+                mapping = {name: self.uid(name) for name in sorted(names)}
+                for line in setup:
+                    line = re.sub(r"\bevent[A-Z]\w*", lambda m: mapping[m.group()], line)
+                    lines.append(ind + "    " + line)
+                lines.append(f"{ind}    var {selected} = {mapping['eventTargets']};")
+            elif mode in ("random", "all"):
+                lines.append(f"{ind}    var {selected} = new global::System.Collections.Generic.List<global::MegaCrit.Sts2.Core.Entities.Creatures.Creature>();")
+                if mode == "all":
+                    lines.append(f"{ind}    {selected}.AddRange({pool});")
+                else:
+                    n, pick = self.uid("enemyCount"), self.uid("enemyPick")
+                    lines += [f"{ind}    var {n} = {count};", f"{ind}    while ({selected}.Count < {n} && {pool}.Count > 0)", f"{ind}    {{",
+                              f"{ind}        var {pick} = {self.rng()}.NextItem({pool});", f"{ind}        if ({pick} == null) break;", f"{ind}        {selected}.Add({pick});", f"{ind}        {pool}.Remove({pick});", f"{ind}    }}"]
+            else:
+                self.errors.append("적 선택 방식을 다시 고르세요.")
+                return []
+            self.its.append(v)
+            try:
+                body = self.stmts(b.get("body"), ind + "        ")
+            finally:
+                self.its.pop()
+            return lines + [f"{ind}    foreach (var {v} in {selected}.Where(enemy => enemy.{alive}))", f"{ind}    {{", *body, f"{ind}    }}", f"{ind}}}"]
         if op in ("each_enemy", "random_enemy"):
             v = self.uid("it")
             self.its.append(v)
@@ -2414,19 +2845,19 @@ class _Gen:
             return [f"{ind}{{", f"{ind}    var {v} = {self.rng()}.NextItem({self.enemies()}.ToList());",
                     f"{ind}    if ({v} != null)", f"{ind}    {{"] + body + [f"{ind}    }}", f"{ind}}}"]
         if op == "set_var":
-            return [f"{ind}v_{_ident(a.get('name', 'a'))} = {self.val(a.get('amount'))};"]
+            return [f"{ind}v_{_ident(a.get('name', 'a'))} = {self.block_amount(b)};"]
         if op == "change_var":
-            return [f"{ind}v_{_ident(a.get('name', 'a'))} += {self.val(a.get('amount'))};"]
+            return [f"{ind}v_{_ident(a.get('name', 'a'))} += {self.block_amount(b)};"]
         if op in ("card_state_set", "card_state_change"):
-            ref = self.card_ref(a.get("card", "this"))
+            ref = self.card_ref(a.get("card", "this"), a.get("card_n"))
             if ref == "null":
                 return []
             fn = "SetCardState" if op == "card_state_set" else "AddCardState"
-            return [f"{ind}{self.helper()}.{fn}({ref}, {_cs_str(a.get('key'))}, {self.val(a.get('amount'))});"]
-        if op in ("card_var_new", "card_var_remove", "card_do", "card_ref_keyword", "card_tag", "card_enchant",
+            return [f"{ind}{self.helper()}.{fn}({ref}, {_cs_str(a.get('key'))}, {self.block_amount(b)});"]
+        if op in ("card_var_new", "card_var_remove", "card_number_edit", "card_cost_edit", "card_damage_edit", "card_do", "card_ref_keyword", "card_tag", "card_enchant",
                   "card_enchant_clear", "add_card_pos", "draw_bottom"):
             return self.cardref_stmt(b, op, a, ind)
-        if op in ("summon", "command", "unsummon", "pay", "choice", "pick", "random_transform", "pick_transform", "pick_each", "picked_action", "delayed"):
+        if op in ("summon", "command", "unsummon", "pay", "choice", "pick", "random_transform", "pick_transform", "pick_each", "random_each", "picked_action", "delayed"):
             return self.gimmick_stmt(b, op, a, ind)
         if op in SPECS and SPECS[op]["cat"] == "class":
             return self.class_stmt(b, op, a, ind)
@@ -2435,18 +2866,18 @@ class _Gen:
             pid = a.get("pet") or ""
             p = PT.find_pet(self.project, pid)
             if not p:
-                self.errors.append("동료를 고르세요 ('🎲 기믹' 탭에서 먼저 만드세요)." if not pid else f"없는 동료: {pid}")
+                self.errors.append("동료를 고르세요 ('기믹' 탭에서 먼저 만드세요)." if not pid else f"없는 동료: {pid}")
                 return []
             H, cls, act = PT.helper(self.project), PT.pet_cls(self.project, pid), PT.act_cls(self.project, pid)
             pl = C.player
             if op == "pet_summon":
-                return [f"{ind}await {H}.Summon<{cls}, {act}>({C.cc}, {pl}, {self.val(a.get('amount'))}, this, "
+                return [f"{ind}await {H}.Summon<{cls}, {act}>({C.cc}, {pl}, {self.block_amount(b)}, this, "
                         f"{'true' if p.get('guard', True) else 'false'});"]
             if op == "pet_act":
                 return [f"{ind}await {H}.Act<{cls}, {act}>({C.cc}, {pl});"]
             if op == "pet_kill":
                 return [f"{ind}await {H}.Kill<{cls}>({pl});"]
-            amt = self.val(a.get("amount"))
+            amt = self.block_amount(b)
             hits = max(1, int(a.get("hits", 1) or 1))
             return self.each_target(a.get("who", "target"), ind,
                                     lambda t, i2: [f"{i2}await {H}.Attack<{cls}>({C.cc}, {pl}, {t}, {amt}, {hits});"])
@@ -2457,12 +2888,12 @@ class _Gen:
             if op == "fx":
                 fid = a.get("fx") or ""
                 if not fxbtn.find_effect(self.project, fid):
-                    self.errors.append("이펙트를 고르세요 ('🎨 이펙트·버튼' 탭에서 먼저 그리세요)." if not fid else f"없는 이펙트: {fid}")
+                    self.errors.append("이펙트를 고르세요 ('이펙트·버튼' 탭에서 먼저 그리세요)." if not fid else f"없는 이펙트: {fid}")
                     return []
                 return self.each_target(a.get("who", "self"), ind, lambda t, i2: [f'{i2}{nsp}.{mid}Fx.Play("{fid}", {t});'])
             bid = a.get("button") or ""
             if not fxbtn.find_button(self.project, bid):
-                self.errors.append("버튼을 고르세요 ('🎨 이펙트·버튼' 탭에서 먼저 만드세요)." if not bid else f"없는 버튼: {bid}")
+                self.errors.append("버튼을 고르세요 ('이펙트·버튼' 탭에서 먼저 만드세요)." if not bid else f"없는 버튼: {bid}")
                 return []
             if op == "button_on":
                 return [f'{ind}await {nsp}.{mid}Buttons.On("{bid}", {self.C.me}, {self.C.cc});']
@@ -2481,27 +2912,61 @@ class _Gen:
             amt = self.val(a.get("amount"))
             copy_ = "true" if a.get("on_clone", "copy") == "copy" else "false"
             keep = "true" if a.get("on_end", "drop") == "keep" else "false"
-            return self.with_card(a.get("card", "this"), ind, lambda cv, i: [
+            return self.with_card((a.get("card", "this"), a.get("card_n")), ind, lambda cv, i: [
                 f"{i}{H}.NewCardVar({cv}, {key}, {amt}, {copy_}, {keep});"])
         if op == "card_var_remove":
-            return self.with_card(a.get("card", "this"), ind, lambda cv, i: [f"{i}{H}.RemoveCardVar({cv}, {key});"])
+            return self.with_card((a.get("card", "this"), a.get("card_n")), ind, lambda cv, i: [f"{i}{H}.RemoveCardVar({cv}, {key});"])
+        if op in ("card_number_edit", "card_cost_edit", "card_damage_edit"):
+            mode = a.get("edit_mode", "add")
+            if mode not in ("add", "set"):
+                self.errors.append("수치 변경 방법을 다시 선택하세요.")
+                return []
+            amount = self.val(a.get("amount"))
+            def change(cv, i):
+                stat = a.get("stat", "cost") if op == "card_number_edit" else ("cost" if op == "card_cost_edit" else "damage")
+                duration = a.get("duration", "combat") if op == "card_number_edit" else a.get("cost_duration", "combat")
+                if stat not in dict(CARD_STATS) or duration not in dict(COST_DURATIONS):
+                    self.errors.append("변경할 수치와 적용 기간을 다시 선택하세요.")
+                    return []
+                if stat != "cost" and op == "card_number_edit":
+                    method = "EditCardDamage" if stat == "damage" else "EditCardNumber"
+                    stat_arg = "" if stat == "damage" else _cs_str(stat) + ", "
+                    return [f"{i}{H}.{method}({cv}, {stat_arg}{amount}, {'true' if mode == 'set' else 'false'}, {_cs_str(duration)});"]
+                if stat == "cost":
+                    suffix = {"combat": "ThisCombat", "turn": "ThisTurn", "played": "UntilPlayed"}.get(duration)
+                    if suffix is None:
+                        self.errors.append("비용 변경 기간을 다시 선택하세요.")
+                        return []
+                    value = f"(int)({amount})"
+                    if mode == "set":
+                        value = f"System.Math.Max(0, {value})"
+                    method = ("Set" if mode == "set" else "Add") + suffix
+                    return [f"{i}if (!{cv}.EnergyCost.CostsX && {cv}.EnergyCost.Canonical >= 0)",
+                            f"{i}{{", f"{i}    {cv}.EnergyCost.{method}({value});",
+                            f"{i}    {cv}.InvokeEnergyCostChanged();", f"{i}}}"]
+                var = self.uid("damage")
+                value = amount if mode == "set" else f"{var}.BaseValue + ({amount})"
+                return [f"{i}foreach (var {var} in {cv}.DynamicVars.Values.OfType<global::MegaCrit.Sts2.Core.Localization.DynamicVars.DamageVar>())",
+                        f"{i}{{", f"{i}    {var}.BaseValue = System.Math.Max(0m, {value});", f"{i}}}"]
+            return self.with_card((a.get("card", "picked"), a.get("card_n")), ind, change)
         if op == "card_do":
-            act = a.get("action", "bottom")
+            act = a.get("action", "draw_at")
             if act == "hand" and a.get("card") == "this":
                 self.errors.append("'이 카드'를 손으로 가져오기는 사용 중에는 할 수 없습니다.")
-            return self.with_card(a.get("card", "this"), ind, lambda cv, i: [i + _card_action(act, cv, cc)])
+            return self.with_card((a.get("card", "this"), a.get("card_n")), ind,
+                                  lambda cv, i: [i + _card_action(act, cv, cc, H, a.get("action_n"))])
         if op == "card_ref_keyword":
             verb = "ApplyKeyword" if a.get("action", "add") == "add" else "RemoveKeyword"
             kw = a.get("keyword") or "Retain"
-            return self.with_card(a.get("card", "this"), ind, lambda cv, i: [f"{i}CardCmd.{verb}({cv}, CardKeyword.{kw});"])
+            return self.with_card((a.get("card", "this"), a.get("card_n")), ind, lambda cv, i: [f"{i}CardCmd.{verb}({cv}, CardKeyword.{kw});"])
         if op == "card_tag":
             import gimmick as G
             tag = a.get("tag") or ""
             if not G.find_tag(self.project, tag):
-                self.errors.append("기믹 태그를 고르세요 ('🎲 기믹' 탭에서 먼저 만드세요)." if not tag else f"없는 태그: {tag}")
+                self.errors.append("기믹 태그를 고르세요 ('기믹' 탭에서 먼저 만드세요)." if not tag else f"없는 태그: {tag}")
                 return []
             fn = "AddCardTag" if a.get("action", "add") == "add" else "RemoveCardTag"
-            return self.with_card(a.get("card", "this"), ind, lambda cv, i: [f'{i}{H}.{fn}({cv}, {_cs_str(tag)});'])
+            return self.with_card((a.get("card", "this"), a.get("card_n")), ind, lambda cv, i: [f'{i}{H}.{fn}({cv}, {_cs_str(tag)});'])
         if op == "card_enchant":
             en = a.get("enchant") or "Inky"
             if en not in dict(ENCHANTS):
@@ -2509,13 +2974,14 @@ class _Gen:
                 return []
             T = f"global::MegaCrit.Sts2.Core.Models.Enchantments.{en}"
             amt = self.val(a.get("amount"))
-            return self.with_card(a.get("card", "this"), ind, lambda cv, i: [
+            return self.with_card((a.get("card", "this"), a.get("card_n")), ind, lambda cv, i: [
                 f"{i}if (({cv}.Enchantment == null || {cv}.Enchantment is {T}) && ModelDb.Enchantment<{T}>().CanEnchant({cv})) CardCmd.Enchant<{T}>({cv}, {amt});"])
         if op == "card_enchant_clear":
-            return self.with_card(a.get("card", "this"), ind, lambda cv, i: [
+            return self.with_card((a.get("card", "this"), a.get("card_n")), ind, lambda cv, i: [
                 f"{i}if ({cv}.Enchantment != null) CardCmd.ClearEnchantment({cv});"])
         if op == "draw_bottom":
-            return [f"{ind}await {H}.DrawFromBottom({C.player}, (int)({self.val(a.get('count'))}));"]
+            pos = self.val(_pos_value(a.get("pos")))
+            return [f"{ind}await {H}.DrawFromPosition({C.player}, (int)({pos}), (int)({self.val(a.get('count'))}));"]
         if op == "add_card_pos":
             i_, nc = self.uid("i"), self.uid("nc")
             card = a.get("card", "this")
@@ -2529,13 +2995,13 @@ class _Gen:
                     self.errors.append(f"없는 카드: {card}")
                     return []
                 make = f"{C.me}.CombatState!.CreateCard<{M.item_cls(self.project, 'card', card)}>({C.player})"
-            pos = a.get("pos", "Bottom") if a.get("pos") in ("Bottom", "Top", "Random") else "Bottom"
+            pos = self.val(_pos_value(a.get("pos")))
             lines = [f"{ind}if ({C.player} != null)", f"{ind}{{",
                      f"{ind}    for (var {i_} = 0; {i_} < (int)({self.val(a.get('count'))}); {i_}++)", f"{ind}    {{",
                      f"{ind}        var {nc} = {make};"]
             if card == "this":
                 lines.append(f"{ind}        if (IsUpgraded) CardCmd.Upgrade({nc});")
-            return lines + [f"{ind}        await CardPileCmd.AddGeneratedCardToCombat({nc}, PileType.Draw, {C.player}, CardPilePosition.{pos});",
+            return lines + [f"{ind}        await {H}.AddGeneratedToDrawPile({nc}, {C.player}, (int)({pos}));",
                             f"{ind}    }}", f"{ind}}}"]
         return []
 
@@ -2663,20 +3129,46 @@ class _Gen:
                     self.stmts(body, ind + "            ") + [f"{ind}        }}"]
             return lines + [f"{ind}    }}", f"{ind}}}"]
         def picked_action(cv):
-            return _card_action(a.get("action", "hand"), cv, cc)
+            return _card_action(a.get("action", "hand"), cv, cc, H, a.get("action_n"))
         if op == "picked_action":
             if not self.selected_cards:
                 self.errors.append("‘고른 카드에 실행’은 ‘한 장마다 실행’ 안에 넣으세요.")
                 return []
             return [ind + picked_action(self.selected_cards[-1])]
-        if op in ("pick", "random_transform", "pick_transform", "pick_each"):
+        if op in ("pick", "random_transform", "pick_transform", "pick_each", "random_each"):
             pile = a.get("pile", "Discard")
             cv, lst, pv = self.uid("c"), self.uid("picked"), self.uid("pl")
             conds = [G.filter_expr(self.project, a.get("ctype") or "Any", cv)]
+            group = a.get("conditions")
+            if group and (group.get("t") != "group" or group.get("items")):
+                self.selected_cards.append(cv)
+                try:
+                    conds.append(self.cond(a["conditions"]))
+                finally:
+                    self.selected_cards.pop()
             if C.kind == "card":
                 conds.append(f"{cv} != this")
             if a.get("action") == "upgrade":
                 conds.append(f"{cv}.IsUpgradable")
+            if op == "random_each":
+                pool, remaining = self.uid("candidates"), self.uid("remaining")
+                self.selected_cards.append(cv)
+                try:
+                    commands = self.stmts(b.get("body"), ind + "        ")
+                finally:
+                    self.selected_cards.pop()
+                # Select the complete, distinct set before any action changes
+                # a pile. Added/moved cards cannot enter this selection later.
+                return [f"{ind}if ({C.player} is {{ }} {pv})", f"{ind}{{",
+                        f"{ind}    var {pool} = PileType.{pile}.GetPile({pv}).Cards.Where({cv} => {' && '.join(conds)}).ToList();",
+                        f"{ind}    var {lst} = new System.Collections.Generic.List<CardModel>();",
+                        f"{ind}    var {remaining} = (int)({self.val(a.get('count'))});",
+                        f"{ind}    while ({remaining}-- > 0 && {pool}.Count > 0)", f"{ind}    {{",
+                        f"{ind}        var {cv} = {pv}.RunState.Rng.CombatCardSelection.NextItem({pool});",
+                        f"{ind}        if ({cv} == null) break;",
+                        f"{ind}        {pool}.Remove({cv});", f"{ind}        {lst}.Add({cv});", f"{ind}    }}",
+                        f"{ind}    foreach (var {cv} in {lst})", f"{ind}    {{", *commands,
+                        f"{ind}    }}", f"{ind}}}"]
             if op == "random_transform":
                 remaining = self.uid("remaining")
                 result = a.get("result_filter", "Any")
@@ -2784,11 +3276,12 @@ def _dec(x):
     return (str(int(f)) if f.is_integer() else repr(f)) + "m"
 
 
-def _card_action(action, cv, cc):
-    """카드 한 장에 하는 행동 (고르기 블록·카드 참조 블록이 같이 씀)."""
+def _card_action(action, cv, cc, H=None, n=None):
+    """카드 한 장에 하는 행동 (고르기 블록·카드 참조 블록이 같이 씀). 'draw_at' 은 뽑을 더미 N번째."""
+    action, n = pos_n(action, n)
+    if action == "draw_at":
+        return f"await {H}.PutInDrawPile({cv}, {n});"
     return {"hand": f"await CardPileCmd.Add({cv}, PileType.Hand);",
-            "top": f"await CardPileCmd.Add({cv}, PileType.Draw, CardPilePosition.Top);",
-            "bottom": f"await CardPileCmd.Add({cv}, PileType.Draw, CardPilePosition.Bottom);",
             "exhaust": f"await CardCmd.Exhaust({cc}, {cv});",
             "discard": f"await CardCmd.Discard({cc}, {cv});",
             "random_transform": f"await CardCmd.TransformToRandom({cv}, {cv}.Owner.PlayerRng.Transformations);",
@@ -2814,11 +3307,14 @@ def _used_vars(blocks):
         if isinstance(v, dict):
             if v.get("t") == "var":
                 names.add(v.get("name", "a"))
-            for k in ("a", "b", "min", "max", "pct"):
-                scan_val(v.get(k))
+            for child in v.values():
+                scan_val(child)
+        elif isinstance(v, list):
+            for child in v:
+                scan_val(child)
     for b in walk(blocks):
         a = b.get("args", {})
-        if b["op"] in ("set_var", "change_var"):
+        if b["op"] in ("edit_var", "set_var", "change_var"):
             names.add(a.get("name", "a"))
         for v in a.values():
             scan_val(v)
@@ -2852,12 +3348,12 @@ def uses_event_target(blocks, project):
     return scan(blocks)
 
 
-def event_target_setup(C, blocks, project):
+def event_target_setup(C, blocks, project, enemy_expr=None, force=False):
     mode = getattr(C, "event_target", None)
-    if mode not in ("random", "choose") or not uses_event_target(blocks, project):
+    if mode not in ("random", "choose") or not (force or uses_event_target(blocks, project)):
         return []
     player, creature, context = C.player, C.me, C.cc
-    lines = [f"var eventEnemies = {creature}.CombatState?.HittableEnemies.ToList();"]
+    lines = [f"var eventEnemies = {enemy_expr or f'{creature}.CombatState?.HittableEnemies.ToList()'};"]
     if mode == "random":
         return lines + [f"var eventTarget = eventEnemies != null && eventEnemies.Count > 0 ? {player}.RunState.Rng.CombatTargets.NextItem(eventEnemies) : null;"]
     count = getattr(C, "event_target_count", 1)

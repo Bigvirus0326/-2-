@@ -36,7 +36,7 @@ ARG_KIND_TEXT = {
     "summon_any": '소환수 ID 또는 "*"(전부)',
     "label": '{"ko": "...", "en": "...", "zh": "..."}',
     "pick_pile": '"Hand" | "Draw" | "Discard" | "Exhaust"',
-    "pick_action": '"hand" | "top" | "bottom" | "exhaust" | "discard" | "upgrade"',
+    "pick_action": '"hand" | "draw_at" (+ "action_n": 1=top, -1=bottom) | "exhaust" | "discard" | "upgrade"',
     "delay_when": '"start"(다음 내 턴 시작) | "end"(이번 턴 끝)',
     "orb": '게임 구체 "Lightning" | "Frost" | "Dark" | "Plasma" | "Glass" 또는 새 구체 "o:<구체ID>"',
     "evoke_which": '"front" | "last"',
@@ -85,6 +85,14 @@ def _blocks_reference():
         for op in ops:
             if op in ("source_step", "original_play"):
                 continue     # 원본 모드 복제 카드 전용 (AI 가 새로 만들 블록이 아님)
+            if op in B.F.FAMILIES:
+                lines.append(f'  "{op}": {B.F.FAMILIES[op][0]} — args.mode에서 실행 방식 선택')
+                for mode,label in B.F.FAMILIES[op][1]:
+                    mode_spec = B.SPECS[mode]
+                    fields = ", ".join(f"{k}: {ARG_KIND_TEXT.get(kind, kind)}" for k,(kind,_d) in mode_spec["args"].items())
+                    bodies = ", ".join(key for key in B.BODY_KEYS if mode_spec.get(key))
+                    lines.append(f'    mode="{mode}" ({label}) — args {{{fields}}}' + (f" — 안쪽 목록: {bodies}" if bodies else ""))
+                continue
             spec = B.SPECS[op]
             args = ", ".join(f"{k}: {ARG_KIND_TEXT.get(kind, kind)}" for k, (kind, _d) in spec["args"].items())
             extra = []
@@ -234,6 +242,11 @@ value 객체 (수치가 들어가는 자리):
   {{"t": "osty", "what": "hp"|"maxhp"}}, {{"t": "pet", "pet": 동료ID, "what": "hp"|"maxhp"}}
 
 cond 객체 (조건):
+- {{"t": "group", "mode": "all"|"any", "items": [cond, ...]}} — 모두 / 하나 이상 만족. 빈 목록은 제한 없음.
+- {{"t": "hp_percent", "who": "self"|"target"|"it", "op": "<=", "value": value}} — 체력 비율(%) 비교.
+- {{"t": "pile_count", "who": "self"|"target"|"it", "pile": "Deck"|"Hand"|"Draw"|"Discard"|"Exhaust", "card_id": 카드ID 또는 "", "filter": 카드필터, "op": ">=", "count": value}} — 덱/더미의 카드 수 비교. Deck은 전투 전 원본 덱.
+- {{"t": "card_identity", "card_id": 카드ID}} — 고르는 중인 카드의 종류 확인.
+- 적/플레이어 고르기의 args.conditions에서는 who="it", 카드 고르기에서는 card_is의 card="picked"를 사용. group은 중첩 가능.
 - {{"t": "cmp", "a": value, "op": ">="|">"|"=="|"<"|"<="|"!=", "b": value}}
 - {{"t": "chance", "pct": value}}  확률(%)
 - {{"t": "has", "who": "self"|"target"|"it", "power": 파워 참조}}

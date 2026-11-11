@@ -273,6 +273,9 @@ def _fix_value(v, ctx, where, patch):
 def _fix_cond(c, ctx, where, patch):
     if not isinstance(c, dict):
         return c
+    if c.get("t") == "group":
+        c["items"] = [_fix_cond(x, ctx, where, patch) for x in c.get("items", [])]
+        return c
     if c.get("t") == "has" and c.get("power"):
         c["power"] = _power_ref(c["power"], ctx, where, "조건 파워", patch)
     if c.get("t") in ("and", "or", "not"):
@@ -280,7 +283,7 @@ def _fix_cond(c, ctx, where, patch):
             if k in c:
                 c[k] = _fix_cond(c[k], ctx, where, patch)
     else:
-        for k in ("a", "b", "pct"):
+        for k in ("a", "b", "pct", "value", "count"):
             if k in c:
                 c[k] = _fix_value(c[k], ctx, where, patch)
     return c
@@ -297,16 +300,23 @@ def _fix_blocks(blocks, ctx, where, patch):
             patch.errors.append(f"{where}: 모르는 블록 '{op}'. 쓸 수 있는 블록: {', '.join(B.SPECS)}")
             continue
         nb = B.new_block(op)
-        args = b.get("args") if isinstance(b.get("args"), dict) else {}
+        args = dict(b.get("args")) if isinstance(b.get("args"), dict) else {}
+        if op in B.F.FAMILIES:
+            mode = args.get("mode", b.get("mode", nb["args"]["mode"]))
+            if not isinstance(mode,str) or mode not in dict(B.F.FAMILIES[op][1]):
+                patch.errors.append(f"{where}: 블록 '{op}'의 실행 방식을 다시 선택하세요: {mode}")
+                continue
+            B.F.switch(nb, mode, B.SPECS)
+        schema = B.block_spec(nb)["args"]
         # args 없이 바로 쓴 경우도 받아준다
-        for k in B.SPECS[op]["args"]:
+        for k in schema:
             if k not in args and k in b:
                 args[k] = b[k]
         for k, val in args.items():
-            if k not in B.SPECS[op]["args"]:
+            if k not in schema:
                 patch.fixes.append(f"{where}: 블록 '{op}' 의 모르는 칸 '{k}' 무시")
                 continue
-            kind = B.SPECS[op]["args"][k][0]
+            kind = schema[k][0]
             if kind == "value":
                 val = _fix_value(val, ctx, where, patch)
             elif kind == "cond":
@@ -519,8 +529,8 @@ def missing_selections(patch):
                 if key == "gtags" and isinstance(value, list):
                     yield from (("tag", t) for t in value if isinstance(t, str))
                 elif isinstance(value, str):
-                    if key in ("card", "summon", "orb", "pet", "button", "fx"):
-                        yield key, value
+                    if key in ("card", "card_id", "summon", "orb", "pet", "button", "fx"):
+                        yield "card" if key == "card_id" else key, value
                     if key in ("filter", "result_filter", "ctype", "played_filter") and value.startswith("tag:"):
                         yield "tag", value[4:]
                     if key in ("power", "scale_power", "cond_power", "res_power", "ref"):
@@ -594,7 +604,7 @@ def _rename_refs(obj, kind, old, new):
                 obj[k] = "tag:" + new
             elif kind == "summon" and v == "s:" + old:
                 obj[k] = "s:" + new
-            elif kind == "card" and k == "card" and v == old:
+            elif kind == "card" and k in ("card", "card_id") and v == old:
                 obj[k] = new
             else:
                 _rename_refs(v, kind, old, new)

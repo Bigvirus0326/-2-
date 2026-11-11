@@ -646,7 +646,11 @@ def compose_card(assets, project, card, lang="ko", upgraded=False, k=K):
     import preview as PV  # 설명 변수 채우기 재사용
     R = assets.card_rects
     cv = Canvas(-172, -232, 172, 228, k)
-    ctype = card.get("type", "Attack").lower()
+    import cardkind as CK
+    custom_kind = CK.definition(project, card)
+    visual_type = custom_kind.get("base_type", "Skill") if custom_kind else card.get("type", "Attack")
+    ctype = visual_type.lower() if visual_type in ("Attack", "Skill", "Power", "Quest") else "skill"
+    border_type = ctype if ctype in ("attack", "skill", "power") else "skill"
     ch = project["character"]
     frame = assets.texture(f"images/atlases/ui_atlas.sprites/card/card_frame_{ctype}_s.tres")
     if card.get("_hsv"):
@@ -655,12 +659,13 @@ def compose_card(assets, project, card, lang="ko", upgraded=False, k=K):
         fh = assets.material_hsv("materials/cards/frames/card_frame_colorless_mat.tres")
     else:
         fh = (float(ch.get("card_h", 1)), float(ch.get("card_s", 1)), float(ch.get("card_v", 1)))
-    rarity = {"Basic": "common", "Common": "common", "Uncommon": "uncommon", "Rare": "rare"}.get(card.get("rarity"), "common")
+    rarity = {"Basic": "common", "Common": "common", "Uncommon": "uncommon", "Rare": "rare",
+              "Curse": "curse", "Status": "status", "Quest": "quest", "Event": "event"}.get(card.get("rarity"), "common")
     bh = assets.material_hsv(f"materials/cards/banners/card_banner_{rarity}_mat.tres")
     # 카드 테두리 디자인 (모드가 게임에서 하는 것과 같게: 색 = hsv 셰이더, 내 그림 = 셰이더 없이)
     import cardframe as CF
     style = card.get("_frame_style") if "_frame_style" in card else CF.effective(project, card)
-    ctype_cap = card.get("type", "Attack") if card.get("type") in CF.TYPES else "Skill"
+    ctype_cap = visual_type if visual_type in CF.TYPES else "Skill"
 
     def styled(part, default_hsv):
         """(내 그림 또는 None, 쓸 hsv)"""
@@ -714,9 +719,9 @@ def compose_card(assets, project, card, lang="ko", upgraded=False, k=K):
     draw_rich(cv, assets, full, _shift(R.get("DescriptionLabel", (-122, 37, 121, 173)), CAL_DESC_DY), fkey,
               CAL_DESC_SIZE, 12, COLORS["cream"], line_sep=-3, pad=text_pad(lang), energy_icon=small_e)
     # 그림 테두리 / 제목 띠 (희귀도 색)
-    pb = assets.texture(f"images/atlases/ui_atlas.sprites/card/card_portrait_border_{ctype}_s.tres")
+    pb = assets.texture(f"images/atlases/ui_atlas.sprites/card/card_portrait_border_{border_type}_s.tres")
     cv.paste(border_img if border_img is not None else
-             assets.hsv_texture(f"images/atlases/ui_atlas.sprites/card/card_portrait_border_{ctype}_s.tres", *border_h),
+             assets.hsv_texture(f"images/atlases/ui_atlas.sprites/card/card_portrait_border_{border_type}_s.tres", *border_h),
              R.get("PortraitBorder", (-137.5, -164, 137.5, 46)), "contain")
     banner = assets.texture("images/atlases/ui_atlas.sprites/card/card_banner.tres")
     cv.paste(banner_img if banner_img is not None else
@@ -735,6 +740,8 @@ def compose_card(assets, project, card, lang="ko", upgraded=False, k=K):
                outline=(77, 75, 64), outline_size=12, shadow=(0, 0, 0, 48))
     # 종류 명패
     tname = assets.loc(lang, "gameplay_ui").get(f"CARD_TYPE.{card.get('type', 'Attack').upper()}", card.get("type"))
+    if custom_kind:
+        tname = M.text(custom_kind, "name", lang)
     tfont = assets.font("bold" if fkey == "regular" else fkey, CAL_TYPE_SIZE * cv.k)
     pr = R.get("TypePlaque", (-30.5, 1, 30.5, 38))
     need = tfont.getlength(tname) / cv.k + 20
@@ -747,7 +754,8 @@ def compose_card(assets, project, card, lang="ko", upgraded=False, k=K):
     big_e, _ = energy_icons(assets, project, card)
     el_, et_, es_ = CAL_ENERGY
     er = (el_, et_, el_ + es_, et_ + es_)
-    cv.paste(big_e, er)
+    if not card.get("no_cost"):
+        cv.paste(big_e, er)
     cost = "?" if card.get("cost_unknown") else "X" if card.get("x_cost") else         int(card.get("upgrade_cost" if upgraded else "cost", 0) or 0)
     changed = upgraded and not card.get("cost_unknown") and not card.get("x_cost") and         int(card.get("upgrade_cost", 0)) < int(card.get("cost", 0))
     ex, ey = (er[0] + er[2]) / 2, (er[1] + er[3]) / 2
@@ -756,8 +764,9 @@ def compose_card(assets, project, card, lang="ko", upgraded=False, k=K):
         col, out = (0, 255, 0), (31, 89, 35)
     else:
         col, out = COLORS["cream"], _hex(energy_outline_color(project))
-    draw_label(cv, str(cost), el, assets.font("bold", 32 * cv.k), col, outline=out,
-               outline_size=16, shadow=(0, 0, 0, 48))
+    if not card.get("no_cost"):
+        draw_label(cv, str(cost), el, assets.font("bold", 32 * cv.k), col, outline=out,
+                   outline_size=16, shadow=(0, 0, 0, 48))
     # 별 비용 (리젠트처럼): card.tscn 의 StarIcon (-186,-189)~(-128,-131), energy_star.png
     sc = int(card.get("star_cost") or 0)
     if card.get("star_x") or sc > 0:

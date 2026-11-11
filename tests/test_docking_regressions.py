@@ -91,8 +91,134 @@ class DockingRegressionTests(unittest.TestCase):
         self.assertFalse(self.errors, "\n".join(self.errors))
         self.assertEqual(json.dumps(self.app.project, sort_keys=True), self.baseline)
 
+    def test_card_kind_selection_and_curse_defaults(self):
+        import copy
+        import cardkind as K
+        tab = self.app.card_tab
+        card = self.app.project["cards"][0]
+        saved = copy.deepcopy(card)
+        tags = self.app.project["gimmicks"]["tags"]
+        saved_tags = copy.deepcopy(tags)
+        try:
+            tab.load(0)
+            tab.type_combo.set_value("Curse")
+            tab._type_changed()
+            self.assertEqual(card["type"], "Curse")
+            self.assertEqual(card["rarity"], "Curse")
+            self.assertTrue(tab.kw_vars["Unplayable"].get())
+            key = K.create(self.app.project, "테스트 분류", "Skill", "테스트 설명")
+            tab.load(0)
+            tab.type_combo.set_value(key)
+            tab._type_changed()
+            self.assertEqual(card["type"], "Skill")
+            self.assertEqual(tab.type_combo.get_value(), key)
+            tab.changed()
+            self.assertIn(key[5:], card["gtags"])
+            tab.load(0)
+            self.assertEqual(tab.type_combo.get_value(), key)
+            tab.type_combo.set_value("Attack")
+            tab._type_changed()
+            self.assertNotIn(key[5:], card["gtags"])
+            self.app.update()
+        finally:
+            card.clear()
+            card.update(saved)
+            tags[:] = saved_tags
+            tab.load(0)
+
+    def test_no_cost_checkbox_persists_and_disables_number_fields(self):
+        import copy
+        tab = self.app.card_tab
+        card = self.app.project["cards"][0]
+        saved = copy.deepcopy(card)
+        try:
+            tab.load(0)
+            tab.vars["x_cost"][1].set(True)
+            tab.vars["no_cost"][1].set(True)
+            tab.changed()
+            self.assertTrue(card["no_cost"])
+            self.assertFalse(card["x_cost"])
+            self.assertTrue(all(str(w.cget("state")) == "disabled" for w in tab.no_cost_controls))
+            tab.load(0)
+            self.assertTrue(tab.vars["no_cost"][1].get())
+            tab.vars["no_cost"][1].set(False)
+            tab.changed()
+            self.assertTrue(all(str(w.cget("state")) == "normal" for w in tab.no_cost_controls))
+            self.assertEqual(card["cost"], saved["cost"])
+        finally:
+            card.clear()
+            card.update(saved)
+            tab.load(0)
+
+    def test_separate_upgrade_effect_editor_saves_and_toggles(self):
+        import copy
+        tab = self.app.card_tab
+        card = self.app.project["cards"][0]
+        saved = copy.deepcopy(card)
+        draw = B.new_block("draw")
+        try:
+            tab.load(0)
+            with patch.object(blockui, "BlockEditor", return_value=SimpleNamespace(result={"blocks":[draw]})), patch.object(tab, "wait_window"):
+                tab.edit_upgrade_effect()
+            self.assertTrue(card["separate_upgrade_effect"])
+            self.assertEqual(card["upgrade_effect_blocks"], [draw])
+            self.assertIn("뽑", tab.upgrade_effect_summary.cget("text"))
+            tab.load(0)
+            self.assertTrue(tab.vars["separate_upgrade_effect"][1].get())
+            tab.vars["separate_upgrade_effect"][1].set(False)
+            tab.changed()
+            self.assertTrue(card["upgrade_effect_blocks"])
+            self.assertEqual(card["effects"], saved["effects"])
+        finally:
+            card.clear()
+            card.update(saved)
+            tab.load(0)
+
+    def test_variant_checkboxes_copy_add_remove_without_extra_tabs(self):
+        import copy
+        tab = self.app.card_tab
+        card = self.app.project["cards"][0]
+        saved = copy.deepcopy(card)
+        try:
+            tab.load(0)
+            self.assertEqual(len(tab.effect_tabs.tabs()), 4)
+            tab.vars["separate_upgrade_effect"][1].set(True)
+            tab._change_play_variant()
+            self.assertTrue(tab.edit_upgraded_play.get())
+            self.assertEqual(card["upgrade_effects"], card["effects"])
+            self.assertIsNot(card["upgrade_effects"][0], card["effects"][0])
+            tab.effects.effects.append(M.new_effect("draw", 3))
+            tab.effects.refresh()
+            tab.changed()
+            self.assertEqual(card["effects"], saved["effects"])
+            tab.effects.tree.selection_set("0")
+            tab.effects.remove()
+            self.assertEqual(len(card["upgrade_effects"]), len(saved["effects"]))
+            for event, panel in tab.event_panels.items():
+                original = [B.new_block("energy")]
+                card.setdefault("event_blocks", {})[event] = copy.deepcopy(original)
+                panel.separate_var.set(True)
+                panel.change_variant()
+                self.assertTrue(panel.upgraded_var.get())
+                self.assertEqual(panel.blocks(), original)
+                self.assertIsNot(panel.blocks()[0], card["event_blocks"][event][0])
+                panel.blocks().append(B.new_block("block"))
+                panel.refresh()
+                panel.tree.selection_set("0")
+                panel.remove()
+                self.assertEqual(card["event_blocks"][event], original)
+                self.assertEqual(len(panel.blocks()), 1)
+                panel.separate_var.set(False)
+                panel.change_variant()
+                self.assertEqual(panel.blocks(), original)
+                self.assertTrue(card["upgrade_event_blocks"][event])
+        finally:
+            card.clear()
+            card.update(saved)
+            tab.load(0)
+
     def native_tabs(self):
-        return list(map(str, ttk.Notebook.tabs(self.nb)))
+        return [self.nb._k(t) for t in ttk.Notebook.tabs(self.nb)]
 
     def check_notebook(self):
         native = self.native_tabs()
@@ -103,7 +229,7 @@ class DockingRegressionTests(unittest.TestCase):
             self.assertEqual(record["floating"].get(), record["detached"])
             self.assertTrue(record["host"].winfo_exists())
             if key in native:
-                self.assertEqual(ttk.Notebook.tab(self.nb,key,"state") != "hidden", record["visible"].get())
+                self.assertEqual(ttk.Notebook.tab(self.nb,self.nb._n(key),"state") != "hidden", record["visible"].get())
             else:
                 self.assertEqual(record["host"].state() != "withdrawn",record["visible"].get())
         self.assertEqual(native, [k for k in self.nb._visual_order if not self.nb._pages[k]["detached"]])
@@ -427,6 +553,415 @@ class DockingRegressionTests(unittest.TestCase):
         self.assertIsNone(drag.ghost)
         self.assertIsNone(drag.preview)
 
+    def test_selected_card_numeric_blocks_render_and_compile(self):
+        card = M.new_card("test_numeric_edits")
+        block = B.new_block("random_each")
+        block["body"] = [B.new_block("card_cost_edit"), B.new_block("card_damage_edit")]
+        editor = blockui.BlockEditor(self.app,self.app.project,"card",card,[block])
+        editor.geometry("+5000+5000")
+        try:
+            editor.update()
+            editor.render()
+            editor.update_idletasks()
+            self.assertTrue(editor.canvas.find_all())
+            _, errors = B.compile_blocks(editor.blocks,self.app.project,M._Ctx("card",card))
+            self.assertEqual(errors,[])
+        finally:
+            editor.destroy()
+
+    def test_expanded_stat_and_compact_blocks_render(self):
+        import copy
+        import fxbtn
+        project=copy.deepcopy(self.app.project)
+        project.setdefault("gimmicks",{})["buttons"]=[fxbtn.new_button("compact_test")]
+        card=M.new_card("expanded_numeric_test")
+        block=B.new_block("random_each")
+        block["body"]=[]
+        for stat,_ in B.CARD_STATS:
+            edit=B.new_block("card_number_edit")
+            edit["args"]["stat"]=stat
+            block["body"].append(edit)
+        blocks=[block,B.new_block("edit_var"),B.new_block("card_state_edit"),B.new_block("button_switch")]
+        blocks[-1]["args"]["button"]="compact_test"
+        editor=blockui.BlockEditor(self.app,project,"card",card,blocks)
+        editor.geometry("+5000+5000")
+        try:
+            editor.update()
+            editor.render()
+            editor.update_idletasks()
+            _,errors=B.compile_blocks(editor.blocks,project,M._Ctx("card",card))
+            self.assertEqual(errors,[])
+            self.assertTrue(editor.canvas.find_all())
+        finally:
+            editor.destroy()
+
+    def test_every_compact_family_mode_renders_and_selection_combo_switches(self):
+        card=M.new_card("family_ui")
+        editor=blockui.BlockEditor(self.app,self.app.project,"card",card,[])
+        editor.geometry("+5000+5000")
+        try:
+            for family,_title,variants in B.F.GROUPS:
+                block=B.new_block(family)
+                for mode,_label in variants:
+                    with self.subTest(family=family,mode=mode):
+                        B.F.switch(block,mode,B.SPECS)
+                        editor.blocks=[block]
+                        editor.render()
+                        editor.update_idletasks()
+                        self.assertTrue(editor.canvas.find_all())
+            selection=B.new_block("select_cards")
+            selection["body"]=[B.new_block("card_number_edit")]
+            selection["args"]["count"]={"t":"num","v":3}
+            editor.blocks=[selection]
+            editor.render()
+            def children(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from children(child)
+            for mode in ("random_each","pick_each"):
+                combo=next(w for frame in editor.frames for w in children(frame)
+                           if isinstance(w,blockui._Combo) and {v for v,_ in w.opts}=={"pick_each","random_each"})
+                combo.set_value(mode)
+                combo.event_generate("<<ComboboxSelected>>")
+                editor.update()
+                self.assertEqual(selection["args"]["mode"],mode)
+                self.assertEqual(selection["args"]["count"]["v"],3)
+                self.assertEqual(len(selection["body"]),1)
+        finally:
+            editor.destroy()
+
+    def test_enemy_condition_fields_switch_without_losing_values(self):
+        card = M.new_card("enemy_conditions")
+        block = B.new_block("select_enemies")
+        B.F.switch(block, "filtered_enemies", B.SPECS)
+        editor = blockui.BlockEditor(self.app, self.app.project, "card", card, [block])
+        block = editor.blocks[0]
+        editor.geometry("+5000+5000")
+        def children(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from children(child)
+        def select(key, value):
+            combo = next(w for frame in editor.frames for w in children(frame)
+                         if isinstance(w, blockui._Combo) and key in {v for v, _ in w.opts})
+            combo.set_value(value)
+            combo.event_generate("<<ComboboxSelected>>")
+            editor.update()
+        try:
+            editor.update()
+            select("hp_below", "hp_below")
+            self.assertEqual(block["args"]["enemy_filter"], "hp_below")
+            self.assertIn("{limit}", B.block_caption(block))
+            self.assertNotIn("{power}", B.block_caption(block))
+            select("choose", "choose")
+            select("hp_below", "power")
+            self.assertIn("{power}", B.block_caption(block))
+            self.assertEqual(block["args"]["limit"]["v"], 30)
+            self.assertEqual(block["args"]["enemy_mode"], "choose")
+            select("choose", "all")
+            self.assertNotIn("{count}", B.block_caption(block))
+        finally:
+            editor.destroy()
+
+    def test_compound_condition_dialog_add_edit_delete_and_modes(self):
+        card = M.new_card("compound_ui")
+        editor = blockui.BlockEditor(self.app,self.app.project,"card",card,[])
+        editor.geometry("+5000+5000")
+        dialog = None
+        def children(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from children(child)
+        def button(text):
+            return next(w for w in children(dialog.fields) if isinstance(w,ttk.Button) and w.cget("text")==text)
+        try:
+            editor.update()
+            initial = {"t":"group","mode":"all","scope":"creature","items":[{"t":"has","who":"it","power":"Weak"}]}
+            dialog = blockui.SlotDialog(editor,editor,"cond",initial)
+            half = {"t":"hp_percent","who":"it","op":"<=","value":{"t":"num","v":50}}
+            with patch.object(blockui,"SlotDialog",return_value=SimpleNamespace(result=half)), patch.object(dialog,"wait_window"):
+                button("+ 조건 추가").invoke()
+            self.assertEqual(len(dialog.data["items"]),2)
+            combo = next(w for w in children(dialog.fields) if isinstance(w,blockui._Combo) and ("any","하나 이상 만족 (또는)") in w.opts)
+            combo.set_value("any")
+            combo.event_generate("<<ComboboxSelected>>")
+            dialog.update()
+            self.assertEqual(dialog.data["mode"],"any")
+            listing = next(w for w in children(dialog.fields) if isinstance(w,tk.Listbox))
+            listing.selection_set(0)
+            button("삭제").invoke()
+            self.assertEqual(dialog.data["items"],[half])
+            self.assertEqual(len(initial["items"]),1)
+            for kind in ("hp_percent","pile_count","card_identity","group","has","card_is"):
+                dialog._type_changed(kind)
+                dialog.update_idletasks()
+                self.assertTrue(dialog.fields.winfo_children())
+            dialog._type_changed("pile_count")
+            self.assertEqual(dialog.data["who"],"it")
+            self.assertEqual(dialog.data["pile"],"Deck")
+            dialog.ok()
+            dialog = None
+        finally:
+            if dialog is not None:
+                dialog.destroy()
+            editor.destroy()
+
+    def test_card_list_drag_selection_reorder_filtered_move_delete_and_cancel(self):
+        import copy
+        tab = self.app.card_tab
+        original = copy.deepcopy(self.app.project)
+        active = self.nb.select()
+        self.nb.select(tab)
+        self.app.update()
+        def event(row=None, column="#0", after=False, widget=None, blank=False):
+            if widget is not None:
+                xr,yr = widget.winfo_rootx()+10,widget.winfo_rooty()+10
+                x,y = xr-tab.tree.winfo_rootx(),yr-tab.tree.winfo_rooty()
+            else:
+                box = tab.tree.bbox(str(row),column)
+                self.assertTrue(box,(row,column))
+                x,y = box[0]+min(12,box[2]//2),box[1]+(box[3]-2 if after else 2)
+                if blank:
+                    x=-6
+                xr,yr = tab.tree.winfo_rootx()+x,tab.tree.winfo_rooty()+y
+            return SimpleNamespace(x=x,y=y,x_root=xr,y_root=yr,state=0)
+        def refresh():
+            tab.refresh_list(0)
+            self.app.update()
+        def move(rows,target,after=False):
+            tab.tree.selection_set([str(i) for i in rows])
+            tab._drag_start(event(rows[0]))
+            e=event(target,after=after)
+            tab._drag_move(e)
+            self.assertEqual(tab.card_drag.state['drop'][0],'move')
+            self.assertTrue(tab.card_drag.marker.winfo_manager())
+            tab._drag_end(e)
+            self.app.update()
+        try:
+            self.app.project['cards'] = [M.new_card(f"drag_{i}") for i in range(8)]
+            refresh()
+            ids=[x['id'] for x in tab.items]
+            with patch.object(self.app,"mark_dirty") as dirty:
+                tab._drag_start(event(1,blank=True))
+                tab._drag_move(event(3,after=True))
+                self.assertTrue(all(edge.winfo_manager() for edge in tab.card_drag.selection_edges))
+                tab._drag_end(event(3,after=True))
+                self.assertFalse(any(edge.winfo_manager() for edge in tab.card_drag.selection_edges))
+                self.assertEqual(tab.selected(),[1,2,3])
+                self.assertEqual([x['id'] for x in tab.items],ids)
+                dirty.assert_not_called()
+                start,end=event(0,blank=True),event(2,after=True)
+                tab.card_selection_margin.event_generate('<ButtonPress-1>',x=6,y=start.y)
+                tab.tree.event_generate('<B1-Motion>',x=end.x,y=end.y)
+                tab.tree.event_generate('<ButtonRelease-1>',x=end.x,y=end.y)
+                self.app.update()
+                self.assertEqual(tab.selected(),[0,1,2])
+                self.assertEqual([x['id'] for x in tab.items],ids)
+                # Tk sends a release on an outline to that child, even with
+                # a grab on its parent tree. Every edge must finish the drag.
+                for edge in tab.card_drag.selection_edges:
+                    tab._drag_start(event(1,blank=True))
+                    end=event(3,after=True)
+                    tab._drag_move(end)
+                    self.app.update_idletasks()
+                    edge.event_generate('<ButtonRelease-1>',x=1,y=1,rootx=end.x_root,rooty=end.y_root)
+                    self.app.update()
+                    self.assertIsNone(tab.card_drag.state)
+                    self.assertEqual(tab.selected(),[1,2,3])
+                    self.assertFalse(any(w.winfo_manager() for w in tab.card_drag.selection_edges))
+                    self.assertIsNone(tab.card_drag.scroll_job)
+                    self.assertIsNone(tab.card_drag.release_bind)
+                    self.assertIsNone(tab.tree.grab_current())
+                # A release on another child of the same window is caught
+                # by the temporary window binding, without triggering a drop
+                # twice or disturbing unrelated window release handlers.
+                tab._drag_start(event(1,blank=True))
+                tab._drag_move(event(3,after=True))
+                self.app.update_idletasks()
+                end=event(3,after=True)
+                tab.card_drag_status.event_generate('<ButtonRelease-1>',x=1,y=1,rootx=end.x_root,rooty=end.y_root)
+                self.app.update()
+                self.assertIsNone(tab.card_drag.state)
+                self.assertFalse(any(w.winfo_manager() for w in tab.card_drag.selection_edges))
+                tab._drag_start(event(1,blank=True))
+                tab._drag_move(event(3,after=True))
+                tab.card_drag._recover_release(SimpleNamespace(state=0))
+                self.assertIsNone(tab.card_drag.state)
+                self.assertEqual(tab.selected(),[1,2,3])
+                self.assertFalse(any(w.winfo_manager() for w in tab.card_drag.selection_edges))
+                tab._drag_start(event(1,blank=True))
+                tab._drag_move(event(3,after=True))
+                with patch.object(tab.card_drag,'move',side_effect=RuntimeError('release failure')):
+                    with self.assertRaises(RuntimeError):
+                        tab._drag_end(event(3,after=True))
+                self.assertIsNone(tab.card_drag.state)
+                self.assertFalse(any(w.winfo_manager() for w in tab.card_drag.selection_edges))
+                last=tab.tree.bbox('7')
+                y=last[1]+last[3]+12
+                blank=SimpleNamespace(x=20,y=y,x_root=tab.tree.winfo_rootx()+20,y_root=tab.tree.winfo_rooty()+y,state=0)
+                further=SimpleNamespace(x=40,y=y+10,x_root=blank.x_root+20,y_root=blank.y_root+10,state=0)
+                tab._drag_start(blank)
+                tab._drag_move(further)
+                self.assertEqual(tab.selected(),[])
+                tab._drag_end(further)
+                tab._drag_start(blank)
+                tab._drag_move(event(5))
+                tab._drag_end(event(5))
+                self.assertEqual(tab.selected(),[5,6,7])
+                self.assertEqual([x['id'] for x in tab.items],ids)
+                move([1,2],5,True)
+                self.assertEqual([x['id'] for x in tab.items],[ids[i] for i in [0,3,4,5,1,2,6,7]])
+                self.assertEqual(tab.selected(),[4,5])
+                self.assertIsNone(tab.tree.grab_current())
+                before=[x['id'] for x in tab.items]
+                tab._drag_start(event(4))
+                tab._drag_move(event(0))
+                tab.card_drag.cancel()
+                self.assertEqual([x['id'] for x in tab.items],before)
+                self.assertEqual(tab.selected(),[4,5])
+                self.assertFalse(tab.card_drag.marker.winfo_manager())
+                tab._drag_start(event(4))
+                outside=SimpleNamespace(x=-100,y=-100,x_root=tab.tree.winfo_rootx()-100,y_root=tab.tree.winfo_rooty()-100,state=0)
+                tab._drag_move(outside)
+                tab._drag_end(outside)
+                self.assertEqual([x['id'] for x in tab.items],before)
+                # Filtered reorder must retain every hidden row.
+                self.app.project['cards'] = [M.new_card(f"drag_{i}") for i in range(8)]
+                for i,c in enumerate(tab.items):
+                    c['name_ko']='visible' if i%2 else 'hidden'
+                tab.set_query('visible')
+                self.app.update()
+                move([1,3],7,True)
+                self.assertEqual([x['id'] for x in tab.items],[ids[i] for i in [0,2,4,5,6,7,1,3]])
+                self.assertEqual(len(tab.items),8)
+                tab.set_query('')
+                self.app.update()
+                # A delete drop respects cancellation and uses existing ref cleanup.
+                tab.tree.selection_set(('1','2'))
+                tab._drag_start(event(1))
+                drop=event(widget=tab.card_delete_zone)
+                tab._drag_move(drop)
+                before=copy.deepcopy(tab.items)
+                with patch.object(S.messagebox,'askyesno',return_value=False):
+                    tab._drag_end(drop)
+                self.assertEqual(tab.items,before)
+                tab._drag_start(event(1))
+                tab._drag_move(drop)
+                with patch.object(S.messagebox,'askyesno',return_value=True), patch.object(self.app,'rename_ref') as refs:
+                    tab._drag_end(drop)
+                self.assertEqual(len(tab.items),6)
+                self.assertEqual(refs.call_count,2)
+                self.assertIsNone(tab.tree.grab_current())
+                self.app.project['cards']=[M.new_card(f"long_{i}") for i in range(80)]
+                refresh()
+                tab.tree.yview_moveto(0)
+                self.app.update()
+                tab._drag_start(event(0,blank=True))
+                bottom=SimpleNamespace(x=12,y=tab.tree.winfo_height()-2,x_root=tab.tree.winfo_rootx()+12,y_root=tab.tree.winfo_rooty()+tab.tree.winfo_height()-2,state=0)
+                before_view=tab.tree.yview()
+                tab._drag_move(bottom)
+                done=tk.BooleanVar(self.app,value=False)
+                self.app.after(180,lambda:done.set(True))
+                self.app.wait_variable(done)
+                self.assertGreater(tab.tree.yview()[0],before_view[0])
+                tab.card_drag.cancel()
+                self.assertIsNone(tab.card_drag.scroll_job)
+        finally:
+            tab.card_drag.cancel()
+            self.app.project.clear()
+            self.app.project.update(original)
+            tab.query=''
+            tab.refresh_list(0)
+            if active:
+                self.nb.select(active)
+            self.app.update()
+
+    def test_existing_family_in_unsupported_owner_remains_editable(self):
+        item=M.new_power("unsupported_family")
+        for family,mode in (("damage_action","card_attack"),("manosaba_summon_action","manosaba_ema_summon")):
+            block=B.new_block(family)
+            B.F.switch(block,mode,B.SPECS)
+            editor=blockui.BlockEditor(self.app,self.app.project,"power",item,[block])
+            editor.geometry("+5000+5000")
+            try:
+                editor.update_idletasks()
+                self.assertEqual(editor.blocks[0]["args"]["mode"],mode)
+                self.assertTrue(editor.canvas.find_all())
+            finally:
+                editor.destroy()
+
+    def test_hand_aura_block_editor_renders_stat_and_filter_lists(self):
+        card=self.app.project["cards"][0]
+        editor=blockui.BlockEditor(self.app,self.app.project,"card",card,[B.new_block("hand_aura_stat")],
+                                   show_text=False,card_event="hand_aura")
+        editor.geometry("+5000+5000")
+        try:
+            editor.update_idletasks()
+            self.assertIn("TryModifyEnergyCostInCombat",editor.code.get("1.0","end"))
+            def descend(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descend(child)
+            combos=[w for w in descend(editor) if isinstance(w,blockui._Combo)]
+            stat=next(w for w in combos if {value for value,_ in w.opts}=={"cost","damage","block"})
+            stat.set_value("damage")
+            stat.event_generate("<<ComboboxSelected>>")
+            self.assertIn("ModifyDamageAdditive",editor.code.get("1.0","end"))
+            pile=next(w for w in combos if {value for value,_ in w.opts}=={"Hand","Draw","Discard"})
+            pile.set_value("Draw")
+            pile.event_generate("<<ComboboxSelected>>")
+            self.assertIn("PileType.Draw.GetPile(Owner)",editor.code.get("1.0","end"))
+            self.assertNotIn("⚠",editor.err.cget("text"))
+        finally:
+            editor.destroy()
+
+    def test_saved_effect_and_power_aura_editors_render(self):
+        power=B.new_block("aura_power_amount")
+        effect=B.new_block("aura_card_effect")
+        effect["body"]=[B.new_block("energy")]
+        editor=blockui.BlockEditor(self.app,self.app.project,"card",self.app.project["cards"][0],[power,effect],
+                                   show_text=False,card_event="hand_aura")
+        editor.geometry("+5000+5000")
+        try:
+            editor.update_idletasks()
+            code=editor.code.get("1.0","end")
+            self.assertIn("ModifyPowerAmountGivenAdditive",code)
+            self.assertIn("PlayerCmd.GainEnergy",code)
+            self.assertNotIn("⚠",editor.err.cget("text"))
+        finally:
+            editor.destroy()
+
+    def test_beginner_help_on_preview_fields_and_value_dialog(self):
+        card=M.new_card("beginner_help")
+        block=B.new_block("upgrade_card_action")
+        editor=blockui.BlockEditor(self.app,self.app.project,"card",card,[block])
+        editor.geometry("+5000+5000")
+        dialog=None
+        try:
+            editor.update_idletasks()
+            def children(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from children(child)
+            widgets=[w for frame in editor.frames for w in children(frame)]
+            style=next(w for w in widgets if isinstance(w,blockui._Combo) and any("GridLayout" in str(value) for value,_ in w.opts))
+            self.assertTrue(hasattr(style,"_maker_help"))
+            self.assertIn("기본 배치",style._maker_help.text())
+            labels=[w for w in widgets if isinstance(w,tk.Label) and hasattr(w,"_maker_help")]
+            self.assertTrue(any("실제로 강화" in w._maker_help.text() for w in labels))
+            dialog=blockui.SlotDialog(editor,editor,"value",{"t":"num","v":2})
+            self.assertIn("강화 증가량",dialog.type._maker_help.text())
+            dialog._type_changed("stack")
+            dialog.update_idletasks()
+            self.assertIn("중독",dialog.type._maker_help.text())
+            self.assertTrue(all(hasattr(w,"_maker_help") for w in dialog.fields.winfo_children()))
+            dialog.destroy()
+            dialog=None
+        finally:
+            if dialog is not None:
+                dialog.destroy()
+            editor.destroy()
+
     def test_favorites_preserve_rows_and_bypass_advanced_filter(self):
         card = M.new_card("test_favorites")
         editor = blockui.BlockEditor(self.app,self.app.project,"card",card,[])
@@ -458,11 +993,11 @@ class DockingRegressionTests(unittest.TestCase):
                 editor._toggle_favorite("draw")
                 favorite_rows = dict(editor._favorite_rows)
                 editor._move_favorite("draw", 0)
-                self.assertEqual(editor.favorite_order, ["draw", "damage"])
-                self.assertEqual(json.loads(editor.favorite_file.read_text()), ["draw", "damage"])
+                self.assertEqual(editor.favorite_order, [B.compact_op("draw"), B.compact_op("damage")])
+                self.assertEqual(json.loads(editor.favorite_file.read_text()), [B.compact_op("draw"), B.compact_op("damage")])
                 self.assertEqual(favorite_rows, editor._favorite_rows)
                 editor._build_palette()
-                self.assertEqual(list(editor._favorite_rows), ["draw", "damage"])
+                self.assertEqual(list(editor._favorite_rows), [B.compact_op("draw"), B.compact_op("damage")])
                 cached = editor.palette.winfo_children()
                 for show in (True,False,True):
                     editor.show_advanced.set(show)

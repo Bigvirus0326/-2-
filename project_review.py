@@ -74,12 +74,14 @@ def unresolved(app):
                 target = None
                 prefix = ""
                 if key == "args" and isinstance(value,dict):
-                    schema = B.SPECS.get(node.get("op"),{}).get("args",{})
+                    schema = (B.block_spec(node) or {}).get("args",{})
                     for field,(slot_kind,_) in schema.items():
                         ref = value.get(field)
                         if slot_kind == "card" and ref and ref != "this" and ref not in ids["card"]:
                             missing.setdefault(("card",ref),[]).append((value,field,""))
                 if owner == "character" and key == "card" and isinstance(value,str) and value and not value.startswith("game:"):
+                    target = "card"
+                if key == "card_id" and node.get("t") in ("pile_count", "card_identity") and isinstance(value,str) and value:
                     target = "card"
                 if key in ("power","res_power","cond_power","scale_power","ref") and isinstance(value,str) and value.startswith("c:"):
                     target, prefix = "power","c:"
@@ -155,9 +157,9 @@ def unresolved(app):
                         messagebox.showwarning("연결", "인수 형식이 다른 호출이 있어 적용을 중단했습니다.",parent=win)
                         return
                     value = original.get("args",{}).get(slot["key"],slot.get("orig",""))
-                    if B.SPECS[block["op"]]["args"][field][0]=="value" and not isinstance(value,dict):
+                    if B.block_spec(block)["args"][field][0]=="value" and not isinstance(value,dict):
                         value = {"t":"src","code":str(value)}
-                    elif B.SPECS[block["op"]]["args"][field][0]=="code" and isinstance(value,dict):
+                    elif B.block_spec(block)["args"][field][0]=="code" and isinstance(value,dict):
                         value = B._Gen(app.project,M._Ctx(kind,item)).val(value)
                     block["args"][field] = copy.deepcopy(value)
             updates.append((parent,i,block))

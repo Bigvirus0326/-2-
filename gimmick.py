@@ -22,9 +22,42 @@ SUMMON_TIMINGS = [("turn_end", "내 턴 종료 시 자동 행동"), ("turn_start
 THRESHOLD_MODES = [("all", "발동 후 전부 없앰"), ("sub", "발동 후 기준치만큼 줄임"), ("keep", "그대로 둠 (바뀔 때마다 다시 발동)")]
 
 
+TAG_TIMINGS = [("play", "사용할 때"), ("draw", "뽑을 때"), ("discard", "버릴 때"),
+               ("exhaust", "소멸할 때"), ("hand_start", "손패에 있는 채로 내 턴 시작"),
+               ("hand_end", "손패에 있는 채로 내 턴 종료"),
+               ("hand_play", "손패에 있는 동안 다른 카드를 사용할 때마다"),
+               ("hand_aura", "더미에 있는 동안 지속 보정")]
+
+
+def tag_blocks(tag, timing="play"):
+    return (tag.get("blocks") if timing == "play" else (tag.get("event_blocks") or {}).get(timing)) or []
+
+
+def tag_play_filters(project):
+    import modgen as M
+    return [("Any", "아무 카드나 사용"), *[("tag:" + t["id"], "키워드 · " + (_txt(t, "name", "ko")))
+            for t in tags(project)], *[("kw:" + key, "기본 키워드 · " + label) for key, label in M.CARD_KEYWORDS]]
+
+
+def tag_play_filter_expr(project, tag):
+    import modgen as M
+    selected = tag.get("played_filter") or "Any"
+    if selected not in dict(tag_play_filters(project)):
+        raise ValueError("사용한 카드 조건을 다시 선택하세요: " + str(selected))
+    if selected.startswith("kw:"):
+        return "cardPlay.Card.Keywords.Contains(CardKeyword." + selected[3:] + ")"
+    expression = filter_expr(project, selected, "cardPlay.Card")
+    if selected.startswith("tag:"):
+        found = find_tag(project, selected[4:])
+        if found and found.get("keyword_member"):
+            expression = "(" + expression + " || cardPlay.Card.Keywords.Contains(" + found["keyword_member"] + "))"
+    return expression
+
+
 def new_tag(tid="new_tag"):
     return {"id": tid, "name_ko": "새 태그", "name_en": "New Tag",
-            "desc_ko": "", "desc_en": "", "show_in_text": True}
+            "desc_ko": "", "desc_en": "", "show_in_text": True, "blocks": [], "event_blocks": {}, "played_filter": "Any", "played_every": 1, "played_scope": "turn",
+            "hand_cost_enabled": False, "hand_cost_amount": 1, "hand_cost_filter": "Any"}
 
 
 def new_summon(sid="new_summon"):
@@ -39,7 +72,7 @@ def defaults():
     return {"tags": [], "summons": [], "summon_slots": 3, "orbs": [], "effects": [], "buttons": [], "pets": []}
 
 
-CARD_DEFAULTS = {"gtags": [], "res_power": "", "res_cost": 0, "play_cond": None, "glow_cond": None,
+CARD_DEFAULTS = {"gtags": [], "no_cost": False, "separate_upgrade_effect": False, "upgrade_effect_blocks": [], "res_power": "", "res_cost": 0, "play_cond": None, "glow_cond": None,
                  "star_cost": 0, "star_cost_up": 0, "star_x": False}
 POWER_DEFAULTS = {"cap": 0, "overflow_blocks": [], "threshold": 0, "threshold_mode": "all", "threshold_blocks": [],
                   "group": "", "hidden": False}
@@ -49,6 +82,11 @@ def normalize(project):
     g = defaults()
     g.update(project.get("gimmicks") or {})
     g["tags"] = [dict(new_tag(t.get("id", "x")), **t) for t in g.get("tags", [])]
+    import handaura
+    for tag in g["tags"]:
+        if tag.get("hand_cost_enabled"):
+            tag.setdefault("event_blocks", {})["hand_aura"] = handaura.blocks(tag)
+            tag["hand_cost_enabled"] = False
     g["summons"] = [dict(new_summon(s.get("id", "x")), **s) for s in g.get("summons", [])]
     g["orbs"] = [dict(new_orb(o.get("id", "x")), **o) for o in g.get("orbs", [])]
     import fxbtn
@@ -75,6 +113,46 @@ def tags(project):
     return (project.get("gimmicks") or {}).get("tags", [])
 
 
+def tag_play_lines(project, card, context, ind="        ", timing="play"):
+    """Shared keyword actions run once, after the card's own actions."""
+    import blockcode as B
+    import modgen as M
+    lines = []
+    for index, tag in enumerate(tags(project)):
+        blocks = tag_blocks(tag, timing)
+        if not blocks:
+            continue
+        statements, errors = B.compile_blocks(blocks, project, context, ind + "    ",
+                                              prefix=M.pascal(card["id"]) + "Tag" + str(index) + timing,
+                                              extras=M._EXTRAS_SINK.get("x"))
+        if errors:
+            raise ValueError(f"키워드 '{tag.get('name_ko') or tag['id']}': " + ", ".join(errors))
+        condition = f'{helper(project)}.HasTag(this, "{tag["id"]}")'
+        if card.get("clone") and tag["id"] in card.get("gtags", []):
+            condition = "true"  # Imported cards can inherit a foreign card base.
+        if timing == "hand_play":
+            condition = "(" + condition + ") && (" + tag_play_filter_expr(project, tag) + ")"
+        if timing == "hand_play":
+            every = int(tag.get("played_every", 1))
+            scope = tag.get("played_scope", "turn")
+            if not 1 <= every <= 999 or scope not in ("turn", "combat"):
+                raise ValueError("키워드의 사용 장수·집계 기준을 다시 설정하세요.")
+            field = "_makerTagCount" + str(index)
+            reset = f"{field}Combat != Owner.Creature.CombatState"
+            if scope == "turn":
+                reset += f" || {field}Round != (Owner.Creature.CombatState?.RoundNumber ?? 0)"
+            statements = [ind + f"    if ({reset}) {{ {field} = 0; {field}Combat = Owner.Creature.CombatState; {field}Round = Owner.Creature.CombatState?.RoundNumber ?? 0; }}",
+                          ind + f"    {field}++;", ind + f"    if ({field} >= {every})", ind + "    {",
+                          ind + f"        {field} = 0;", *["    " + line for line in statements], ind + "    }"]
+        lines += [ind + "if (" + condition + ")", ind + "{", *statements, ind + "}"]
+    return lines
+
+
+def hand_aura_members(project, card, original_body=None):
+    import handaura
+    return handaura.members(project, card, original_body)
+
+
 def summons(project):
     return (project.get("gimmicks") or {}).get("summons", [])
 
@@ -98,7 +176,8 @@ def _txt(it, field, lang):
 # ---------------------------------------------------------------------------
 # 카드 필터 ('아무 카드' / 종류 / 태그)
 # ---------------------------------------------------------------------------
-BASE_FILTERS = [("Any", "아무 카드"), ("Attack", "공격 카드"), ("Skill", "스킬 카드"), ("Power", "파워 카드")]
+BASE_FILTERS = [("Any", "아무 카드"), ("Attack", "공격 카드"), ("Skill", "스킬 카드"), ("Power", "파워 카드"),
+                ("Curse", "저주 카드"), ("Status", "상태 이상 카드"), ("Quest", "퀘스트 카드")]
 
 
 def card_filters(project):
@@ -115,7 +194,7 @@ def filter_word(project, f, lang, plural=False):
             return f"[gold]{name}[/gold] 카드"
         return f"[gold]{name}[/gold] cards" if plural else f"a [gold]{name}[/gold] card"
     if lang == "ko":
-        return {"Any": "카드", "Attack": "공격 카드", "Skill": "스킬 카드", "Power": "파워 카드"}.get(f, "카드")
+        return "카드" if f == "Any" else dict(BASE_FILTERS).get(f, "카드")
     if plural:
         return "cards" if f == "Any" else f + "s"
     return "a card" if f == "Any" else ("an Attack" if f == "Attack" else f"a {f}")
@@ -125,11 +204,20 @@ def filter_expr(project, f, var):
     """C# bool 식. '아무 카드'면 'true'."""
     f = f or "Any"
     if f.startswith("tag:"):
+        tag = find_tag(project, f[4:])
+        if tag and tag.get("card_kind"):
+            return _card_kind_filter(project, tag, var)
         mid = project["mod"]["id"]
         return f'global::{mid}.{mid}Code.Gimmicks.{mid}Gimmicks.HasTag({var}, "{f[4:]}")'
     if f == "Any":
         return "true"
     return f"{var}.Type == CardType.{f}"
+
+
+def _card_kind_filter(project, tag, var):
+    import cardkind
+    import modgen as M
+    return f"{var}.Type == {cardkind.runtime_class(project)}.{M.pascal(tag['id'])}"
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +343,7 @@ def card_prefix_text(project, card, lang):
     names = []
     for tid in card.get("gtags") or []:
         t = find_tag(project, tid)
-        if t and t.get("show_in_text", True):
+        if t and not t.get("card_kind") and t.get("show_in_text", True):
             names.append(f"[gold]{_txt(t, 'name', lang)}[/gold]")
     if names:
         parts.append((", " if lang == "en" else ", ").join(names) + ".")
@@ -582,7 +670,7 @@ def gen_runtime(project, extras):
          f"using {mid}.{mid}Code.Cards;", f"using {mid}.{mid}Code.Powers;", f"using {mid}.{mid}Code.Extensions;", "",
          f"namespace {mid}.{mid}Code.Gimmicks;", "",
          "// 모드 메이커 '기믹' 기능의 실행 코드 (태그, 자원, 소환수, 선택지, 카드 고르기)",
-         f"public static class {mid}Gimmicks", "{",
+         f"public static partial class {mid}Gimmicks", "{",
          f"    public const int SummonSlots = {slots};", "",
          f"    public static bool HasTag(CardModel? card, string tag) => card != null && ((card is {mid}Card c && c.GimmickTags.Contains(tag)) || Data(card).Tags.Contains(tag));", "",
          "    // ---- 카드 인스턴스별 변수·태그 ----",
@@ -630,10 +718,31 @@ def gen_runtime(project, extras):
          "    public static void AddCardState(CardModel? card, string key, decimal amount) => SetCardState(card, key, CardState(card, key) + amount);", "",
          "    public static void AddCardTag(CardModel? card, string tag) { if (card != null) Data(card).Tags.Add(tag); }",
          "    public static void RemoveCardTag(CardModel? card, string tag) { if (card != null) Data(card).Tags.Remove(tag); }", "",
-         "    /// <summary>뽑을 카드 더미 맨 아래(마지막) 카드부터 손으로 가져온다.</summary>",
-         "    public static async Task DrawFromBottom(Player? player, int count)", "    {",
+         "    // ---- 뽑을 카드 더미 N번째 (1 = 맨 위, -1 = 맨 아래, 0 = 무작위 위치). 게임 목록은 Cards[0] 이 맨 위 ----",
+         "    public static CardModel? DrawPileAt(Player? player, int n)", "    {",
+         "        var cards = player?.PlayerCombatState?.DrawPile.Cards;",
+         "        if (cards == null || n == 0) return null;",
+         "        var i = n > 0 ? n - 1 : cards.Count + n;",
+         "        return i >= 0 && i < cards.Count ? cards[i] : null;", "    }", "",
+         "    /// <summary>뽑을 카드 더미 안에 있는 카드를 N번째 자리로 옮긴다 (넘치면 맨 위/맨 아래).</summary>",
+         "    public static void MoveInDrawPile(CardModel card, int n)", "    {",
+         "        var pile = card.Owner?.PlayerCombatState?.DrawPile;",
+         "        if (pile == null || n == 0 || !pile.Cards.Contains(card)) return;",
+         "        pile.RemoveInternal(card, true);",
+         "        var count = pile.Cards.Count;",
+         "        var i = n > 0 ? Math.Min(n - 1, count) : Math.Max(0, count + 1 + n);",
+         "        pile.AddInternal(card, i, true);",
+         "        pile.InvokeContentsChanged();", "    }", "",
+         "    public static async Task PutInDrawPile(CardModel card, int n)", "    {",
+         "        await CardPileCmd.Add(card, PileType.Draw, n == 0 ? CardPilePosition.Random : n > 0 ? CardPilePosition.Top : CardPilePosition.Bottom);",
+         "        MoveInDrawPile(card, n);", "    }", "",
+         "    public static async Task AddGeneratedToDrawPile(CardModel card, Player player, int n)", "    {",
+         "        await CardPileCmd.AddGeneratedCardToCombat(card, PileType.Draw, player, n == 0 ? CardPilePosition.Random : n > 0 ? CardPilePosition.Top : CardPilePosition.Bottom);",
+         "        MoveInDrawPile(card, n);", "    }", "",
+         "    /// <summary>뽑을 카드 더미 N번째 카드부터 count 장을 손으로 가져온다.</summary>",
+         "    public static async Task DrawFromPosition(Player? player, int n, int count)", "    {",
          "        for (var i = 0; i < count; i++)", "        {",
-         "            var card = player?.PlayerCombatState?.DrawPile.Cards.LastOrDefault();",
+         "            var card = DrawPileAt(player, n);",
          "            if (card == null) return;",
          "            await CardPileCmd.Add(card, PileType.Hand);", "        }", "    }", "",
          "    /// <summary>사용을 마친 카드 수 (지금 쓰고 있는 카드는 아직 들어가지 않음).</summary>",
@@ -712,6 +821,8 @@ def gen_runtime(project, extras):
          '    public override string BetaPortraitPath => "choice.png".CardImagePath();',
          "    protected override Task OnPlay(PlayerChoiceContext choiceContext, CardPlay cardPlay) => Task.CompletedTask;", "}", ""]
 
+    L.append(gen_card_number_runtime(mid))
+
     # 태그 툴팁용 파워
     for t in tags(project):
         L += [f"// 태그 '{t.get('name_ko')}' 툴팁", f"public sealed class {_pascal(t['id'])}TagPower : {mid}Power", "{",
@@ -770,6 +881,41 @@ def localization(project, lang, files, extras):
         lid = M.loc_id(project, t["id"] + "_tag_power")
         files["powers"][f"{lid}.title"] = _txt(t, "name", lang)
         d = _txt(t, "desc", lang) if (t.get("desc_ko") or t.get("desc_en")) else ""
+        import blockcode as B
+        for timing, label in TAG_TIMINGS:
+            blocks = tag_blocks(t, timing)
+            if not blocks:
+                continue
+            detail = B.describe(blocks, project, "card", lang)
+            names = {"en": {"play":"When played", "draw":"When drawn", "discard":"When discarded",
+                            "exhaust":"When exhausted", "hand_start":"At turn start, while in hand",
+                            "hand_end":"At turn end, while in hand"},
+                     "zh": {"play":"打出时", "draw":"抽到时", "discard":"丢弃时", "exhaust":"消耗时",
+                            "hand_start":"回合开始时，若在手牌中", "hand_end":"回合结束时，若在手牌中"}}
+            if timing == "hand_play":
+                selected = t.get("played_filter") or "Any"
+                if selected.startswith("tag:"):
+                    target_tag = find_tag(project, selected[4:])
+                    filter_label = _txt(target_tag, "name", lang) if target_tag else selected
+                elif selected.startswith("kw:"):
+                    filter_label = dict(M.CARD_KEYWORDS).get(selected[3:], selected)
+                else:
+                    filter_label = {"ko":"아무 카드", "en":"any card", "zh":"任意牌"}.get(lang, "any card")
+                names["en"][timing] = "While in hand, whenever you play another card · " + filter_label
+                names["zh"][timing] = "在手牌中时，每当你打出另一张牌 · " + filter_label
+                label += " · " + filter_label + f" {t.get('played_every', 1)}장마다 (" + ("이번 턴" if t.get("played_scope", "turn") == "turn" else "이번 전투") + ")"
+                names["en"][timing] += f" · every {t.get('played_every', 1)} ({t.get('played_scope', 'turn')})"
+                names["zh"][timing] += f" · 每{t.get('played_every', 1)}张 ({t.get('played_scope', 'turn')})"
+            lead = names.get(lang, {}).get(timing, label)
+            d = "\n".join(part for part in (d, lead + ": " + detail) if part)
+        if t.get("hand_cost_enabled"):
+            selected = t.get("hand_cost_filter", "Any")
+            name = dict(tag_play_filters(project)).get(selected, selected)
+            amount = int(t.get("hand_cost_amount", 1))
+            aura = {"ko": f"손패에 있는 동안 다른 카드의 비용 {amount} 감소 · {name}",
+                    "en": f"While in hand, other cards cost {amount} less · {selected}",
+                    "zh": f"在手牌中时，其他牌费用降低{amount} · {selected}"}.get(lang)
+            d = "\n".join(part for part in (d, aura) if part)
         files["powers"][f"{lid}.description"] = d
         files["powers"][f"{lid}.smartDescription"] = d
     for s in summons(project):
@@ -819,6 +965,27 @@ def validate(project):
         if t["id"] in seen:
             errors.append(f"태그 ID '{t['id']}'가 중복됩니다.")
         seen.add(t["id"])
+        try:
+            if not 1 <= int(t.get("played_every", 1)) <= 999 or t.get("played_scope", "turn") not in ("turn", "combat"):
+                raise ValueError("사용 장수·집계 기준을 다시 설정하세요.")
+            if not 0 <= int(t.get("hand_cost_amount", 1)) <= 99:
+                raise ValueError("손패 비용 감소량은 0~99로 설정하세요.")
+            tag_play_filter_expr(project, {"played_filter": t.get("hand_cost_filter", "Any")})
+            tag_play_filter_expr(project, t)
+        except ValueError as error:
+            errors.append(f"키워드 '{t['id']}': {error}")
+        sample = next(iter(project.get("cards", [])), M.new_card("keyword_sample"))
+        for timing, label in TAG_TIMINGS:
+            if timing == "hand_aura":
+                try:
+                    import handaura
+                    handaura.rules(project, sample, t)
+                except ValueError as error:
+                    errors.append(f"키워드 '{t['id']}' 지속 보정: {error}")
+                continue
+            context = M._Ctx("card", sample) if timing == "play" else M.card_event_context(sample, timing)
+            _lines, block_errors = B.compile_blocks(tag_blocks(t, timing), project, context)
+            errors += [f"키워드 '{t.get('name_ko') or t['id']}' {label}: {message}" for message in dict.fromkeys(block_errors)]
     seen = set()
     for s in summons(project):
         where = f"소환수 '{s.get('name_ko') or s['id']}'"
@@ -1287,3 +1454,95 @@ def character_members(project):
     if ch.get("show_stars"):
         L.append("    public override bool ShouldAlwaysShowStarCounter => true;")
     return L
+
+
+def gen_card_number_runtime(mid):
+    """Track ordered damage edits on each combat card, with real expiry."""
+    return r'''public static partial class $MID$Gimmicks
+{
+    private sealed record DamageEdit(decimal Amount, bool Set, string Duration);
+    private sealed class DamageEdits
+    {
+        public decimal Base;
+        public decimal Last;
+        public readonly List<DamageEdit> Edits = new();
+    }
+    private sealed class CardDamageEdits
+    {
+        public readonly Dictionary<MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar, DamageEdits> Vars = new();
+    }
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<CardModel, CardDamageEdits> DamageChanges = new();
+
+    // Preserve unrelated upgrades/changes made since our last update.
+    private static void CaptureDamage(MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar v, DamageEdits state)
+        => state.Base += v.BaseValue - state.Last;
+
+    private static void ApplyDamage(MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar v, DamageEdits state)
+    {
+        var value = state.Base;
+        foreach (var edit in state.Edits)
+            value = Math.Max(0m, edit.Set ? edit.Amount : value + edit.Amount);
+        v.BaseValue = value;
+        state.Last = v.BaseValue;
+    }
+
+    public static void EditCardDamage(CardModel card, decimal amount, bool set, string duration)
+        => EditCardNumber(card, "damage", amount, set, duration);
+
+    private static bool MatchesCardNumber(MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar v, string stat) => stat switch
+    {
+        "damage" => v is MegaCrit.Sts2.Core.Localization.DynamicVars.DamageVar,
+        "block" => v is MegaCrit.Sts2.Core.Localization.DynamicVars.BlockVar,
+        "draw" => v is MegaCrit.Sts2.Core.Localization.DynamicVars.CardsVar,
+        "energy" => v is MegaCrit.Sts2.Core.Localization.DynamicVars.EnergyVar,
+        "heal" => v is MegaCrit.Sts2.Core.Localization.DynamicVars.HealVar,
+        "lose_hp" => v is MegaCrit.Sts2.Core.Localization.DynamicVars.HpLossVar,
+        "max_hp" => v is MegaCrit.Sts2.Core.Localization.DynamicVars.MaxHpVar,
+        "gold" => v is MegaCrit.Sts2.Core.Localization.DynamicVars.GoldVar,
+        _ => false
+    };
+
+    public static void EditCardNumber(CardModel card, string stat, decimal amount, bool set, string duration)
+    {
+        if (duration != "combat" && duration != "turn" && duration != "played") return;
+        if (!DamageChanges.TryGetValue(card, out var data))
+        {
+            data = new CardDamageEdits();
+            DamageChanges.Add(card, data);
+            // Played is raised after all plays and damage have resolved.
+            card.Played += () => ExpireCardDamage(card, "played");
+        }
+        foreach (var v in card.DynamicVars.Values.Where(v => MatchesCardNumber(v, stat)))
+        {
+            if (!data.Vars.TryGetValue(v, out var state))
+            {
+                state = new DamageEdits { Base = v.BaseValue, Last = v.BaseValue };
+                data.Vars.Add(v, state);
+            }
+            CaptureDamage(v, state);
+            state.Edits.Add(new DamageEdit(amount, set, duration));
+            ApplyDamage(v, state);
+        }
+    }
+
+    public static void ExpireCardDamage(CardModel card, string duration)
+    {
+        if (!DamageChanges.TryGetValue(card, out var data)) return;
+        foreach (var entry in data.Vars)
+        {
+            var state = entry.Value;
+            if (!state.Edits.Any(edit => edit.Duration == duration)) continue;
+            CaptureDamage(entry.Key, state);
+            state.Edits.RemoveAll(edit => edit.Duration == duration);
+            ApplyDamage(entry.Key, state);
+        }
+    }
+}
+
+[HarmonyLib.HarmonyPatch(typeof(CardModel), nameof(CardModel.EndOfTurnCleanup))]
+internal static class $MID$CardDamageTurnCleanup
+{
+    [HarmonyLib.HarmonyPostfix]
+    private static void Postfix(CardModel __instance) => $MID$Gimmicks.ExpireCardDamage(__instance, "turn");
+}
+'''.replace("$MID$", mid)

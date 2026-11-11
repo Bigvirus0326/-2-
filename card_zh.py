@@ -86,6 +86,18 @@ def value(v, project, card):
 def condition(c, project, card):
     c = c or {}
     t = c.get("t")
+    if t == "group":
+        items = c.get("items", [])
+        return "(" + ("且" if c.get("mode", "all") == "all" else "或").join(condition(x,project,card) for x in items) + ")" if items else "无条件限制"
+    if t == "hp_percent":
+        return WHO.get(c.get("who","it"),"所选目标") + f"的生命比例{c.get('op','<=')}{value(c.get('value'),project,card)}%"
+    if t == "card_identity":
+        return "所选牌为" + str(c.get("card_id", ""))
+    if t == "pile_count":
+        cid = c.get("card_id")
+        name = cid or card_type(project,c.get("filter","Any"))
+        pile = {"Deck":"完整牌组", "Hand":"手牌", "Draw":"抽牌堆", "Discard":"弃牌堆", "Exhaust":"消耗牌堆"}.get(c.get("pile","Deck"),"")
+        return WHO.get(c.get("who","self"),"所选目标") + f"的{pile}中{name}{c.get('op','>=')}{value(c.get('count'),project,card)}张"
     if t == "cmp":
         a_, b_ = value(c.get("a"), project, card), value(c.get("b"), project, card)
         word = {">=": "不少于", "<=": "不超过", ">": "超过", "<": "少于", "==": "等于", "!=": "不等于"}.get(c.get("op"), c.get("op"))
@@ -108,6 +120,7 @@ def blocks_text(blocks, project, card=True):
 
 
 def block_text(b, project, card):
+    b = B.expand_compact(b)
     op, a = b["op"], b.get("args", {})
     amount = value(a.get("amount"), project, card)
     count = value(a.get("count"), project, card)
@@ -137,6 +150,16 @@ def block_text(b, project, card):
         return f"给予{who}{amount}层{name}。"
     if op in ("if", "if_else"):
         return f"若{condition(a.get('cond'), project, card)}，{body()}" + ("否则：" + body("else") if b.get("else") else "")
+    if op in ("filtered_enemies", "filtered_players"):
+        limit = value(a.get("limit"), project, card)
+        name = power_name(project, a.get("power", "Weak"))
+        label = {"all": "敌人", "power": f"拥有{name}的敌人", "no_power": f"没有{name}的敌人",
+                     "hp_below": f"生命比例不高于{limit}%的敌人", "hp_above": f"生命比例不低于{limit}%的敌人"}.get(a.get("enemy_filter", "power"), "符合条件的敌人")
+        selection = "全部" if a.get("enemy_mode") == "all" else ("随机选择" if a.get("enemy_mode", "random") == "random" else "选择") + f"最多{count}名"
+        group = a.get("conditions")
+        if op == "filtered_players" or (group and (group.get("t") != "group" or group.get("items"))):
+            label = ("玩家" if op == "filtered_players" else "敌人") + "（" + condition(group,project,card) + "）"
+        return f"从{label}中{selection}，对每名目标：" + body()
     if op in ("repeat", "each_enemy", "random_enemy", "delayed"):
         times = value(a.get("times", 1), project, card)
         when = "本回合结束时" if a.get("when") == "end" else "下回合开始时"
@@ -166,6 +189,13 @@ def block_text(b, project, card):
         where = {"hand": "手牌", "draw": "抽牌堆", "discard": "弃牌堆", "all": "所有牌堆"}.get(a.get("where"), "手牌")
         whom = f"{where}中的" + ("所有" if a.get("which") == "all" else f"随机{count}张") + card_type(project, a.get("ctype"))
         return f"使{whom}获得{kn}。" if add else f"移除{whom}的{kn}。"
+    if op == "card_number_edit":
+        name = {"cost":"费用", "damage":"伤害", "block":"格挡", "draw":"牌的张数", "energy":"能量获取量",
+                "heal":"生命恢复量", "lose_hp":"生命损失量", "max_hp":"最大生命增加量", "gold":"金币获取量"}.get(a.get("stat"), "数值")
+        ref = a.get("card", "picked")
+        target = "此牌" if ref == "this" else "所选牌" if ref == "picked" else "抽牌堆指定位置的牌"
+        duration = {"turn":"本回合", "combat":"本场战斗", "played":"下次使用完成前"}.get(a.get("duration", "combat"), "本场战斗")
+        return f"{duration}，将{target}的{name}设为{amount}。" if a.get("edit_mode") == "set" else f"{duration}，使{target}的{name}改变{amount}。"
     if op in ("set_var", "change_var"):
         n = str(a.get("name", "a"))
         amt = a.get("amount") or {}
@@ -187,8 +217,13 @@ def block_text(b, project, card):
     if op == "random_transform":
         return f"将{PILES.get(a.get('pile'), '手牌')}中随机{count}张{card_type(project, a.get('ctype'))}变化为随机牌。"
     if op == "pick":
-        action = {"hand":"放入手牌", "top":"放到抽牌堆顶", "bottom":"放到抽牌堆底", "exhaust":"消耗", "discard":"丢弃", "upgrade":"升级"}
+        action = {"hand":"放入手牌", "top":"放到抽牌堆顶", "bottom":"放到抽牌堆底", "draw_at":"放入抽牌堆", "exhaust":"消耗", "discard":"丢弃", "upgrade":"升级"}
         return f"从{PILES.get(a.get('pile'), '手牌')}中选择{count}张{card_type(project, a.get('ctype'))}，{action.get(a.get('action'), '')}。"
+    if op in ("pick_each", "random_each"):
+        mode = "随机选择" if op == "random_each" else "选择"
+        group = a.get("conditions")
+        detail = condition(group,project,card) if group else "无条件限制"
+        return f"从{PILES.get(a.get('pile'), '手牌')}中{mode}最多{count}张{card_type(project,a.get('ctype'))}（{detail}），对每张牌：" + body()
     if op == "channel":
         orb = G.orb_meta(project, a.get("orb")) or {}
         return f"生成{count}个{orb.get('en', '?')}充能球。"

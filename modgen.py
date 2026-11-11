@@ -27,8 +27,11 @@ GENERATOR_VERSION = "1.2.0"
 # ---------------------------------------------------------------------------
 # 선택지 정의 (내부 값, 한국어 표시)
 # ---------------------------------------------------------------------------
-CARD_TYPES = [("Attack", "공격"), ("Skill", "스킬"), ("Power", "파워")]
-CARD_RARITIES = [("Basic", "기본"), ("Common", "일반"), ("Uncommon", "특별"), ("Rare", "희귀")]
+CARD_TYPES = [("Attack", "공격"), ("Skill", "스킬"), ("Power", "파워"),
+              ("Curse", "저주"), ("Status", "상태 이상"), ("Quest", "퀘스트")]
+CARD_RARITIES = [("Basic", "기본"), ("Common", "일반"), ("Uncommon", "특별"), ("Rare", "희귀"),
+                 ("Curse", "저주"), ("Status", "상태 이상"), ("Quest", "퀘스트"),
+                 ("Event", "이벤트"), ("Token", "생성 전용"), ("Ancient", "고대")]
 CARD_TARGETS = [("AnyEnemy", "적 하나"), ("AllEnemies", "모든 적"), ("RandomEnemy", "무작위 적"), ("Self", "자신")]
 CARD_KEYWORDS = [("Exhaust", "소멸"), ("Ethereal", "휘발성"), ("Innate", "선천성"), ("Retain", "보존"),
                  ("Unplayable", "사용불가"), ("Sly", "교활"), ("Eternal", "영구")]
@@ -51,7 +54,14 @@ def card_keywords(card, upgraded=False):
             kws.append(add)
         if rem and rem in kws:
             kws.remove(rem)
+    if card.get("no_cost") and "Unplayable" not in kws:
+        kws.append("Unplayable")
     return kws
+
+
+def card_energy_cost(card):
+    """Negative canonical cost hides the energy icon in the native game."""
+    return -1 if card.get("no_cost") else 0 if card.get("x_cost") else int(card["cost"])
 CARD_TAGS = [("", "없음"), ("Strike", "타격"), ("Defend", "수비")]
 RELIC_RARITIES = [("Starter", "시작"), ("Common", "일반"), ("Uncommon", "특별"), ("Rare", "희귀"), ("Shop", "상점")]
 RELIC_TRIGGERS = [
@@ -63,7 +73,7 @@ RELIC_TRIGGERS = [
     ("pickup", "획득 시 (1회)"),
 ]
 RELIC_ENEMY_MODES = [("all", "모든 적"), ("random", "무작위 적")]
-PLAYED_CARD_FILTERS = [("Any", "아무 카드"), ("Attack", "공격 카드"), ("Skill", "스킬 카드"), ("Power", "파워 카드")]
+PLAYED_CARD_FILTERS = [("Any", "아무 카드")] + [(key, name + " 카드") for key, name in CARD_TYPES]
 POTION_RARITIES = [("Common", "일반"), ("Uncommon", "특별"), ("Rare", "희귀")]
 POTION_TARGETS = [("Self", "자신"), ("AnyEnemy", "적 하나"), ("AllEnemies", "모든 적")]
 PLACEHOLDER_CHARS = [("ironclad", "아이언클래드"), ("silent", "사일런트"), ("defect", "디펙트"),
@@ -203,7 +213,7 @@ def new_card(cid="new_card"):
         "id": cid, "name_ko": "새 카드", "name_en": "New Card",
         "type": "Attack", "rarity": "Common", "cost": 1, "upgrade_cost": 1, "target": "AnyEnemy",
         "pool_character": "",   # 통째로 가져온 모드에서 특정 캐릭터의 카드 풀에만 넣기
-        "x_cost": False, "x_plus_up": False,   # 에너지 X 비용 (남은 에너지를 전부 씀), 강화하면 X+1
+        "x_cost": False, "x_plus_up": False, "no_cost": False,   # 비용 없음은 -1 + 사용불가
         "keywords": [], "upgrade_add_keyword": "", "upgrade_remove_keyword": "", "tag": "",
         "effects": [new_effect("damage", 8, 3)],
         "desc_ko": "", "desc_en": "", "image": "", "extra_code": "",
@@ -560,6 +570,8 @@ def _enemy_scope(owner_kind, item):
 
 
 def _value_text(project, e, owner_kind, var, lang, energy=False):
+    if e.get("_upgrade_branch"):
+        var = "MakerUp" + var
     a = int(e.get("amount", 0) or 0)
     if owner_kind == "power":
         if e.get("per_stack"):
@@ -601,6 +613,8 @@ def _other_phrase(item, lang):
 
 
 def effect_sentence(project, eff, owner_kind, item, lang):
+    if item.get("_upgrade_branch") and eff.get("kind") != "code":
+        eff = dict(eff, _upgrade_branch=True)
     xu = x_use(eff, owner_kind, item)
     if not xu:
         return _effect_sentence(project, eff, owner_kind, item, lang)
@@ -837,6 +851,15 @@ def card_event_target_count(card, event):
 
 def card_event_context(card, event):
     ctx = _Ctx("card", card)
+    if event == "hand_aura":
+        ctx.hand_aura = True
+        ctx.play = "null"
+        ctx.single = ctx.other = None
+        return ctx
+    if event == "hand_play":
+        ctx.event_target = "played"
+        ctx.play = "null"
+        return ctx
     ctx.event_target = card.get("event_targets", {}).get(event, "random")
     if ctx.event_target not in dict(CARD_EVENT_TARGETS):
         raise ValueError("이벤트 효과의 대상을 다시 선택하세요.")
@@ -844,6 +867,34 @@ def card_event_context(card, event):
     ctx.event_target_count = card_event_target_count(card, event) if ctx.event_target == "choose" else 1
     ctx.play = "null"
     return ctx
+
+
+def upgrade_effects(card):
+    if "upgrade_effects" in card:
+        return card["upgrade_effects"]
+    blocks = card.get("upgrade_effect_blocks", [])
+    return [dict(new_effect("code", 0), blocks=blocks)] if blocks else []
+
+
+def upgraded_effect_description(project, card, lang):
+    view = dict(card, _upgrade_branch=True)
+    return "\n".join(s for effect in upgrade_effects(card)
+                     if (s := effect_sentence(project, effect, "card", view, lang)))
+
+
+def upgraded_effect_value_upgrades(project, card):
+    lines = []
+    if card.get("separate_upgrade_effect"):
+        for effect in upgrade_effects(card):
+            amount = int(effect.get("upgrade", 0) or 0)
+            name = (power_meta(project, effect.get("power")) or {}).get("var") if effect["kind"] == "power" else VAR_NAME.get(effect["kind"])
+            if amount and name:
+                lines.append(f'DynamicVars["MakerUp{name}"].UpgradeValueBy({amount}m);')
+    return lines
+
+
+def event_separate(card, event):
+    return bool(card.get("separate_upgrade_events", {}).get(event))
 
 
 def card_event_description(project, card, lang):
@@ -856,8 +907,12 @@ def card_event_description(project, card, lang):
     sentences = []
     for event in ("draw", "discard", "exhaust"):
         blocks = card.get("event_blocks", {}).get(event, [])
-        if blocks:
+        upgraded_blocks = card.get("upgrade_event_blocks", {}).get(event, [])
+        if blocks or event_separate(card, event):
             detail = blockcode.describe(blocks, project, "card", lang, card)
+            if event_separate(card, event):
+                up_detail = blockcode.describe(upgraded_blocks, project, "card", lang, card)
+                detail = "{IfUpgraded:show:" + up_detail + "|" + detail + "}"
             if detail:
                 target = card.get("event_targets", {}).get(event, "random")
                 target_names = {"ko": {"random":"무작위 적 한 명", "choose":"직접 선택한 적 한 명", "all":"모든 적", "self":"자신"},
@@ -868,7 +923,7 @@ def card_event_description(project, card, lang):
                     target_names["ko"]["choose"] = f"직접 선택한 적 최대 {count}명"
                     target_names["en"]["choose"] = f"up to {count} enemies you choose"
                     target_names["zh"]["choose"] = f"自行选择至多{count}名敌人"
-                uses_target = blockcode.uses_event_target(blocks, project)
+                uses_target = blockcode.uses_event_target(blocks + upgraded_blocks, project)
                 suffix = "(" + target_names.get(lang, target_names["en"]).get(target, target) + ") " if uses_target else ""
                 sentences.append(labels.get(lang, labels["en"])[event] + suffix + detail)
     return sentences
@@ -902,6 +957,10 @@ def auto_description(project, item, owner_kind, lang):
                 out.append("내 턴 시작 시 사라집니다." if lang == "ko" else "你的回合开始时移除此效果。" if lang == "zh" else "Removed at the start of your turn.")
         return " ".join(out)
     if owner_kind == "card":
+        if item.get("separate_upgrade_effect"):
+            import blockcode
+            upgraded = upgraded_effect_description(project, item, lang)
+            sentences = ["{IfUpgraded:show:" + upgraded + "|" + "\n".join(sentences) + "}"]
         pre = gimmick.card_prefix_text(project, item, lang)
         if pre:
             sentences = [pre] + sentences
@@ -911,26 +970,52 @@ def auto_description(project, item, owner_kind, lang):
     return sep.join(sentences)
 
 
-def block_damage_vars(item):
+BLOCK_NUMBER_TYPES = {"damage": "DamageVar", "card_attack": "DamageVar", "block": "BlockVar", "draw": "CardsVar",
+                      "energy": "EnergyVar", "heal": "HealVar", "lose_hp": "HpLossVar", "max_hp": "MaxHpVar", "gold": "GoldVar"}
+
+
+def block_number_type(block):
     import blockcode as B
-    result = []
+    return BLOCK_NUMBER_TYPES.get(B.expand_compact(block).get("op"))
+
+
+def block_number_vars(item):
+    import blockcode as B
+    result, counts = [], {}
     groups = [effect.get("blocks", []) for effect in item.get("effects", [])]
+    if item.get("separate_upgrade_effect"):
+        groups.extend(e.get("blocks", []) for e in upgrade_effects(item))
     groups += [item.get("event_blocks", {}).get(event, []) for event in ("draw", "discard", "exhaust")]
+    groups += [item.get("upgrade_event_blocks", {}).get(event, []) for event in ("draw", "discard", "exhaust")
+               if item.get("separate_upgrade_events", {}).get(event)]
     for blocks in groups:
         for block in B.walk(blocks):
             amount = block.get("args", {}).get("amount", {})
-            if block.get("op") in ("damage", "card_attack") and isinstance(amount, dict) and amount.get("t") == "num":
-                result.append((block, "MakerBlockDamage" + str(len(result) + 1), amount))
+            kind = block_number_type(block)
+            if kind and isinstance(amount, dict) and amount.get("t") == "num":
+                label = kind.removesuffix("Var")
+                counts[label] = counts.get(label, 0) + 1
+                result.append((block, "MakerBlock" + label + str(counts[label]), amount))
     return result
 
 
+def block_damage_vars(item):
+    return [(b,n,a) for b,n,a in block_number_vars(item) if block_number_type(b) == "DamageVar"]
+
+
+def block_number_name(item, block):
+    block = (block or {}).get("_compact_origin", block)
+    return next((name for candidate, name, _ in block_number_vars(item or {}) if candidate is block), None)
+
+
 def block_damage_name(item, block):
+    block = (block or {}).get("_compact_origin", block)
     return next((name for candidate, name, _ in block_damage_vars(item or {}) if candidate is block), None)
 
 
 def block_damage_upgrades(item):
     return [f'DynamicVars["{name}"].UpgradeValueBy({_num_lit(amount["up"], "m")});'
-            for _, name, amount in block_damage_vars(item) if amount.get("up")]
+            for _, name, amount in block_number_vars(item) if amount.get("up")]
 
 
 def block_description_values(item):
@@ -950,7 +1035,7 @@ def block_description_values(item):
                 scan(child, path + [key], block, label)
     for effect_index, effect in enumerate(item.get("effects", []), 1):
         for index, block in enumerate(B.walk(effect.get("blocks", [])), 1):
-            label = f"효과 {effect_index} / 블록 {index}: " + B.SPECS.get(block.get("op"), {}).get("ko", block.get("op", ""))
+            label = f"효과 {effect_index} / 블록 {index}: " + B.block_caption(block) if block.get("op") in B.SPECS else block.get("op", "")
             for key, value in block.get("args", {}).items():
                 scan(value, [key], block, label)
     return rows
@@ -967,7 +1052,7 @@ def resolve_block_description(text, item):
             value = value.get(key, {}) if isinstance(value, dict) else {}
         if not isinstance(value, dict) or value.get("t") != "num":
             return "[연결된 수치 없음]"
-        damage_name = block_damage_name(item, block) if match[2] == "amount" else None
+        damage_name = block_number_name(item, block) if match[2] == "amount" else None
         if damage_name:
             return "{" + damage_name + ":diff()}"
         base = value.get("v", 0)
@@ -1039,6 +1124,15 @@ def _description(project, item, owner_kind, lang):
         base_item.pop(f"upgrade_desc_{lang}", None)
         base = description(project, base_item, owner_kind, lang)
         return "{IfUpgraded:show:" + upgraded + "|" + base + "}"
+    if owner_kind == "card" and item.get("separate_upgrade_effect") and (item.get("clone") or item.get("raw_desc_only") or (item.get(f"desc_{lang}") or "").strip()):
+        import blockcode
+        base_item = dict(item, separate_upgrade_effect=False)
+        base = _description(project, base_item, owner_kind, lang)
+        parts = [gimmick.card_prefix_text(project, item, lang),
+                 upgraded_effect_description(project, item, lang)]
+        if not item.get("clone"):
+            parts.extend(card_event_description(project, item, lang))
+        return "{IfUpgraded:show:" + "\n".join(p for p in parts if p) + "|" + base + "}"
     if item.get("raw_desc_only") or item.get("clone"):
         base = text(item, "desc", lang)
         extra = [effect_sentence(project, e, owner_kind, item, lang) for e in item.get("effects", [])]
@@ -1250,6 +1344,31 @@ def validate(project):
     errors += fe
     warnings += fw
     for c in project.get("cards", []):
+        if c.get("separate_upgrade_effect"):
+            import blockcode
+            upgraded_kinds = []
+            for effect in upgrade_effects(c):
+                if effect.get("kind") != "code":
+                    effect_key = effect.get("kind", "") + (":" + effect.get("power", "") if effect.get("kind") in ("power", "remove_power") else "")
+                    if effect_key in upgraded_kinds:
+                        errors.append(f"카드 '{c.get('id')}' 강화 후 효과: 같은 종류의 효과는 하나만 넣으세요. 피해 횟수는 타격 횟수로 설정하세요.")
+                    upgraded_kinds.append(effect_key)
+                try:
+                    if int(effect.get("amount", 0)) < 0 or int(effect.get("hits", 1)) < 1:
+                        raise ValueError
+                    int(effect.get("upgrade", 0))
+                except (ValueError, TypeError):
+                    errors.append(f"카드 '{c.get('id')}' 강화 후 효과: 효과 수치가 올바르지 않습니다.")
+                _, branch_errors = blockcode.compile_blocks(effect.get("blocks", []), project, _Ctx("card", c))
+                errors.extend(f"카드 '{c.get('id')}' 강화 후 효과: {e}" for e in dict.fromkeys(branch_errors))
+                for ref in _power_refs(effect):
+                    if not power_meta(project, ref):
+                        errors.append(f"카드 '{c.get('id')}' 강화 후 효과: 없는 파워 ({ref})")
+        for event in CARD_EVENTS:
+            if event_separate(c, event):
+                import blockcode
+                _, branch_errors = blockcode.compile_blocks(c.get("upgrade_event_blocks", {}).get(event, []), project, card_event_context(c, event))
+                errors.extend(f"카드 '{c.get('id')}' {event} 강화 후 효과: {e}" for e in dict.fromkeys(branch_errors))
         if c.get("clone"):
             continue
         uses_x = any(e.get("x_use") in ("times", "mult") for e in c.get("effects", [])) or             '"energy_x"' in json.dumps(c.get("effects", []))
@@ -1353,9 +1472,25 @@ def _canonical_vars(project, item, owner_kind):
             pm = power_meta(project, e["power"])
             out.append(f'new PowerVar<{pm["cls"]}>("{pm["var"]}", {_num(a)})')
     if owner_kind == "card":
-        for block, name, amount in block_damage_vars(item):
+        if item.get("separate_upgrade_effect"):
+            branch = dict(item, effects=upgrade_effects(item))
+            for entry in _canonical_vars(project, branch, "potion"):
+                named = re.search(r'"([^"]+)"', entry)
+                if named:
+                    entry = entry[:named.start(1)] + "MakerUp" + entry[named.start(1):]
+                else:
+                    match = re.match(r"new (Damage|Block|Cards|Energy)Var\(", entry)
+                    if match:
+                        entry = entry[:match.end()] + '"MakerUp' + match[1] + '", ' + entry[match.end():]
+                out.append(entry.replace("ValueProp.Unpowered", "ValueProp.Move"))
+        for block, name, amount in block_number_vars(item):
+            kind = block_number_type(block)
             props = "ValueProp.Move" if block.get("args", {}).get("powered", True) else "ValueProp.Unpowered"
-            out.append(f'new DamageVar("{name}", {_num_lit(amount.get("v", 0), "m")}, {props})')
+            extra = f", {props}" if kind in ("DamageVar", "BlockVar") else ""
+            value = _num_lit(amount.get("v", 0), "m")
+            if kind in ("CardsVar", "EnergyVar", "GoldVar"):
+                value = f"(int)({value})"
+            out.append(f'new {kind}("{name}", {value}{extra})')
     return out
 
 
@@ -1409,6 +1544,8 @@ def _amount_expr(project, e, C):
         base = f'DynamicVars["{power_meta(project, e["power"])["var"]}"].BaseValue'
     else:
         base = f"{a}m"
+    if getattr(C, "upgrade_branch", False):
+        base = base.replace('DynamicVars["', 'DynamicVars["MakerUp')
     sm = power_meta(project, e.get("scale_power"))
     k = int(e.get("scale_per", 0) or 0)
     if sm and k:
@@ -1466,7 +1603,7 @@ def _effect_code(project, e, C, ind, idx):
     xu = x_use(e, C.kind, C.item)
     if xu == "mult":
         V = f"(({V}) * XCount)"
-    xscaled = _is_scaled(e) or xu == "mult"
+    xscaled = _is_scaled(e) or xu == "mult" or getattr(C, "upgrade_branch", False)
     hx = (f"XCount * {hits}" if hits > 1 else "XCount") if xu == "times" else str(hits)
     tgt = e.get("target", "enemy")
     cc, me = C.cc, C.me
@@ -1556,7 +1693,7 @@ _EXTRAS_SINK = {}   # generate() 중에만 {"x": [...]} — 블록이 만든 클
 
 def _prog_prefix(C, idx):
     kind = {"card": "Card", "relic": "Relic", "potion": "Potion", "power": "Pow"}.get(C.kind, "Blk")
-    return f"{pascal((C.item or {}).get('id') or 'x')}{kind}E{gimmick.letters(idx).lower()}"
+    return f"{pascal((C.item or {}).get('id') or 'x')}{kind}{'Up' if getattr(C, 'upgrade_branch', False) else ''}E{gimmick.letters(idx).lower()}"
 
 
 def _filter_check(project, f, card_expr):
@@ -1669,6 +1806,21 @@ def _effects_body(project, item, C, ind="        "):
     L = []
     for i, e in enumerate(item["effects"]):
         L += _effect_code(project, e, C, ind, i)
+    if C.kind == "card" and item.get("separate_upgrade_effect"):
+        import blockcode
+        branch_context = copy.copy(C)
+        branch_context.upgrade_branch = True
+        upgraded = []
+        for index, effect in enumerate(upgrade_effects(item)):
+            if effect.get("blocks"):
+                _, errors = blockcode.compile_blocks(effect["blocks"], project, branch_context)
+                if errors:
+                    raise ValueError("강화 후 효과: " + ", ".join(errors))
+            upgraded += _effect_code(project, effect, branch_context, ind + "    ", index)
+        L = [ind + "if (IsUpgraded)", ind + "{"] + upgraded + [ind + "}", ind + "else", ind + "{"] + ["    " + line for line in L] + [ind + "}"]
+    if C.kind == "card":
+        import gimmick
+        L += gimmick.tag_play_lines(project, item, C, ind)
     return L
 
 
@@ -1750,6 +1902,8 @@ def _fix_upgrade(body, item, cost_delta, add_kw):
     body = re.sub(r'DynamicVars\s*(?:\[\s*"(\w+)"\s*\]|\.(\w+))\s*\.UpgradeValueBy\(\s*(-?[\d.]+[mMfF]?)\s*\)', r1, body)
     body = re.sub(r"\s*EnergyCost\.UpgradeBy\(\s*-?\d+\s*\)\s*;", "", body)
     body = re.sub(r"\s*AddKeyword\(\s*CardKeyword\.\w+\s*\)\s*;", "", body)
+    if item.get("no_cost"):
+        body = re.sub(r"\s*RemoveKeyword\(\s*CardKeyword\.Unplayable\s*\)\s*;", "", body)
     add = block_damage_upgrades(item)
     for name, v in vals.items():
         if name not in seen and float(v.get("upgrade") or 0):
@@ -1776,7 +1930,7 @@ def _indent(text, ind="    "):
 
 
 def canonical_keyword_terms(project, item):
-    terms = ["CardKeyword." + k for k in item.get("keywords", [])]
+    terms = ["CardKeyword." + k for k in card_keywords(item)]
     for tag_id in item.get("gtags", []):
         tag = gimmick.find_tag(project, tag_id) or {}
         member = tag.get("keyword_member", "")
@@ -1804,9 +1958,14 @@ def gen_clone(project, item, kind):
     L += [f"public sealed class {cls} : {base}", "{"]
     rv = _raw_var_exprs(item)
     if kind == "card":
+        import cardkind
+        kind_member = cardkind.member(project, item)
+        if kind_member:
+            body = re.sub(r"\bpublic\s+override\s+CardType\s+Type\b", "private CardType MakerOriginalType", body)
+            L.append(kind_member)
         effs = item.get("effects", [])
         args = list(cl.get("ctor_args") or []) if cl.get("base") else []
-        new_args = [str(int(item["cost"])), f"CardType.{item['type']}", f"CardRarity.{item['rarity']}",
+        new_args = [str(card_energy_cost(item)), f"CardType.{item['type']}", f"CardRarity.{item['rarity']}",
                     f"TargetType.{item['target']}"]
         if args:
             out, used = [], set()
@@ -1836,7 +1995,7 @@ def gen_clone(project, item, kind):
             L.append(f"    public override IEnumerable<CardKeyword> CanonicalKeywords => [{', '.join(keywords)}];")
         cv = rv + _canonical_vars(project, item, "card")
         L.append(f"    protected override IEnumerable<DynamicVar> CanonicalVars => [{', '.join(cv)}];")
-        if any(e["kind"] == "block" for e in effs) and "GainsBlock" not in body:
+        if any(e["kind"] == "block" for e in effs + (upgrade_effects(item) if item.get("separate_upgrade_effect") else [])) and "GainsBlock" not in body:
             L.append("    public override bool GainsBlock => true;")
         tips = list(dict.fromkeys(gimmick.card_tips(project, item) + _hover_tips(project, item)))
         inherited_tips = False
@@ -1847,10 +2006,17 @@ def gen_clone(project, item, kind):
         if tips and ("ExtraHoverTips" not in body or inherited_tips):
             original = ".. MakerOriginalExtraHoverTips, " if inherited_tips else ""
             L.append(f"    protected override IEnumerable<IHoverTip> ExtraHoverTips => [{original}{', '.join(tips)}];")
-        cost_delta = int(item.get("upgrade_cost", item["cost"])) - int(item["cost"])
+        cost_delta = 0 if item.get("no_cost") else int(item.get("upgrade_cost", item["cost"])) - int(item["cost"])
+        if item.get("no_cost"):
+            body = re.sub(r"\bprotected\s+override\s+bool\s+HasEnergyCostX\b", "private bool MakerOriginalHasEnergyCostX", body)
+            L.append("    protected override bool HasEnergyCostX => false;")
         add_kw = item.get("upgrade_add_keyword") if item.get("upgrade_add_keyword") not in item.get("keywords", []) else ""
         L += [""] + _indent(_fix_upgrade(cl.get("upgrade_body", ""), item, cost_delta, add_kw))
-        if effs or cl.get("editable_play"):
+        extra_upgrade = upgraded_effect_value_upgrades(project, item)
+        if extra_upgrade:
+            # Insert before the generated upgrade method's final brace.
+            L[-1:-1] = ["        " + line for line in extra_upgrade]
+        if effs or item.get("separate_upgrade_effect") or cl.get("editable_play") or any(t.get("blocks") for t in gimmick.tags(project)):
             has_play = re.search(r"\bOnPlay\s*\(", body)
             if has_play:
                 body = re.sub(r"(?:protected|public)\s+override\s+(async\s+)?Task\s+OnPlay\s*\(",
@@ -1858,7 +2024,7 @@ def gen_clone(project, item, kind):
             C = _Ctx("card", item)
             L += ["", "    protected override async Task OnPlay(PlayerChoiceContext choiceContext, CardPlay cardPlay)", "    {"]
             if has_play and not cl.get("editable_play"):
-                L.append("        await OriginalOnPlay(choiceContext, cardPlay);")
+                L.append("        " + ("if (!IsUpgraded) " if item.get("separate_upgrade_effect") else "") + "await OriginalOnPlay(choiceContext, cardPlay);")
             L += _effects_body(project, item, C)
             L.append("    }")
     elif kind == "relic":
@@ -1889,6 +2055,9 @@ def gen_clone(project, item, kind):
                   f'    public override string? CustomBigIconPath => {_img_path(project, item, "BigPowerImagePath", "")};']
         if rv:
             L.append(f"    protected override IEnumerable<DynamicVar> CanonicalVars => [{', '.join(rv)}];")
+    if kind == "card":
+        hooks, body = keyword_card_hooks(project, item, body)
+        L += hooks
     L += ["", f"    // ---- 원본 '{cl.get('orig_class', '')}' ({cl.get('mod', '')}) 에서 가져온 코드 ----"]
     L += _indent(body.strip("\n"))
     L += _extra_code(item)
@@ -1897,6 +2066,75 @@ def gen_clone(project, item, kind):
 
 
 CARD_EVENTS = {"draw":"AfterCardDrawn", "discard":"AfterCardDiscarded", "exhaust":"AfterCardExhausted"}
+
+def keyword_card_hooks(project, card, original_body=None):
+    """Merge card-local events and shared keyword events into one override each."""
+    import blockcode as B
+    import gimmick as G
+    lines = []
+    for index, tag in enumerate(G.tags(project)):
+        if G.tag_blocks(tag, "hand_play"):
+            field = "_makerTagCount" + str(index)
+            lines += [f"    private int {field}, {field}Round;", f"    private object? {field}Combat;"]
+    events = list(CARD_EVENTS.items()) + [("hand_start", "AfterPlayerTurnStart"), ("hand_end", "BeforeSideTurnEnd"), ("hand_play", "AfterCardPlayed")]
+    for event, method in events:
+        blocks = card.get("event_blocks", {}).get(event) or []
+        separate = event_separate(card, event)
+        up_blocks = card.get("upgrade_event_blocks", {}).get(event, []) if separate else []
+        import handaura
+        grants = handaura.play_effects(project, card) if event == "hand_play" else []
+        if not blocks and not up_blocks and not separate and not any(G.tag_blocks(t, event) for t in G.tags(project)) and not grants:
+            continue
+        ctx = card_event_context(card, event)
+        statements, errors = B.compile_blocks(blocks, project, ctx, prefix=pascal(card["id"])+event,
+                                             extras=_EXTRAS_SINK.get("x")) if blocks else ([], [])
+        if errors:
+            raise ValueError(f"{card['id']} {event}: " + ", ".join(errors))
+        if separate:
+            up_statements, errors = B.compile_blocks(up_blocks, project, ctx, prefix=pascal(card["id"])+event+"Up",
+                                                     extras=_EXTRAS_SINK.get("x"))
+            if errors:
+                raise ValueError(f"{card['id']} {event} 강화 후: " + ", ".join(errors))
+            statements = ["if (IsUpgraded)", "{"] + ["    " + s for s in up_statements] + ["}", "else", "{"] + ["    " + s for s in statements] + ["}"]
+        shared = G.tag_play_lines(project, card, ctx, timing=event)
+        if event == "hand_play":
+            args = "PlayerChoiceContext choiceContext, CardPlay cardPlay"
+            call = "choiceContext, cardPlay"
+            guard = "cardPlay.Card == this || cardPlay.Card.Owner != Owner"
+        elif event == "hand_start":
+            args = "PlayerChoiceContext choiceContext, Player player"
+            call = "choiceContext, player"
+            guard = "player != Owner"
+        elif event == "hand_end":
+            args = "PlayerChoiceContext choiceContext, CombatSide side, IEnumerable<Creature> participants"
+            call = "choiceContext, side, participants"
+            guard = "side != Owner.Creature.Side || !participants.Contains(Owner.Creature)"
+        else:
+            flag = "" if event == "discard" else ", bool flag"
+            args = "PlayerChoiceContext choiceContext, CardModel card" + flag
+            call = "choiceContext, card" + ("" if event == "discard" else ", flag")
+            guard = "card != this"
+        preceding = []
+        if original_body is not None:
+            pattern = r"(?:public|protected)\s+override\s+(async\s+)?Task\s+" + method + r"\s*\("
+            original_body, n = re.subn(pattern, lambda m: "private " + (m.group(1) or "") + "Task MakerOriginal" + method + "(", original_body, count=1)
+            preceding = [f"        {'if (!IsUpgraded) ' if separate and n else ''}await {'MakerOriginal' if n else 'base.'}{method}({call});"]
+        lines += [f"    public override async Task {method}({args})", "    {", *preceding,
+                  f"        if ({guard}) return;"]
+        if event == "hand_play" and grants:
+            lines += ["        if (Owner.Creature.IsDead) return;",
+                      "        if (Owner.PlayerCombatState?.Hand.Cards.Contains(this) == true)", "        {"]
+            lines += ["    " + line for line in statements + shared] + ["        }"]
+            lines += grants
+        else:
+            if event.startswith("hand_"):
+                lines += ["        if (Owner.PlayerCombatState?.Hand.Cards.Contains(this) != true || Owner.Creature.IsDead) return;"]
+            lines += statements + shared
+        lines += ["    }"]
+    aura_lines, original_body = G.hand_aura_members(project, card, original_body)
+    lines += aura_lines
+    return lines, original_body
+
 
 def gen_card(project, card):
     if card.get("clone"):
@@ -1909,15 +2147,19 @@ def gen_card(project, card):
     lines = [_header(), USINGS_COMMON, f"namespace {mid}.{mid}Code.Cards;", ""]
     if pool:
         lines.append(f"[Pool(typeof({pool}))]")
-    lines += [f"public sealed class {cls}() : {mid}Card({0 if card.get('x_cost') else int(card['cost'])}, CardType.{card['type']}, "
+    lines += [f"public sealed class {cls}() : {mid}Card({card_energy_cost(card)}, CardType.{card['type']}, "
               f"CardRarity.{card['rarity']}, TargetType.{card['target']})", "{"]
+    import cardkind
+    kind_member = cardkind.member(project, card)
+    if kind_member:
+        lines.append(kind_member)
     if card["tag"]:
         lines.append(f"    protected override HashSet<CardTag> CanonicalTags => [CardTag.{card['tag']}];")
     keywords = canonical_keyword_terms(project, card)
     if keywords:
         kws = ", ".join(keywords)
         lines.append(f"    public override IEnumerable<CardKeyword> CanonicalKeywords => [{kws}];")
-    if any(e["kind"] == "block" for e in effs):
+    if any(e["kind"] == "block" for e in effs + (upgrade_effects(card) if card.get("separate_upgrade_effect") else [])):
         lines.append("    public override bool GainsBlock => true;")
     cv = _canonical_vars(project, card, "card")
     lines.append(f"    protected override IEnumerable<DynamicVar> CanonicalVars => [{', '.join(cv)}];")
@@ -1928,7 +2170,7 @@ def gen_card(project, card):
     if tips:
         lines.append(f"    protected override IEnumerable<IHoverTip> ExtraHoverTips => [{', '.join(tips)}];")
     lines += gimmick.card_members(project, card)
-    if card.get("x_cost"):
+    if card.get("x_cost") and not card.get("no_cost"):
         lines += ["    protected override bool HasEnergyCostX => true;",
                   "    // X = 이 카드에 쓴 에너지 (화학 X 같은 효과 포함)" + (", 강화하면 +1" if card.get("x_plus_up") else ""),
                   "    private int XCount => ResolveEnergyXValue()" + (" + (IsUpgraded ? 1 : 0)" if card.get("x_plus_up") else "") + ";"]
@@ -1947,27 +2189,18 @@ def gen_card(project, card):
         elif e["kind"] == "power":
             lines.append(f'        DynamicVars["{power_meta(project, e["power"])["var"]}"].UpgradeValueBy({u}m);')
     lines.extend("        " + line for line in block_damage_upgrades(card))
-    dc = 0 if card.get("x_cost") else int(card["upgrade_cost"]) - int(card["cost"])
+    lines.extend("        " + line for line in upgraded_effect_value_upgrades(project, card))
+    dc = 0 if card.get("x_cost") or card.get("no_cost") else int(card["upgrade_cost"]) - int(card["cost"])
     if dc:
         lines.append(f"        EnergyCost.UpgradeBy({dc});")
     lines += gimmick.card_upgrade_lines(card)
     if card.get("upgrade_add_keyword") and card["upgrade_add_keyword"] not in card["keywords"]:
         lines.append(f"        AddKeyword(CardKeyword.{card['upgrade_add_keyword']});")
-    if card.get("upgrade_remove_keyword") and card["upgrade_remove_keyword"] in card["keywords"]:
+    if card.get("upgrade_remove_keyword") and card["upgrade_remove_keyword"] in card["keywords"] and not (card.get("no_cost") and card["upgrade_remove_keyword"] == "Unplayable"):
         lines.append(f"        RemoveKeyword(CardKeyword.{card['upgrade_remove_keyword']});")
     lines.append("    }")
-    import blockcode
-    for event, method in CARD_EVENTS.items():
-        blocks = card.get("event_blocks", {}).get(event)
-        if not blocks:
-            continue
-        ctx = card_event_context(card, event)
-        statements, errors = blockcode.compile_blocks(blocks, project, ctx, prefix=pascal(card["id"])+event)
-        if errors:
-            raise ValueError(f"{card['id']} {event}: " + ", ".join(errors))
-        flag = "" if event == "discard" else ", bool flag"
-        lines.extend([f"    public override async Task {method}(PlayerChoiceContext choiceContext, CardModel card{flag})",
-                      "    {", "        if (card != this) return;", *statements, "    }"])
+    hooks, _ = keyword_card_hooks(project, card)
+    lines += hooks
     lines += _extra_code(card)
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -3209,6 +3442,10 @@ def gen_localization(project, lang, extras=None):
     """lang: 'ko' or 'en' -> dict of filename -> data"""
     files = {n: {} for n in ("cards", "relics", "potions", "powers", "card_keywords", "static_hover_tips",
                              "characters", "ancients")}
+    import cardkind
+    kinds = [t for t in gimmick.tags(project) if t.get("card_kind")]
+    if kinds:
+        files["gameplay_ui"] = {cardkind.loc_key(project, t): text(t, "name", lang) for t in kinds}
     for c in project["cards"]:
         lid = item_loc_id(project, "card", c)
         files["cards"][f"{lid}.title"] = text(c, "name", lang)
@@ -3565,6 +3802,8 @@ def _generate_code(project, code, mid):
     for c in project["cards"]:
         _write(os.path.join(code, "Cards", f"{pascal(c['id'])}.cs"), gen_card(project, c))
     _write(os.path.join(code, "Cards", f"{mid}CardFrames.cs"), cardframe.gen_runtime(project))
+    import cardkind
+    _write(os.path.join(code, "Cards", f"{mid}CardKinds.cs"), cardkind.gen_runtime(project))
     for r in project["relics"]:
         _write(os.path.join(code, "Relics", f"{pascal(r['id'])}.cs"), gen_relic(project, r))
     for p in project["potions"]:

@@ -180,7 +180,7 @@ C = {
     "text": "#24324b", "muted": "#66758c", "accent": "#365ee8", "accent_hi": "#2949bd",
     "accent_soft": "#e9eeff", "hover": "#f2f5ff", "warn": "#a46615", "danger": "#b8364b",
     "success": "#237b62", "workspace": "#f7f9fd", "panel": "#e8edf6",
-    "console": "#182235", "console_fg": "#d4deed",
+    "console": "#262a31", "console_fg": "#d9dde4",
 }
 
 FONT = "Malgun Gothic"
@@ -331,6 +331,11 @@ class Tooltip:
         widget.bind("<Enter>", self._enter, add="+")
         widget.bind("<Leave>", self._leave, add="+")
         widget.bind("<ButtonPress>", self._leave, add="+")
+        widget.bind("<Destroy>", self._destroy, add="+")
+
+    def _destroy(self, event):
+        if event.widget is self.w:
+            self._leave()
 
     def _enter(self, _e=None):
         self._cancel()
@@ -339,7 +344,10 @@ class Tooltip:
     def _leave(self, _e=None):
         self._cancel()
         if self.tip is not None:
-            self.tip.destroy()
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
             self.tip = None
 
     def _cancel(self):
@@ -351,6 +359,7 @@ class Tooltip:
             self.job = None
 
     def _show(self):
+        self.job = None
         text = self.text() if callable(self.text) else self.text
         if not text or not self.w.winfo_exists():
             return
@@ -392,20 +401,20 @@ FIELD_HELP = {
     "card:cost": "카드를 쓰는 데 드는 에너지입니다 (0~9). 남은 에너지를 전부 쓰는 X 비용은 키워드 줄의 'X 비용'을 켜세요.",
     "card:upgrade_cost": "강화했을 때의 비용입니다. 비용이 그대로면 같은 값을 두세요.",
     "card:target": "카드를 끌어다 놓을 대상입니다. 적 하나를 골라야 하면 '적 하나'.",
-    "card:tag": "타격·수비 같은 게임 태그입니다. 다른 카드가 '타격 카드' 등을 찾을 때 쓰입니다.",
+    "card:tag": "카드를 찾을 때 쓰는 분류 이름입니다. 예: 타격 태그가 있으면 ‘타격 카드’를 찾는 효과의 대상이 됩니다. 태그를 붙이는 것만으로 피해 같은 행동이 생기지는 않습니다.",
     "card:frame_style": "카드 틀·그림 테두리·제목 띠의 디자인. '캐릭터 기본 따르기'면 캐릭터 탭에서 고른 테두리를 씁니다. "
                         "'편집…'에서 색을 바꾸거나 직접 그린 그림을 넣을 수 있습니다.",
     "card:upgrade_add_keyword": "강화하면 붙는 키워드입니다 (예: 강화하면 보존).",
     "card:upgrade_remove_keyword": "강화하면 없어지는 키워드입니다 (예: 강화하면 소멸이 사라짐). 위 키워드 줄에서 켜 둔 키워드여야 합니다.",
     "relic:rarity": "유물이 어디서 나오는지 정합니다. 시작 유물은 캐릭터가 처음부터 가지고 시작합니다.",
     "relic:trigger": "유물 효과가 발동하는 때입니다.",
-    "played_filter": "어떤 종류의 카드를 썼을 때 셀지 고릅니다.",
+    "played_filter": "발동 횟수를 셀 카드의 조건입니다. 예: 공격을 고르면 스킬을 사용해도 횟수에 세지 않습니다.",
     "played_every": "카드를 이 장수만큼 쓸 때마다 한 번 발동합니다.",
     "enemy_mode": "'적' 대상 효과가 누구에게 갈지 정합니다 (모든 적 / 무작위 적).",
     "potion:rarity": "물약 보상에 나오는 확률입니다.",
     "potion:target": "물약을 쓸 때 대상을 고를지 정합니다.",
     "power:type": "버프는 좋은 효과(초록 테두리), 디버프는 나쁜 효과(빨간 테두리)입니다.",
-    "power:stack": "같은 파워를 또 받으면 수치를 더할지, 무시할지 등을 정합니다.",
+    "power:stack": "같은 상태 효과를 또 받았을 때 수치를 어떻게 합칠지 정합니다. ‘중첩’은 쌓인 숫자입니다. 예: 중독 3에 중독 2를 더하면 중독 5가 됩니다.",
     "power:trigger": "파워 효과가 발동하는 때입니다. '없음'이면 상시 효과만 씁니다.",
     "power:decay": "턴이 지날 때 수치가 줄어드는 방식입니다.",
     "played_by": "누가 카드를 썼을 때 셀지 정합니다 (파워를 가진 쪽 / 아무나).",
@@ -1050,6 +1059,13 @@ class ScrollNotebook(ttk.Notebook):
     def __init__(self, master, **kw):
         super().__init__(master, **kw)
         self._inner_of, self._outer_of = {}, {}
+        self._slot_of, self._key_of = {}, {}
+        self._area = None
+        self._park_job = None
+        self._catch_job = None
+        tag = "ScrollNotebookPages" + str(id(self))
+        self.bind_class(tag, "<<NotebookTabChanged>>", self._layout_hosts)
+        self.bindtags((tag,) + self.bindtags())
         self._pages, self._order = {}, []
         self._visual_order = []
         self._active_popup = None
@@ -1069,6 +1085,9 @@ class ScrollNotebook(ttk.Notebook):
         if event.widget is not self:
             return
         self._tab_drag.cancel()
+        if self._catch_job is not None:
+            self.after_cancel(self._catch_job)
+            self._catch_job = None
         if self._notify_job is not None:
             self.after_cancel(self._notify_job)
             self._notify_job = None
@@ -1099,23 +1118,94 @@ class ScrollNotebook(ttk.Notebook):
         box.pack(fill="both", expand=True)
         tab = factory(box.inner)
         tab.pack(fill="both", expand=True)
-        super().add(host, text=text, **kw)
+        slot = ttk.Frame(self)
+        super().add(slot, text=text, **kw)
         key = str(host)
+        self._slot_of[key], self._key_of[str(slot)] = str(slot), key
+        slot.bind("<Configure>", self._slot_configure, add="+")
         self._inner_of[key] = str(tab)
         self._outer_of[str(tab)] = key
         self._order.append(key)
         self._visual_order.append(key)
-        self._pages[key] = dict(host=host, box=box, header=header, browse=browse,
-                                title=text, options=dict(super().tab(host)), detached=False,
+        self._pages[key] = dict(host=host, box=box, header=header, browse=browse, slot=slot, placed=None,
+                                title=text, options=dict(super().tab(slot)), detached=False,
                                 visible=tk.BooleanVar(self, True), floating=tk.BooleanVar(self,False), geometry=None, close_handler=None)
         self._tab_drag.bind(title_label,key)
         self._tab_drag.bind(header,key)
+        self._layout_hosts()
         return tab
 
     def _o(self, tab):
         if isinstance(tab, int):
             return self._order[tab]
         return self._outer_of.get(str(tab), str(tab)) if tab is not None else None
+
+    # Pages are never unmapped on a tab switch: Tk would unmap and remap every widget
+    # of both pages (hundreds of native windows, ~0.4 s). Unselected docked pages stay
+    # mapped but parked far off-screen, so their coordinates never match a real point.
+    _PARK = -30000
+
+    def _n(self, key):
+        return self._slot_of.get(str(key), key)
+
+    def _k(self, native):
+        return self._key_of.get(str(native), str(native))
+
+    def _native_tabs(self):
+        return [self._k(t) for t in super().tabs()]
+
+    def _native_selected(self):
+        cur = super().select()
+        return self._k(cur) if cur else ""
+
+    def _slot_configure(self, event):
+        area = (event.x, event.y, event.width, event.height)
+        if area != self._area and event.width > 1:
+            self._area = area
+            self._layout_hosts()
+
+    # 창 크기가 바뀌면 보이는 탭만 바로 맞춘다. 숨긴 탭은 크기를 그대로 두고 위치만 옮기며,
+    # 창을 멈춘 뒤 백그라운드에서 한 번에 하나씩 맞춘다 (창을 끄는 동안 위젯 수백 개를 다시 배치하지 않도록).
+    _CATCH_UP_DELAY = 200
+
+    def _place_host(self, record, want):
+        if record["placed"] != want:
+            record["host"].place(x=want[0], y=want[1], width=want[2], height=want[3])
+            record["placed"] = want
+
+    def _layout_hosts(self, _event=None):
+        if self._area is None:
+            return
+        x, y, w, h = self._area
+        selected = self._native_selected()
+        for key, record in self._pages.items():
+            if record["detached"]:
+                continue
+            if key == selected:
+                self._place_host(record, (x, y, w, h))
+                record["host"].lift()
+            else:
+                old = record["placed"] or (x, y, w, h)
+                self._place_host(record, (self._PARK, y, old[2], old[3]))
+        if any(not r["detached"] and k != selected and r["placed"] and r["placed"][2:] != (w, h)
+               for k, r in self._pages.items()):
+            if self._catch_job is not None:
+                self.after_cancel(self._catch_job)
+            self._catch_job = self.after(self._CATCH_UP_DELAY, self._catch_up)
+
+    def _catch_up(self):
+        self._catch_job = None
+        if self._area is None:
+            return
+        x, y, w, h = self._area
+        selected = self._native_selected()
+        for key, record in self._pages.items():
+            if record["detached"] or key == selected or record["placed"] is None:
+                continue
+            if record["placed"][2:] != (w, h):
+                self._place_host(record, (self._PARK, y, w, h))
+                self._catch_job = self.after_idle(self._catch_up)
+                return
 
     def _notify(self):
         if self._notify_job is None:
@@ -1134,6 +1224,8 @@ class ScrollNotebook(ttk.Notebook):
                 break
             widget = widget.master
         old = self._active_popup
+        if page is not None and not self._pages[page]["detached"] and page != self._native_selected() and self._park_job is None:
+            self._park_job = self.after_idle(self._leave_parked_page)
         if page is not None:
             record = self._pages[page]
             self._active_popup = page if (record["detached"] and record["visible"].get()) or is_panel_window(self._root(),event.widget.winfo_toplevel()) else None
@@ -1143,16 +1235,30 @@ class ScrollNotebook(ttk.Notebook):
                     self._active_popup = None
             except (AttributeError, tk.TclError):
                 pass
-        if self._active_popup != old:
-            self._notify()
+        # 포커스만 바뀐 것이므로 탭 전환 알림(on_tab 재로딩)을 보내지 않는다.
+        # 탭 선택·분리·숨김 등 실제 변화는 각각 _notify()로 알린다.
+
+    def _leave_parked_page(self):
+        self._park_job = None
+        try:
+            page = self.page_for_widget(self.focus_get())
+        except (KeyError, tk.TclError):
+            return
+        if page is None or self._pages[page]["detached"] or page == self._native_selected():
+            return
+        current = self._pages.get(self._native_selected())
+        target = current["host"].tk_focusNext() if current else None
+        if target is None or not str(target).startswith(str(current["host"]) + "."):
+            target = self
+        target.focus_set()
 
     def select(self, tab_id=None):
         if tab_id is None:
             popup = self._pages.get(self._active_popup)
             if popup:
                 return self._inner_of[self._active_popup]
-            cur = super().select()
-            return self._inner_of.get(str(cur), cur)
+            cur = self._native_selected()
+            return self._inner_of.get(cur, cur)
         key = self._o(tab_id)
         record = self._pages.get(key)
         if record is None:
@@ -1165,7 +1271,9 @@ class ScrollNotebook(ttk.Notebook):
             self._notify()
             return None
         self._active_popup = None
-        return super().select(key)
+        result = super().select(self._n(key))
+        self._layout_hosts()
+        return result
 
     def tab(self, tab_id, option=None, **kw):
         key = self._o(tab_id)
@@ -1173,7 +1281,7 @@ class ScrollNotebook(ttk.Notebook):
         if record and record["detached"]:
             record["options"].update(kw)
             return record["options"].get(option) if option else dict(record["options"])
-        result = super().tab(key, option, **kw)
+        result = super().tab(self._n(key), option, **kw)
         if record and kw:
             record["options"].update(kw)
         return result
@@ -1182,13 +1290,13 @@ class ScrollNotebook(ttk.Notebook):
         if tab_id == "end":
             return len(self._order)
         if isinstance(tab_id, str) and tab_id.startswith("@"):
-            return self._order.index(super().tabs()[super().index(tab_id)])
+            return self._order.index(self._native_tabs()[super().index(tab_id)])
         if tab_id == "current":
             tab_id = self.select()
         key = self._o(tab_id)
         if key in self._order:
             return self._order.index(key)
-        return super().index(key)
+        return super().index(self._n(key))
 
     def tabs(self):
         return tuple(self._inner_of[key] for key in self._order)
@@ -1207,7 +1315,7 @@ class ScrollNotebook(ttk.Notebook):
     def is_visible(self, tab_id):
         key = self._o(tab_id)
         record = self._pages.get(key)
-        if record and record["visible"].get() and (record["detached"] or super().select() == key):
+        if record and record["visible"].get() and (record["detached"] or self._native_selected() == key):
             return True
         return any(self.page_for_widget(group)==key and any(r["detached"] and r["visible"].get() for r in group._records.values()) for group in panel_groups(self._root()))
 
@@ -1216,8 +1324,7 @@ class ScrollNotebook(ttk.Notebook):
             index = self.tk.call(self._w,"index",f"@{int(x)},{int(y)}")
             if str(index) == "":
                 return None
-            native = super().tabs()
-            return str(native[int(index)])
+            return self._native_tabs()[int(index)]
         except (tk.TclError,ValueError,IndexError):
             return None
 
@@ -1229,7 +1336,7 @@ class ScrollNotebook(ttk.Notebook):
         self._tab_drag.start(event,key)
 
     def _tab_strip_height(self):
-        selected = str(super().select())
+        selected = self._native_selected()
         current = self._pages.get(selected)
         if current and not current["detached"] and current["host"].winfo_ismapped():
             return max(1,current["host"].winfo_rooty()-self.winfo_rooty())
@@ -1270,7 +1377,7 @@ class ScrollNotebook(ttk.Notebook):
             return None
         if not pointer_in_workspace(self,x,y,self._tab_drag):
             return None
-        native = list(map(str,super().tabs()))
+        native = self._native_tabs()
         local_x, row = x-left,max(0,bar_height//2)
         hovered = self._native_tab_at(local_x,row)
         anchor = "end"
@@ -1303,7 +1410,7 @@ class ScrollNotebook(ttk.Notebook):
             return
         _,anchor = target if isinstance(target,tuple) else ("dock",target)
         record = self._pages[key]
-        native = list(map(str,super().tabs()))
+        native = self._native_tabs()
         if not record["detached"]:
             if anchor == key:
                 return
@@ -1311,17 +1418,18 @@ class ScrollNotebook(ttk.Notebook):
             desired = len(others) if anchor in (None,"end") else others.index(anchor) if anchor in others else None
             if desired is None or native.index(key) == desired:
                 return
-            super().insert("end" if desired==len(others) else desired,record["host"])
+            super().insert("end" if desired==len(others) else desired,record["slot"])
             self._remember_tab_position(key,anchor)
-            super().select(key)
+            super().select(self._n(key))
+            self._layout_hosts()
             self._active_popup = None
         else:
             self.dock(key)
             if anchor not in (None,key):
-                others = [str(page) for page in super().tabs() if str(page) != key]
+                others = [page for page in self._native_tabs() if page != key]
                 desired = len(others) if anchor == "end" else others.index(anchor) if anchor in others else None
                 if desired is not None:
-                    super().insert("end" if desired==len(others) else desired,record["host"])
+                    super().insert("end" if desired==len(others) else desired,record["slot"])
                     self._remember_tab_position(key,anchor)
 
     def set_visible(self, tab_id, show):
@@ -1338,7 +1446,8 @@ class ScrollNotebook(ttk.Notebook):
             else:
                 record["host"].withdraw()
         elif previous != bool(show):
-            super().tab(key, state="normal" if show else "hidden")
+            super().tab(self._n(key), state="normal" if show else "hidden")
+            self._layout_hosts()
         if not show and self._active_popup == key:
             self._active_popup = None
         if previous != bool(show):
@@ -1355,14 +1464,16 @@ class ScrollNotebook(ttk.Notebook):
             self.select(key)
             return
         host = record["host"]
-        native = list(map(str,super().tabs()))
+        native = self._native_tabs()
         old_index = native.index(key)
         record["dock_before"] = native[old_index+1] if old_index+1<len(native) else "end"
         record["dock_index"] = old_index
-        old_selected,old_active = super().select(),self._active_popup
-        old_options = dict(super().tab(key))
+        old_selected,old_active = self._native_selected(),self._active_popup
+        old_options = dict(super().tab(self._n(key)))
         record["options"] = dict(old_options)
-        super().forget(key)
+        super().forget(self._n(key))
+        host.place_forget()
+        record["placed"] = None
         try:
             host.update_idletasks()
             self.tk.call("wm", "manage", host)
@@ -1389,10 +1500,11 @@ class ScrollNotebook(ttk.Notebook):
             record["floating"].set(False)
             record["options"] = old_options
             record["visible"].set(old_options.get("state","normal") != "hidden")
-            super().insert(min(old_index,len(super().tabs())),host,**old_options)
+            super().insert(min(old_index,len(super().tabs())),record["slot"],**old_options)
             self._active_popup = old_active
-            if str(old_selected) == key:
-                super().select(key)
+            if old_selected == key:
+                super().select(self._n(key))
+            self._layout_hosts()
             self._notify()
             raise
 
@@ -1406,17 +1518,20 @@ class ScrollNotebook(ttk.Notebook):
             try:
                 forget_floating_window(host)
                 record["header"].pack_forget()
-                native = set(map(str,super().tabs()))
+                native = set(self._native_tabs())
                 after = self._visual_order[self._visual_order.index(key)+1:]
                 before = next((page for page in after if page in native),"end")
                 options = dict(record["options"])
                 options["state"] = "normal" if record["visible"].get() else "hidden"
-                super().insert(before, host, **options)
+                super().insert(self._n(before), record["slot"], **options)
                 record["detached"] = False
                 record["floating"].set(False)
+                self._layout_hosts()
             except Exception:
-                if key in map(str,super().tabs()):
-                    super().forget(key)
+                if key in self._native_tabs():
+                    super().forget(self._n(key))
+                host.place_forget()
+                record["placed"] = None
                 self.tk.call("wm","manage",host)
                 host.withdraw()
                 record["header"].pack(fill="x",before=record["box"])
@@ -1443,7 +1558,7 @@ class ScrollNotebook(ttk.Notebook):
         self._visual_order[:] = self._order
         self.dock_all()
         for index,key in enumerate(self._order):
-            super().insert(index,self._pages[key]["host"])
+            super().insert(index,self._pages[key]["slot"])
         self.show_all()
 
     def show_all(self):

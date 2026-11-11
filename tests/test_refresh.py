@@ -1,3 +1,4 @@
+import time
 import tkinter as tk
 from tkinter import ttk
 from types import SimpleNamespace
@@ -293,3 +294,83 @@ class RefreshTests(TestCase):
             configure.assert_not_called()
             U._set_if(label,wraplength=140)
             configure.assert_called_once_with(wraplength=140)
+
+
+    def test_tooltip_cancels_pending_display_when_widget_is_destroyed(self):
+        label=ttk.Label(self.root,text="도움말")
+        help=U.Tooltip(label,"설명",delay=10000)
+        help._enter()
+        pending=help.job
+        self.assertIsNotNone(pending)
+        label.destroy()
+        self.assertIsNone(help.job)
+        self.assertNotIn(pending,self.root.tk.splitlist(self.root.tk.call("after","info")))
+
+    def test_visible_tooltip_is_closed_with_its_control(self):
+        self.root.geometry("300x200+5000+5000")
+        label=ttk.Label(self.root,text="설명할 말")
+        label.pack()
+        self.root.deiconify()
+        self.root.update()
+        help=U.Tooltip(label,lambda:"초보자 설명",delay=0)
+        help._enter()
+        self.root.update()
+        self.assertIsNotNone(help.tip)
+        self.assertIsNone(help.job)
+        label.destroy()
+        self.assertIsNone(help.tip)
+        self.root.update()
+
+    def test_tab_switch_parks_pages_instead_of_unmapping(self):
+        nb = U.ScrollNotebook(self.root)
+        nb.pack(fill="both",expand=True)
+        pages = [nb.add_scrolled(lambda m,t=t:ttk.Entry(m), t) for t in ("a","b")]
+        self.root.geometry("400x300+5000+5000")
+        self.root.deiconify()
+        self.root.update()
+        nb.select(pages[1])
+        self.root.update()
+        hosts = [nb._pages[nb._o(p)]["host"] for p in pages]
+        self.assertTrue(all(h.winfo_ismapped() for h in hosts))
+        self.assertEqual(hosts[0].winfo_x(),nb._PARK)
+        self.assertGreaterEqual(hosts[1].winfo_x(),0)
+        self.assertEqual(nb.select(),str(pages[1]))
+        pages[0].focus_force()
+        self.root.update()
+        self.assertNotEqual(nb.page_for_widget(self.root.focus_get()),nb._o(pages[0]))
+
+    def test_focus_into_floating_tab_does_not_fire_tab_changed(self):
+        # on_tab() reloads the current tab on this event; focus alone must not trigger it
+        nb = U.ScrollNotebook(self.root)
+        nb.pack(fill="both",expand=True)
+        pages = [nb.add_scrolled(lambda m,t=t:ttk.Entry(m), t) for t in ("a","b")]
+        self.root.geometry("400x300+5000+5000")
+        self.root.deiconify()
+        self.root.update()
+        nb.detach(nb._o(pages[1]))
+        self.root.update()
+        nb._active_popup = None
+        seen = []
+        nb.bind("<<NotebookTabChanged>>", lambda _e: seen.append(1))
+        nb._track_focus(SimpleNamespace(widget=pages[1]))
+        nb._track_focus(SimpleNamespace(widget=nb))
+        self.root.update()
+        self.assertEqual(seen, [])
+
+    def test_resize_sizes_visible_tab_now_and_hidden_tabs_later(self):
+        nb = U.ScrollNotebook(self.root)
+        nb.pack(fill="both",expand=True)
+        pages = [nb.add_scrolled(lambda m,t=t:ttk.Entry(m), t) for t in ("a","b","c")]
+        self.root.geometry("400x300+5000+5000")
+        self.root.deiconify()
+        self.root.update()
+        self.root.geometry("500x380+5000+5000")
+        self.root.update_idletasks()
+        shown = nb._pages[nb._native_selected()]
+        self.assertEqual(shown["placed"][2:], nb._area[2:])   # 보이는 탭은 바로 맞춘다
+        end = time.perf_counter() + 2
+        while nb._catch_job is not None and time.perf_counter() < end:
+            self.root.update()
+            time.sleep(0.01)
+        for key, record in nb._pages.items():
+            self.assertEqual(record["placed"][2:], nb._area[2:], key)   # 숨긴 탭도 나중에 맞춘다

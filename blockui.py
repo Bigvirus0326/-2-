@@ -20,6 +20,7 @@ from tkinter import simpledialog, filedialog, messagebox, ttk
 
 from uxkit import C, Tooltip, DockPanedWindow, install_panel_menu, scroll_command
 import blockcode as B
+import blockhelp as BH
 from winpos import center_window
 import modgen as M
 
@@ -35,7 +36,16 @@ PALETTE_NAMES = {
     "apply_power": "파워 부여하기", "remove_power": "파워 제거하기",
     "heal": "체력 회복하기", "lose_hp": "방어도를 무시하고 체력 잃기",
     "pick": "카드 골라서 한 가지 동작 실행",
+    "select_cards": "카드 고르기 · 직접 선택 / 무작위 선택",
+    "select_enemies": "적에게 반복 · 모든 적 / 무작위 적",
     "pick_each": "카드 골라서 한 장마다 여러 동작 실행",
+    "random_each": "무작위 카드 N장 선택 · 강화 / 버리기 / 소멸 등 여러 동작 실행",
+    "card_number_edit": "카드 수치 바꾸기 · 비용·피해·방어 등",
+    "hand_aura_stat": "더미 지속 보정 · 비용·피해·방어",
+    "aura_card_effect": "조건에 맞는 카드 사용 시 · 저장한 효과 실행",
+    "aura_power_amount": "다른 카드의 파워 부여 중첩 보정",
+    "card_cost_edit": "고른 카드 비용 증가 감소 설정 · 이번 턴 전투 다음 사용까지",
+    "card_damage_edit": "고른 카드 피해량 데미지 증가 감소 설정 · 이번 전투",
     "picked_action": "고른 카드에 동작 추가 · ‘한 장마다 실행’ 안에서 사용",
     "pick_transform": "고른 카드를 지정한 카드로 변화시키기",
     "if": "조건을 만족하면 실행", "if_else": "조건에 따라 두 갈래로 실행",
@@ -43,7 +53,11 @@ PALETTE_NAMES = {
 }
 
 
+PALETTE_KEYWORDS = {"hand_aura_stat": "손패 뽑을 카드 더미 버린 카드 더미 지속 보정 비용 피해량 방어도 키워드", "card_number_edit": "고른 카드 비용 피해량 방어도 카드 뽑기 장수 에너지 체력 회복 손실 최대 체력 골드 수치 증가 감소 설정 이번 턴 전투 다음 사용 시까지"}
+
 def _advanced_palette_block(op, spec):
+    if op in B.F.FAMILIES:
+        return all(_advanced_palette_block(variant, B.SPECS[variant]) for variant, _ in B.F.FAMILIES[op][1])
     return (spec["cat"] == "mod_api" or op in ("original_play", "source_step")
             or any(kind == "code" for kind, _ in spec.get("args", {}).values()))
 
@@ -74,20 +88,22 @@ def _block_color(category):
 # ---------------------------------------------------------------------------
 # 값 / 조건 고르기 창
 # ---------------------------------------------------------------------------
-VALUE_TYPES = [("num", "숫자"), ("stack", "파워 수"), ("stat", "체력 / 방어도"), ("count", "카드 수 / 적 수"),
-               ("energy", "남은 에너지"), ("amount", "이 파워의 스택 수 (파워 전용)"), ("round", "현재 턴 수"),
-               ("rand", "무작위 범위 (최소~최대)"), ("var", "변수"), ("op", "계산 (값 ○ 값)"),
+VALUE_TYPES = [("num", "숫자"), ("stack", "파워가 쌓인 수치"), ("stat", "체력 / 방어도"), ("count", "카드 수 / 적 수"),
+               ("energy", "남은 에너지"), ("amount", "이 파워가 쌓인 수치 (파워 전용)"), ("round", "현재 턴 수"),
+               ("rand", "무작위 범위 (최소~최대)"), ("var", "변수에 저장한 숫자"), ("op", "계산 (값 ○ 값)"),
                ("played", "사용한 카드 수 (이번 턴/전투 · 종류·태그별) — 연계"), ("summons", "소환수 수"),
-               ("event", "그 수치 (넘친 양 / 기준치 도달 때의 스택)"),
+               ("event", "발동 당시 수치 (넘친 양 / 기준치 도달 시)"),
                ("orbs", "구체 수 / 구체 슬롯 수"), ("orb_passive", "이 구체의 지속 수치 (구체 전용, 밀집 적용)"),
                ("orb_evoke", "이 구체의 발현 수치 (구체 전용, 밀집 적용)"), ("stars", "별 수"),
                ("energy_x", "X (이 카드에 쓴 에너지, X 비용 카드 전용)"),
                ("star_x", "X (이 카드에 쓴 별, 별 X 카드 전용)"), ("osty", "골골이 체력"), ("pet", "동료(골골이형) 체력"),
-               ("card_state", "카드 변수 값 (이 카드 / 고른 카드 한 장마다 따로)")]
-COND_TYPES = [("cmp", "비교 (값 ○ 값)"), ("chance", "확률 %"), ("has", "파워를 가지고 있음"),
+               ("card_state", "카드에 저장한 숫자 (한 장마다 따로)")]
+COND_TYPES = [("group", "조건 묶음 · 모두 / 하나 이상"), ("hp_percent", "체력 비율 비교 (%)"),
+              ("pile_count", "덱·더미에 카드가 있음 / 장수 비교"), ("card_identity", "고른 카드가 지정 카드임"),
+              ("cmp", "비교 (값 ○ 값)"), ("chance", "확률 %"), ("has", "파워를 가지고 있음"),
               ("and", "그리고 (둘 다)"), ("or", "또는 (하나라도)"), ("not", "아니다"),
               ("osty_alive", "골골이가 살아 있음"), ("pet_alive", "동료(골골이형)가 살아 있음"),
-              ("card_var_has", "카드에 변수가 있음 (그 한 장)"), ("card_is", "카드가 ~이다 (키워드·태그·종류·인챈트)")]
+              ("card_var_has", "카드에 저장한 값이 있음 (그 한 장)"), ("card_is", "카드의 규칙·태그·종류·추가 능력 확인")]
 
 
 class _Combo(ttk.Combobox):
@@ -117,6 +133,7 @@ class SlotDialog(tk.Toplevel):
     def __init__(self, master, editor, kind, current):
         super().__init__(master)
         self.editor, self.kind = editor, kind
+        self.condition_scope = (current or {}).get("scope", getattr(master, "condition_scope", "")) if isinstance(current, dict) else getattr(master, "condition_scope", "")
         self.title("값 고르기" if kind == "value" else "조건 고르기")
         self.resizable(False, False)
         self.transient(master.winfo_toplevel())
@@ -137,12 +154,13 @@ class SlotDialog(tk.Toplevel):
         is_clone = editor.owner_kind == "card" and bool((getattr(editor,"item",None) or {}).get("clone"))
         if is_clone:
             # 가져온 효과 칸: 원본 변수 / 직접 수식을 그대로 쓸 수 있다
-            types = ([("dynvar", "원본 변수 (DynamicVars · 강화 수치 포함)")] if kind == "value" and
+            types = ([("dynvar", "가져온 카드의 원래 수치 (강화 포함)")] if kind == "value" and
                      (editor.item or {}).get("raw_vars") else []) + \
                 [("src", "직접 수식 입력" if kind == "value" else "직접 조건 입력")] + list(types)
         ttk.Label(outer, text="종류").grid(row=0, column=0, sticky="w")
         self.type = _Combo(outer, types, self.data.get("t"), width=28, command=self._type_changed)
         self.type.grid(row=0, column=1, sticky="w", pady=4)
+        editor._attach_block_help(self.type, lambda: BH.slot_help(self.kind,self.data.get("t")))
         self.fields = ttk.Frame(outer)
         self.fields.grid(row=1, column=0, columnspan=2, sticky="we", pady=6)
         self.preview = ttk.Label(outer, text="", foreground="#555", wraplength=420)
@@ -174,18 +192,22 @@ class SlotDialog(tk.Toplevel):
         old = self.data
         self.data = {"t": t}
         defaults = {
+            "group": {"mode":"all", "items":[old] if old and old.get("t") != "group" else [], "scope":self.condition_scope},
+            "hp_percent": {"who":"it" if self.condition_scope == "creature" else "self", "op":"<=", "value":{"t":"num","v":50}},
+            "pile_count": {"who":"it" if self.condition_scope == "creature" else "self", "pile":"Deck", "filter":"Any", "card_id":"", "op":">=", "count":{"t":"num","v":1}},
+            "card_identity": {"card_id":next((x['id'] for x in self.editor.project.get('cards',[])), "")},
             "num": {"v": 0}, "stack": {"who": "self", "power": "Strength"}, "stat": {"who": "self", "stat": "hp"},
             "count": {"what": "hand"}, "rand": {"min": {"t": "num", "v": 1}, "max": {"t": "num", "v": 3}},
             "var": {"name": "a"}, "played": {"scope": "turn", "filter": "Any"},
             "card_state": {"card": "this" if self.editor.owner_kind == "card" else "picked", "key": "count"},
             "card_var_has": {"card": "this" if self.editor.owner_kind == "card" else "picked", "key": "count"},
-            "card_is": {"card": "this" if self.editor.owner_kind == "card" else "picked", "filter": "kw:Retain"},
+            "card_is": {"card": "picked" if self.condition_scope == "card" else "this" if self.editor.owner_kind == "card" else "picked", "filter": "kw:Retain"},
             "orbs": {"what": "count", "orb": ""}, "osty": {"what": "hp"},
             "pet": {"pet": _first_pet(self.editor.project), "what": "hp"}, "pet_alive": {"pet": _first_pet(self.editor.project)},
             "op": {"op": "+", "a": old if self.kind == "value" else {"t": "num", "v": 0},
                                          "b": {"t": "num", "v": 1}},
             "cmp": {"a": {"t": "stat", "who": "self", "stat": "hp"}, "op": "<=", "b": {"t": "num", "v": 30}},
-            "chance": {"pct": {"t": "num", "v": 50}}, "has": {"who": "self", "power": "Strength"},
+            "chance": {"pct": {"t": "num", "v": 50}}, "has": {"who": "it" if self.condition_scope == "creature" else "self", "power": "Weak"},
             "and": {"a": old, "b": {"t": "chance", "pct": {"t": "num", "v": 50}}},
             "or": {"a": old, "b": {"t": "chance", "pct": {"t": "num", "v": 50}}}, "not": {"a": old},
             "src": {"code": old.get("code", "") if old.get("t") == "src" else ""},
@@ -203,7 +225,9 @@ class SlotDialog(tk.Toplevel):
         who_opts = [x for x in B.who_options(ed.owner_kind, multi=False)]
 
         def row(r, label, widget):
-            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", padx=(0, 8), pady=3)
+            label_widget = ttk.Label(f, text=label)
+            label_widget.grid(row=r, column=0, sticky="w", padx=(0, 8), pady=3)
+            ed._attach_block_help(label_widget, lambda: BH.slot_help(self.kind,t))
             widget.grid(row=r, column=1, sticky="w", pady=3)
 
         def entry(key, width=8, num=True):
@@ -244,7 +268,52 @@ class SlotDialog(tk.Toplevel):
             refresh()
             return btn
 
-        if t == "src":
+        if t == "group":
+            row(0, "조건 연결", combo("mode", [("all","모든 조건 만족 (그리고)"),("any","하나 이상 만족 (또는)")], 30))
+            items = d.setdefault("items", [])
+            listing = tk.Listbox(f, width=62, height=6, exportselection=False)
+            for item in items:
+                listing.insert("end", _plain(B.cond_label(item, ed.project, card=ed.owner_kind == "card")))
+            row(1, "조건 목록", listing)
+            actions = ttk.Frame(f)
+            def edit_item(add=False):
+                indexes = listing.curselection()
+                if not add and not indexes:
+                    return
+                initial = {"t":"card_is", "card":"picked", "filter":"Attack"} if self.condition_scope == "card" else {"t":"has", "who":"it" if self.condition_scope == "creature" else "self", "power":"Weak"}
+                dialog = SlotDialog(self, ed, "cond", initial if add else items[indexes[0]])
+                self.wait_window(dialog)
+                self.grab_set()
+                if dialog.result is not None:
+                    if add:
+                        items.append(dialog.result)
+                    else:
+                        items[indexes[0]] = dialog.result
+                    self._build()
+            def remove_item():
+                indexes = listing.curselection()
+                if indexes:
+                    del items[indexes[0]]
+                    self._build()
+            ttk.Button(actions, text="+ 조건 추가", command=lambda: edit_item(True)).pack(side="left")
+            ttk.Button(actions, text="수정", command=edit_item).pack(side="left")
+            ttk.Button(actions, text="삭제", command=remove_item).pack(side="left")
+            listing.bind("<Double-1>", lambda e: edit_item())
+            row(2, "", actions)
+        elif t == "hp_percent":
+            row(0, "누구의", combo("who", who_opts))
+            row(1, "비교", combo("op", B.CMP_OPS))
+            row(2, "최대 체력 대비 (%)", slot("value", "value"))
+        elif t in ("pile_count", "card_identity"):
+            cards = [("", "종류·태그 조건으로 찾기")] + [(x['id'], (x.get('name_ko') or x['id']) + ' (' + x['id'] + ')') for x in ed.project.get('cards', [])]
+            row(0, "지정 카드", combo("card_id", cards, 32))
+            if t == "pile_count":
+                row(1, "누구의", combo("who", who_opts))
+                row(2, "어느 곳", combo("pile", [("Deck","전체 덱 (전투 전 원본)")] + B.PILES))
+                row(3, "지정 카드를 비웠을 때 조건", combo("filter", B.card_is_filters(ed.project), 28))
+                row(4, "비교", combo("op", B.CMP_OPS))
+                row(5, "장수", slot("count", "value"))
+        elif t == "src":
             v = tk.StringVar(value=str(d.get("code", "")))
 
             def upd_src(*_):
@@ -337,14 +406,18 @@ class SlotDialog(tk.Toplevel):
             row(1, "어떤 구체 (구체 수일 때)", combo("orb", [("", "모든 구체")] + G.orb_options(ed.project), 24))
         elif t in ("pet", "pet_alive"):
             import pets as PT
-            opts = [(p["id"], p.get("name_ko") or p["id"]) for p in PT.pets(ed.project)] or [("", "('🎲 기믹' 탭에서 동료를 만드세요)")]
+            opts = [(p["id"], p.get("name_ko") or p["id"]) for p in PT.pets(ed.project)] or [("", "('기믹' 탭에서 동료를 만드세요)")]
             row(0, "동료", combo("pet", opts, 18))
             if t == "pet":
                 row(1, "무엇", combo("what", [("hp", "현재 체력"), ("maxhp", "최대 체력")], 12))
         elif t == "card_is":
+            d["card"], d["card_n"] = B.pos_n(d.get("card", "this"), d.get("card_n"))
             row(0, "어느 카드", combo("card", B.CARD_REFS, 26))
             row(1, "무엇", combo("filter", B.card_is_filters(ed.project), 24))
+            row(2, "N번째 (뽑을 더미 · 1=맨 위, -1=맨 아래)", entry("card_n", 5))
         elif t in ("card_state", "card_var_has"):
+            d["card"], d["card_n"] = B.pos_n(d.get("card", "this"), d.get("card_n"))
+            row(3, "N번째 (뽑을 더미 · 1=맨 위, -1=맨 아래)", entry("card_n", 5))
             row(0, "어느 카드", combo("card", B.CARD_REFS, 26))
             kv = tk.StringVar(value=str(d.get("key", "count")))
 
@@ -363,6 +436,8 @@ class SlotDialog(tk.Toplevel):
             note = {"amount": "소환수에서는 '단계', 파워에서는 '스택 수'입니다.",
                     "event": "'넘칠 때'에는 넘친 양, '기준치 도달 시'에는 그때의 스택 수입니다."}.get(t, "(설정할 것 없음)")
             ttk.Label(f, text=note, foreground="#777").grid(row=0, column=0)
+        for child in self.fields.winfo_children():
+            ed._attach_block_help(child, lambda t=t: BH.slot_help(self.kind,t))
         self._update_preview()
 
     def _update_preview(self):
@@ -492,7 +567,7 @@ class CallMappingDialog(tk.Toplevel):
             ttk.Label(self.fields, text=label).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=3)
             widget.grid(row=r, column=1, sticky="w", pady=3)
 
-        field_labels = {"who": "대상", "amount": "수치", "hits": "타격 횟수", "powered": "힘·약화 적용",
+        field_labels = {"who": "대상", "amount": "수치", "hits": "타격 횟수", "powered": "상태 효과 보정",
                         "power": "파워", "keyword": "키워드", "action": "동작"}
         for r, (field, (kind, default)) in enumerate(spec.items()):
             if kind == "value":
@@ -669,6 +744,7 @@ class BlockEditor(tk.Toplevel):
         B.set_item_hint(self.item)
         self.blocks = copy.deepcopy(blocks or [])
         self.result = None
+        self._family_render_job = None
         self.slots = []
         self.frames = []
         self.drag = None
@@ -723,10 +799,13 @@ class BlockEditor(tk.Toplevel):
         tools = ttk.Frame(pal_outer)
         tools.pack(fill="x", pady=4)
         ttk.Button(tools,text="문장으로 만들기…",command=self.open_recipes).pack(side="left")
+        help_hint = ttk.Label(tools,text="ⓘ",cursor="question_arrow")
+        help_hint.pack(side="left",padx=6)
+        self._attach_block_help(help_hint,"블록 이름과 입력칸에 마우스를 잠시 올리면 뜻과 사용 예를 볼 수 있습니다.")
         library_tools = ttk.Menubutton(tools,text="도구 ▾",style="Small.TButton")
         library_tools.pack(side="right")
         library_menu = tk.Menu(library_tools,tearoff=False)
-        library_menu.add_command(label="공유 블록 정의…",command=self.define_shared)
+        library_menu.add_command(label="반복 사용할 내 블록 만들기…",command=self.define_shared)
         library_tools.configure(menu=library_menu)
         search_row = ttk.Frame(pal_outer)
         search_row.pack(fill="x",pady=(6,4),before=tools)
@@ -755,6 +834,8 @@ class BlockEditor(tk.Toplevel):
         saved = []
         try:
             saved = json.loads(self.favorite_file.read_text("utf8"))
+            if isinstance(saved,list):
+                saved = [B.compact_op(op) if isinstance(op,str) else op for op in saved]
             self.favorites = {op for op in saved if isinstance(op,str) and op in B.SPECS} if isinstance(saved,list) else set()
         except (ValueError,OSError):
             self.favorites = set()
@@ -765,6 +846,7 @@ class BlockEditor(tk.Toplevel):
                 record = json.loads(preset_file.read_text(encoding="utf8"))
                 if isinstance(record["name"], str) and isinstance(record["blocks"], list) and all(
                         isinstance(b, dict) and b.get("op") in B.SPECS for b in B.walk(record["blocks"])):
+                    B.upgrade_numeric_blocks(record["blocks"])
                     self.saved_presets[preset_file.stem] = record
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 continue
@@ -911,6 +993,9 @@ class BlockEditor(tk.Toplevel):
         if getattr(self,"_closing",False) or not self.winfo_exists():
             return
         self._closing = True
+        if self._family_render_job is not None:
+            self.after_cancel(self._family_render_job)
+            self._family_render_job = None
         if self.grab_current() is self:
             self.grab_release()
         self.configure(menu="")
@@ -1034,7 +1119,7 @@ class BlockEditor(tk.Toplevel):
         self.grab_set()
 
     def _save_favorites(self, order):
-        order = list(dict.fromkeys(order))
+        order = list(dict.fromkeys(B.compact_op(op) for op in order))
         try:
             self.favorite_file.parent.mkdir(parents=True,exist_ok=True)
             tmp = self.favorite_file.with_suffix(".tmp")
@@ -1048,6 +1133,7 @@ class BlockEditor(tk.Toplevel):
         return True
 
     def _toggle_favorite(self, op):
+        op = B.compact_op(op)
         order = [key for key in self.favorite_order if key in self.favorites and key != op]
         order += sorted(self.favorites - set(order) - {op})
         if op not in self.favorites:
@@ -1101,6 +1187,7 @@ class BlockEditor(tk.Toplevel):
                        padx=8,pady=5,cursor="hand2",wraplength=225,justify="left")
         lab.pack(fill="x",expand=True)
         lab.bind("<Configure>", lambda e: lab.configure(wraplength=max(1,e.width-16)))
+        self._attach_block_help(lab, lambda: BH.block_help(B.new_block(op)))
         def begin(e):
             self.start_drag(e,new=op)
             self.drag["favorite"] = parent == self._favorites_frame
@@ -1135,7 +1222,7 @@ class BlockEditor(tk.Toplevel):
             if not self.browse_saved.get() and not terms:
                 continue
             keywords = " ".join(["저장한 블록 모음", preset["name"],
-                                 *(B.SPECS[b["op"]]["ko"] for b in B.walk(preset["blocks"]))]).casefold()
+                                 *(B.block_caption(b) for b in B.walk(preset["blocks"]))]).casefold()
             if not all(term in keywords for term in terms):
                 continue
             if not matches:
@@ -1163,7 +1250,11 @@ class BlockEditor(tk.Toplevel):
             show_heading = True
             category_rows = []
             for op in ops:
+                if self.card_event != "hand_aura" and op in ("hand_aura_stat", "aura_power_amount", "aura_card_effect"):
+                    continue
                 spec = B.SPECS[op]
+                if op in B.F.FAMILIES and not B.F.modes({"op":op},self.owner_kind):
+                    continue
                 if op == "kotodama_gain" and self.owner_kind not in ("card", "relic", "potion", "power"):
                     continue
                 if op in ("manosaba_ema_summon", "manosaba_novel_summon", "manosaba_ignite",
@@ -1180,8 +1271,8 @@ class BlockEditor(tk.Toplevel):
                 if op == "card_attack" and self.owner_kind != "card":
                     continue
                 text = re.sub(r"\{\w+\}", "▢", spec["ko"])
-                caption = PALETTE_NAMES.get(op, text)
-                keywords = " ".join((name, text, caption, PALETTE_NAMES.get(op, ""), op, *(label for _, label in B.PICK_ACTIONS
+                caption = PALETTE_NAMES.get(op, B.F.FAMILIES[op][0] + " · 목록에서 방식 선택" if op in B.F.FAMILIES else text)
+                keywords = " ".join((name, text, caption, PALETTE_NAMES.get(op, ""), PALETTE_KEYWORDS.get(op, ""), B.F.keywords(op, B.SPECS), op, *(label for _, label in B.PICK_ACTIONS
                                                     if op in ("pick", "picked_action")))).casefold()
                 if not all(term in keywords for term in terms):
                     continue
@@ -1218,6 +1309,10 @@ class BlockEditor(tk.Toplevel):
 
     @buffered_canvas("canvas", defer_new=True)
     def render(self):
+        if self._family_render_job is not None:
+            self.after_cancel(self._family_render_job)
+            self._family_render_job = None
+        B.upgrade_numeric_blocks(self.blocks)
         self.block_headers = []
         self.group_blocks = []
         self.selection_origin = None
@@ -1263,7 +1358,7 @@ class BlockEditor(tk.Toplevel):
         return y
 
     def _layout_block(self, b, lst, idx, x, y):
-        spec = B.SPECS.get(b["op"])
+        spec = B.block_spec(b)
         if not spec:
             return y
         color = _block_color(spec["cat"])
@@ -1303,7 +1398,9 @@ class BlockEditor(tk.Toplevel):
                 key = m.group(1)
                 self._arg_widget(inner, b, key, spec["args"][key][0]).pack(side="left", padx=2)
             else:
-                tk.Label(inner, text=part, font=FONT_B, background=color, foreground="white").pack(side="left")
+                label = tk.Label(inner, text=part, font=FONT_B, background=color, foreground="white")
+                label.pack(side="left")
+                self._attach_block_help(label, lambda b=b: BH.block_help(b))
         return ef
 
     def _block_frame(self, b, spec, color):
@@ -1336,6 +1433,8 @@ class BlockEditor(tk.Toplevel):
             else:
                 lab = tk.Label(row, text=part, font=FONT_B, background=color, foreground="white")
                 lab.pack(side="left")
+                if b["op"] != "src_call":
+                    self._attach_block_help(lab, lambda b=b: BH.block_help(b))
                 if b["op"] == "src_call" and part.strip() == (b.get("label") or "").strip():
                     try:
                         import uxkit
@@ -1359,42 +1458,152 @@ class BlockEditor(tk.Toplevel):
         ctx = M._Ctx(self.owner_kind, self.item)
         if key in ("creature", "target", "attacker", "applier"):
             choices = {"자신": ctx.me, "무작위 적 한 명": "@random_enemy"}
+            choices["조건으로 고른 적/플레이어 (반복 안에서)"] = "@selected_creature"
             if ctx.single:
                 choices["선택한 대상"] = ctx.single
             return choices
+        if key == "orb_type":
+            import gimmick as G
+            return {label: meta["cls"] for ident, label in G.orb_options(self.project)
+                    if (meta := G.orb_meta(self.project, ident))}
+        if key == "potion_type":
+            return {f"{M.text(c, 'name', 'ko')} ({c['id']})": M.item_cls(self.project, "potion", c)
+                    for c in self.project.get("potions", [])}
         if key == "card_type":
             return {f"{M.text(c, 'name', 'ko')} ({c['id']})": M.item_cls(self.project, "card", c)
                     for c in self.project.get("cards", [])}
         if key == "card":
-            choices = {"방금 변화한 카드":"@replacement", "손패에서 무작위 한 장": "@random_hand"}
+            choices = {"고른 카드 (카드 고르기 안에서)": "@picked_card", "방금 변화한 카드":"@replacement", "손패에서 무작위 한 장": "@random_hand"}
             if self.owner_kind == "card":
                 choices["이 카드"] = "this"
             return choices
+        if key == "cards" and op in ("card_discard", "card_remove_combat", "card_preview_cards", "card_add_pile"):
+            choices = {"고른 카드 (카드 고르기 안에서)": "@picked_card"}
+            if self.owner_kind == "card":
+                choices["이 카드"] = "this"
+            return choices
+        if key == "cards" and op == "card_add_generated_many":
+            return {"고른 카드 한 장": "@picked_cards"}
+        if key == "power":
+            choices = {f"자신에게 걸린 {label}": "@own_power:" + pid
+                       for pid, label in M.power_options(self.project)}
+            if ctx.single:
+                choices.update({f"선택한 대상에게 걸린 {label}": "@target_power:" + pid
+                                for pid, label in M.power_options(self.project)})
+            return choices
+        if key == "potion" and op in ("potion_add_model", "potion_add_model_at"):
+            return {f"{M.text(c, 'name', 'ko')}의 새 물약 ({c['id']})":
+                    f"ModelDb.Potion<{M.item_cls(self.project, 'potion', c)}>().ToMutable()"
+                    for c in self.project.get("potions", [])}
+        if key == "orb":
+            import gimmick as G
+            return {label + "의 새 구체": f"ModelDb.Orb<{meta['cls']}>().ToMutable()"
+                    for ident, label in G.orb_options(self.project)
+                    if (meta := G.orb_meta(self.project, ident))}
+        if key in ("source", "source_card"):
+            return {"이 카드": "this", "출처 카드 없음": "null"} if self.owner_kind == "card" else {"출처 카드 없음": "null"}
+        if key == "context":
+            return {"현재 선택 상황": ctx.cc} if hasattr(ctx, "cc") else {"현재 선택 상황": "choiceContext"}
         if key == "power_type":
             return {label: meta["cls"] for pid, label in M.power_options(self.project)
                     if (meta := M.power_meta(self.project, pid))}
         if key == "player":
-            return {"소유 플레이어": ctx.player}
+            return {"소유 플레이어": ctx.player, "조건으로 고른 플레이어 (반복 안에서)":"@selected_player"}
         if key == "pile":
             return {label: "PileType." + pile for pile, label in B.PILES}
         if key == "position" and B.SPECS[op]["args"][key][1].startswith("CardPilePosition."):
             return {"맨 위": "CardPilePosition.Top", "맨 아래": "CardPilePosition.Bottom", "무작위 위치": "CardPilePosition.Random"}
+        if key == "animation":
+            return {"공격 동작": '\"Attack\"', "피격 동작": '\"Hurt\"', "기본 동작": '\"Idle\"'}
+        if key in ("skip_x", "skip_visuals", "can_back_out", "force_exhaust"):
+            return {"예": "true", "아니오": "false"}
         if key == "keyword":
             return {label: "CardKeyword." + code for code, label in M.CARD_KEYWORDS}
         return {}
 
+    def _nth_widget(self, parent, a, key, options, width):
+        """'N번째' 를 고를 수 있는 목록: 고른 것이 draw_at 이면 옆에 N 칸이 나온다 (1 = 맨 위, -1 = 맨 아래)."""
+        kind0, n0 = B.pos_n(a.get(key), a.get(key + "_n"))
+        if kind0 != a.get(key):           # 예전 '맨 위/맨 아래' 저장본
+            a[key], a[key + "_n"] = kind0, n0
+        box = tk.Frame(parent, background=parent["background"])
+        nv = tk.StringVar(value=str(n0))
+        ent = ttk.Entry(box, textvariable=nv, width=4, font=FONT)
+        tail = tk.Label(box, text="번째", background=parent["background"], font=FONT)
+
+        def show():
+            if a.get(key) == "draw_at":
+                ent.pack(side="left", padx=(4, 0))
+                tail.pack(side="left")
+            else:
+                ent.pack_forget()
+                tail.pack_forget()
+
+        def pick(v):
+            a[key] = v
+            if v == "draw_at" and a.get(key + "_n") in (None, "", 0):
+                a[key + "_n"] = 1
+                nv.set("1")
+            show()
+            self._changed()
+
+        def typed(*_):
+            try:
+                n = int(nv.get().strip())
+            except ValueError:
+                return
+            a[key + "_n"] = n
+            self._changed()
+        nv.trace_add("write", typed)
+        _Combo(box, options, a.get(key), width, pick).pack(side="left")
+        show()
+        return box
+
+    def _attach_block_help(self, widget, text):
+        if not hasattr(widget, "_maker_help"):
+            widget._maker_help = Tooltip(widget, text, delay=450, wrap=500)
+        for child in widget.winfo_children():
+            self._attach_block_help(child, text)
+
     def _arg_widget(self, parent, b, key, kind):
+        if key == "style" and B.F.variant(b, B.SPECS) in ("card_upgrade", "card_preview"):
+            kind = "preview_style"
+        widget = self._make_arg_widget(parent, b, key, kind)
+        self._attach_block_help(widget, lambda b=b, key=key: BH.field_help(b, key))
+        return widget
+
+    def _make_arg_widget(self, parent, b, key, kind):
         a = b["args"]
         changed = self._changed
 
         def set_(v):
             a[key] = v
             changed()
+        if kind == "preview_style":
+            value = B.preview_style_expr(a.get(key))
+            options = B.preview_style_options(B.F.variant(b, B.SPECS))
+            if value not in dict(options):
+                options.append((value, "가져온 표시 설정 유지"))
+            return _Combo(parent, options, value, 18, set_)
+        if kind == "family_mode":
+            def choose_mode(value):
+                if B.F.variant(b, B.SPECS) == value:
+                    return
+                self._push_history()
+                B.F.switch(b, value, B.SPECS)
+                if self._family_render_job is None:
+                    self._family_render_job = self.after_idle(self.render)
+            options = B.F.modes(b, self.owner_kind)
+            selected = B.F.variant(b, B.SPECS)
+            if selected not in dict(options):
+                label = dict(B.F.FAMILIES[b["op"]][1])[selected]
+                options.insert(0, (selected, label + " · 이 위치에서 사용 불가"))
+            return _Combo(parent, options, a.get(key, selected), 20, choose_mode)
         if kind in ("who_multi", "who_one"):
             options = B.who_options(self.owner_kind, kind == "who_multi")
             if self.card_event:
                 target = self.item.get("event_targets", {}).get(self.card_event, "random")
-                target_label = dict(M.CARD_EVENT_TARGETS).get(target, target)
+                target_label = "사용한 다른 카드의 대상" if self.card_event in ("hand_play", "hand_aura") else dict(M.CARD_EVENT_TARGETS).get(target, target)
                 if target == "choose":
                     target_label = f"직접 고른 적 최대 {M.card_event_target_count(self.item, self.card_event)}명"
                 options = [(code, "이벤트 대상 · " + target_label if code == "target" else label) for code, label in options]
@@ -1418,26 +1627,46 @@ class BlockEditor(tk.Toplevel):
             s = B.slot_info(b, key)
             cur = str(a.get(key, "") or "")
             opts = list(dict.fromkeys([cur] + list(s.get("options", []) or []) + ([s["orig"]] if s.get("orig") else [])))
-            choices = self._code_choices(b["op"], key)
-            if B.SPECS.get(b["op"], {}).get("args", {}).get(key, (None, None))[1] in ("true", "false"):
+            choices = self._code_choices(B.F.variant(b, B.SPECS), key)
+            if (B.block_spec(b) or {}).get("args", {}).get(key, (None, None))[1] in ("true", "false"):
                 choices.update({"예": "true", "아니오": "false"})
             labels = {code: label for label, code in choices.items()}
-            options = list(choices) + [code for code in opts if code not in labels]
-            display = labels.get(cur, cur)
-            v = tk.StringVar(value=display)
-            w = ttk.Combobox(parent, textvariable=v, values=options, width=max(14, min(30, len(display) + 2)), font=FONT)
-            state = {"pushed": False}
-
-            def upd(*_):
-                if not state["pushed"]:
+            # Unknown imported expressions remain untouched and have a plain label.
+            for code in opts:
+                if code not in labels:
+                    label = "기본 설정" if not code else "가져온 설정 유지"
+                    while label in choices:
+                        label += " ·"
+                    choices[label] = code
+                    labels[code] = label
+            frame = ttk.Frame(parent)
+            combo = _Combo(frame, [(code, label) for label, code in choices.items()], cur, 24, set_)
+            combo.pack(side="left")
+            def edit_code():
+                from tkinter import simpledialog
+                value = simpledialog.askstring("고급 · 코드 직접 편집", "목록에 없는 설정만 직접 입력하세요.",
+                                               initialvalue=str(a.get(key) or ""), parent=self)
+                if value is not None:
                     self._push_history()
-                    state["pushed"] = True
-                a[key] = choices.get(v.get(), v.get())
-                changed()
-            v.trace_add("write", upd)
-            return w
+                    set_(value)
+                    self.render()
+            ttk.Button(frame, text="코드 편집…", command=edit_code, width=10).pack(side="left", padx=(3, 0))
+            return frame
         if kind == "power":
             return _Combo(parent, M.power_options(self.project), a.get(key), 18, set_)
+        if kind == "enemy_filter":
+            def select_filter(value):
+                set_(value)
+                if self._family_render_job is None:
+                    self._family_render_job = self.after_idle(self.render)
+            return _Combo(parent, [("all", "조건 없음"), ("power", "파워 보유"), ("no_power", "파워 미보유"),
+                                   ("hp_below", "체력 기준 % 이하"), ("hp_above", "체력 기준 % 이상")], a.get(key), 20, select_filter)
+        if kind == "enemy_mode":
+            def select_mode(value):
+                set_(value)
+                if self._family_render_job is None:
+                    self._family_render_job = self.after_idle(self.render)
+            return _Combo(parent, [("random", "무작위 선택"), ("choose", "직접 선택"), ("all", "조건에 맞는 적 모두")], a.get(key), 20, select_mode)
         if kind == "card":
             opts = ([("this", "이 카드의 복사본")] if self.owner_kind == "card" else []) + \
                    [(c["id"], c.get("name_ko") or c["id"]) for c in self.project.get("cards", [])]
@@ -1503,38 +1732,54 @@ class BlockEditor(tk.Toplevel):
         if kind == "pet":
             import pets as PT
             opts = [(p["id"], p.get("name_ko") or p["id"]) for p in PT.pets(self.project)] or \
-                [("", "('🎲 기믹' 탭에서 동료를 만드세요)")]
+                [("", "('기믹' 탭에서 동료를 만드세요)")]
             return _Combo(parent, opts, a.get(key), 12, set_)
         if kind in ("fx", "button"):
             import fxbtn
             items = fxbtn.effects(self.project) if kind == "fx" else fxbtn.buttons(self.project)
             opts = [(x["id"], x.get("name") or x.get("label_ko") or x["id"]) for x in items] or \
-                [("", "('🎨 이펙트·버튼' 탭에서 만드세요)")]
+                [("", "('이펙트·버튼' 탭에서 만드세요)")]
             return _Combo(parent, opts, a.get(key), 14, set_)
         if kind == "orb":
             import gimmick as G
             return _Combo(parent, G.orb_options(self.project), a.get(key), 14, set_)
         if kind == "evoke_which":
             return _Combo(parent, B.EVOKE_WHICH, a.get(key), 6, set_)
+        if kind == "switch_state":
+            return _Combo(parent, [("on", "켜기"), ("off", "끄기")], a.get(key), 8, set_)
+        if kind == "aura_target_pile":
+            return _Combo(parent, [("Any", "모든 더미")] + B.PILES, a.get(key, "Any"), 16, set_)
+        if kind == "aura_pile":
+            return _Combo(parent, B.PILES, a.get(key, "Hand"), 16, set_)
+        if kind == "aura_power_filter":
+            return _Combo(parent, [("Any", "모든 파워")] + M.power_options(self.project), a.get(key,"Any"), 18, set_)
+        if kind == "aura_stat":
+            return _Combo(parent, [("cost", "비용"), ("damage", "피해량"), ("block", "방어도")], a.get(key), 10, set_)
+        if kind == "aura_filter":
+            import gimmick as G
+            return _Combo(parent, [(k, "모든 카드" if k == "Any" else v) for k,v in G.tag_play_filters(self.project)], a.get(key), 20, set_)
+        if kind == "card_stat":
+            return _Combo(parent, B.CARD_STATS, a.get(key), 21, set_)
+        if kind == "number_edit":
+            return _Combo(parent, B.NUMBER_EDITS, a.get(key), 12, set_)
+        if kind == "cost_duration":
+            return _Combo(parent, B.COST_DURATIONS, a.get(key), 14, set_)
         if kind == "pick_pile":
             return _Combo(parent, B.PICK_PILES, a.get(key), 12, set_)
-        if kind == "card_ref":
-            return _Combo(parent, B.CARD_REFS, a.get(key), 22, set_)
+        if kind in ("card_ref", "pick_action"):
+            return self._nth_widget(parent, a, key, B.CARD_REFS if kind == "card_ref" else B.PICK_ACTIONS,
+                                    22 if kind == "card_ref" else 16)
         if kind == "clone_policy":
             return _Combo(parent, B.CLONE_POLICIES, a.get(key), 12, set_)
         if kind == "end_policy":
             return _Combo(parent, B.END_POLICIES, a.get(key), 18, set_)
-        if kind == "draw_pos":
-            return _Combo(parent, B.DRAW_POS, a.get(key), 10, set_)
         if kind == "enchant":
             return _Combo(parent, B.ENCHANTS, a.get(key), 20, set_)
         if kind == "gtag":
             import gimmick as G
             opts = [(t["id"], "#" + (t.get("name_ko") or t["id"])) for t in G.tags(self.project)] or \
-                [("", "('🎲 기믹' 탭에서 태그를 만드세요)")]
+                [("", "('기믹' 탭에서 태그를 만드세요)")]
             return _Combo(parent, opts, a.get(key), 16, set_)
-        if kind == "pick_action":
-            return _Combo(parent, B.PICK_ACTIONS, a.get(key), 16, set_)
         if kind == "delay_when":
             return _Combo(parent, B.DELAY_WHEN, a.get(key), 14, set_)
         if kind == "label":
@@ -1601,7 +1846,7 @@ class BlockEditor(tk.Toplevel):
             v.trace_add("write", upd)
             return ttk.Spinbox(parent, from_=1, to=50, textvariable=v, width=4, font=FONT)
         if kind == "bool":
-            default = B.SPECS.get(b.get("op"), {}).get("args", {}).get(key, ("bool", False))[1]
+            default = (B.block_spec(b) or {}).get("args", {}).get(key, ("bool", False))[1]
             v = tk.BooleanVar(value=bool(a.get(key, default)))
             return tk.Checkbutton(parent, variable=v, background=parent["background"], activebackground=parent["background"],
                                   command=lambda: set_(bool(v.get())))
@@ -1612,18 +1857,29 @@ class BlockEditor(tk.Toplevel):
         if kind in ("value", "cond"):
             def label():
                 lab = B.value_label(a.get(key), self.project, card=self.owner_kind == "card") if kind == "value" else B.cond_label(a.get(key), self.project, card=self.owner_kind == "card")
-                return " " + _plain(lab) + " ✎ "
+                plain = _plain(lab)
+                if key == "conditions" and (a.get(key) or {}).get("t") == "group" and not (a.get(key) or {}).get("items"):
+                    plain = "조건 추가 · 모두 / 하나 이상"
+                return " " + (plain[:65] + "…" if len(plain) > 65 else plain) + " ✎ "
             btn = tk.Button(parent, text=label(), font=FONT, relief="flat", background="white", foreground="#333",
                             activebackground="#eef", cursor="hand2", padx=4, pady=0)
 
             def edit():
-                dlg = SlotDialog(self, self, kind, a.get(key))
+                current = a.get(key)
+                if key == "conditions":
+                    current = B.selection_condition(b)
+                    current["scope"] = "card" if B.F.variant(b, B.SPECS) in ("pick_each", "random_each") else "creature"
+                dlg = SlotDialog(self, self, kind, current)
                 self.wait_window(dlg)
                 if dlg.result is not None:
                     self._push_history()
                     a[key] = dlg.result
+                    if key == "conditions" and "enemy_filter" in a:
+                        a["enemy_filter"] = "all"
                     btn.configure(text=label())
                     changed()
+                    if key == "conditions" and self._family_render_job is None:
+                        self._family_render_job = self.after_idle(self.render)
             btn.configure(command=edit)
             return btn
         return tk.Label(parent, text="?")
@@ -1839,6 +2095,7 @@ class BlockEditor(tk.Toplevel):
         return sum(e.y_root >= row.winfo_rooty()+row.winfo_height()/2 for row in rows)
 
     def _move_favorite(self, op, index):
+        op = B.compact_op(op)
         visible = list(self._favorite_rows)
         if op not in visible:
             return
@@ -1971,13 +2228,15 @@ class BlockEditor(tk.Toplevel):
                 for key, value in node.items():
                     if key in ("filter", "ctype", "result_filter", "played_filter"):
                         collect(node, key, "태그", "tag:")
+                    elif key == "card_id" and node.get("t") in ("pile_count", "card_identity"):
+                        collect(node, key, "카드")
                     else:
                         filters(value)
 
         for block in B.walk(blocks):
             args = block.get("args", {})
             for key in args:
-                if B.SPECS[block["op"]].get("args", {}).get(key, (None,))[0] == "card" and args[key] != "this":
+                if (B.block_spec(block) or {}).get("args", {}).get(key, (None,))[0] == "card" and args[key] != "this":
                     collect(args, key, "카드")
             filters(args)
 
@@ -2346,6 +2605,18 @@ class BlockEditor(tk.Toplevel):
     def refresh_outputs(self):
         C = M.card_event_context(self.item, self.card_event) if self.card_event else M._Ctx(self.owner_kind, self.item)
         lines, errs = B.compile_blocks(self.blocks, self.project, C, "", allow_event=self.allow_event)
+        if self.card_event == "hand_aura":
+            import handaura
+            try:
+                handaura.rules(self.project, self.item, {"event_blocks": {"hand_aura": self.blocks}})
+                preview_project = copy.deepcopy(self.project)
+                preview_tags = preview_project.setdefault("gimmicks", {}).setdefault("tags", [])
+                for tag in preview_tags:
+                    tag.update(blocks=[], event_blocks={}, hand_cost_enabled=False)
+                preview_tags.append({"id":"maker_preview", "event_blocks":{"hand_aura": self.blocks}})
+                lines, _ = M.keyword_card_hooks(preview_project, self.item)
+            except ValueError as error:
+                errs.append(str(error))
         code = "\n".join(lines)
         if self.code.get("1.0", "end-1c") != code:
             view = self.code.yview()
@@ -2362,6 +2633,13 @@ class BlockEditor(tk.Toplevel):
     def ok(self):
         C = M.card_event_context(self.item, self.card_event) if self.card_event else M._Ctx(self.owner_kind, self.item)
         lines, errs = B.compile_blocks(self.blocks, self.project, C, "", allow_event=self.allow_event)
+        if self.card_event == "hand_aura":
+            import handaura
+            try:
+                handaura.rules(self.project, self.item, {"event_blocks": {"hand_aura": self.blocks}})
+            except ValueError as error:
+                messagebox.showerror(TITLE, str(error), parent=self)
+                return
         if errs and not messagebox.askyesno(TITLE, "블록에 문제가 있습니다:\n\n" + "\n".join(dict.fromkeys(errs)) +
                                             "\n\n그래도 저장할까요?", parent=self):
             return
