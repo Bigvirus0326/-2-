@@ -436,49 +436,7 @@ def field_help(kind, key):
 # ---------------------------------------------------------------------------
 # 되돌리기 기록
 # ---------------------------------------------------------------------------
-def snapshot(project):
-    return json.dumps(project, ensure_ascii=False, default=str)
-
-
-class History:
-    """프로젝트 상태(JSON 문자열) 기록. 각 단계에 '어디서 바뀌었는지(loc)'를 같이 남긴다."""
-
-    def __init__(self, limit=200):
-        self.limit = limit
-        self.reset("")
-
-    def reset(self, state):
-        self.cur = state
-        self.undos = []   # (이전 상태, 바뀐 곳)
-        self.redos = []   # (다음 상태, 바뀐 곳)
-
-    def push(self, state, loc):
-        if state == self.cur:
-            return False
-        self.undos.append((self.cur, loc))
-        if len(self.undos) > self.limit:
-            del self.undos[0]
-        self.redos.clear()
-        self.cur = state
-        return True
-
-    def can_undo(self):
-        return bool(self.undos)
-
-    def can_redo(self):
-        return bool(self.redos)
-
-    def undo(self):
-        prev, loc = self.undos.pop()
-        self.redos.append((self.cur, loc))
-        self.cur = prev
-        return prev, loc
-
-    def redo(self):
-        nxt, loc = self.redos.pop()
-        self.undos.append((self.cur, loc))
-        self.cur = nxt
-        return nxt, loc
+from projectio import History, snapshot  # noqa: E402,F401 (Qt 쪽과 같은 기록 방식)
 
 
 # ---------------------------------------------------------------------------
