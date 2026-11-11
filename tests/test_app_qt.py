@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PySide6.QtCore import QEvent
     from PySide6.QtGui import QCloseEvent
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication, QMessageBox, QTabBar
     HAVE_QT = True
 except ImportError:
     HAVE_QT = False
@@ -46,6 +46,12 @@ class AppQtTests(TestCase):
         self.app.close()
         for p in self._patches:
             p.stop()
+
+    def test_opens_on_the_first_tab_with_all_ten_tabs(self):
+        bars = [b for b in self.app.findChildren(QTabBar) if b.count() > 1]
+        self.assertEqual(len(bars), 1)
+        self.assertEqual(bars[0].count(), len(A.TAB_TITLES))
+        self.assertEqual(bars[0].tabText(bars[0].currentIndex()), A.TAB_TITLES[0])
 
     def test_starts_with_a_clean_new_project(self):
         self.assertEqual(self.app.project_path, "")

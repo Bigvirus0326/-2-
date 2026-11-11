@@ -8,9 +8,9 @@ import json
 import os
 import sys
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox
 
 import modgen as M
 import projectio as IO
@@ -22,6 +22,17 @@ SNAPSHOT_DELAY_MS = 500          # 입력이 이만큼 멈추면 한 단계로 �
 PROJECT_FILTER = "모드 메이커 프로젝트 (*.sts2mod.json *.json);;모든 파일 (*.*)"
 SAVE_FILTER = "모드 메이커 프로젝트 (*.sts2mod.json)"
 LOAD_ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError)
+# Tk 앱의 작업 탭과 같은 순서·이름
+TAB_TITLES = ["모드 / 빌드", "캐릭터", "카드", "유물", "물약", "파워", "기믹", "이펙트·버튼", "도감", "다른 모드"]
+
+
+def _placeholder(title):
+    message = (f"'{title}' 탭은 아직 Qt 앱으로 옮기지 않았습니다.\n"
+               "이 탭은 Tk 앱(sts2_mod_maker.py)에서 사용하세요.")
+    label = QLabel(message)
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    label.setWordWrap(True)
+    return label
 
 
 class QtApp(Q.DockWorkspace):
@@ -45,9 +56,14 @@ class QtApp(Q.DockWorkspace):
                                  on_settings_change=self._settings_changed, on_mod_change=self._mod_changed)
         page = Q.ScrollPage()
         page.set_content(self.mod_page)
-        self.add_page(page, "모드 / 빌드")
+        self.add_page(page, TAB_TITLES[0])
+        for title in TAB_TITLES[1:]:
+            self.add_page(_placeholder(title), title)
 
         self._build_menu()
+        saved = self.settings.get("dock_layout", "")
+        if not (saved and self.restore_layout_text(saved)):   # 실패하면 기본 배치(한 탭 묶음)를 쓴다
+            self.select(page)   # 처음 열 때는 '모드 / 빌드' 탭이 보이게 (Tk 앱과 같다)
         self.resize(1100, 780)
         self.update_title()
         last = self.settings.get("last_project", "")
@@ -78,6 +94,13 @@ class QtApp(Q.DockWorkspace):
         self.undo_action = add(edit_menu, "실행 취소", self.undo, "Ctrl+Z")
         self.redo_action = add(edit_menu, "다시 실행", self.redo, "Ctrl+Y")
         self._update_undo_actions()
+
+        view_menu = self.menuBar().addMenu("보기")
+        for action in self.view_menu_actions():
+            view_menu.addAction(action)
+        view_menu.addSeparator()
+        add(view_menu, "떨어진 탭 되돌리기", self.dock_all)
+        add(view_menu, "배치 초기화", self.reset_layout)
 
     def _update_undo_actions(self):
         self.undo_action.setEnabled(self.history.can_undo() or self._snap_timer.isActive())
@@ -252,6 +275,8 @@ class QtApp(Q.DockWorkspace):
 
     def closeEvent(self, event):
         if self.confirm_discard():
+            self.settings["dock_layout"] = self.layout_text()   # 탭 배치는 프로젝트가 아니라 앱 설정에 둔다
+            IO.save_settings(self.settings)
             event.accept()
         else:
             event.ignore()

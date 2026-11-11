@@ -2,6 +2,8 @@
 
 DockWorkspace: 탭 끌어서 분리·결합, 숨기기, 배치 저장을 QDockWidget 으로 한다. 실제 앱에는 아직 붙이지 않았다.
 """
+import base64
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QScrollArea, QTabWidget, QWidget, QFrame, QMainWindow, QDockWidget
@@ -128,3 +130,34 @@ class DockWorkspace(QMainWindow):
 
     def restore_layout(self, state: bytes) -> bool:
         return self.restoreState(state)
+
+    def floating_docks(self):
+        return [dock for dock in self._docks.values() if dock.isFloating()]
+
+    def dock_all(self):
+        """떨어진 탭을 모두 제자리로 되돌려 한 탭 묶음에 넣는다 (숨긴 탭은 그대로 둔다)."""
+        if self._first is None:
+            return
+        for dock in self._docks.values():
+            if dock.isFloating():
+                dock.setFloating(False)
+        for dock in self._docks.values():
+            if dock is not self._first and dock not in self.tabifiedDockWidgets(self._first):
+                self.tabifyDockWidget(self._first, dock)
+
+    def reset_layout(self):
+        """배치 초기화: 모든 탭을 보이게 하고 한 탭 묶음으로 모은다."""
+        for dock in self._docks.values():
+            dock.setVisible(True)
+        self.dock_all()
+
+    def layout_text(self) -> str:
+        """설정 파일에 넣을 수 있는 글자(base64)로 된 배치."""
+        return base64.b64encode(self.save_layout()).decode("ascii")
+
+    def restore_layout_text(self, text: str) -> bool:
+        try:
+            state = base64.b64decode(text.encode("ascii"), validate=True)
+        except (ValueError, AttributeError):
+            return False
+        return bool(state) and self.restore_layout(state)
