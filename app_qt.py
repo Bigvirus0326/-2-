@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QLabel, Q
                                QPlainTextEdit)
 
 import buildrun as BR
+from characterqt import CharacterPanelQt
 import modgen as M
 import projectio as IO
 import qtkit as Q
@@ -72,7 +73,9 @@ class QtApp(Q.DockWorkspace):
         page = Q.ScrollPage()
         page.set_content(self.mod_page)
         self.add_page(page, TAB_TITLES[0])
-        for title in TAB_TITLES[1:]:
+        self.char_page = CharacterPanelQt(self.project, on_change=self._char_changed)
+        self.add_page(self.char_page, TAB_TITLES[1])
+        for title in TAB_TITLES[2:]:
             self.add_page(_placeholder(title), title)
 
         self._build_menu()
@@ -80,6 +83,7 @@ class QtApp(Q.DockWorkspace):
         if not (saved and self.restore_layout_text(saved)):   # 실패하면 기본 배치(한 탭 묶음)를 쓴다
             self.select(page)   # 처음 열 때는 '모드 / 빌드' 탭이 보이게 (Tk 앱과 같다)
         self.resize(1100, 780)
+        self._default_width_pending = not saved   # 처음 실행이면 작업 영역을 넉넉하게 연다 (showEvent 에서)
         self.update_title()
         last = self.settings.get("last_project", "")
         if last and os.path.isfile(last):
@@ -131,7 +135,11 @@ class QtApp(Q.DockWorkspace):
 
     def load_all(self):
         self.mod_page.load(self.project["mod"])
+        self.char_page.load(self.project)
         self.update_title()
+
+    def _char_changed(self):
+        self.mark_dirty()
 
     def mark_dirty(self):
         if not self.dirty:
@@ -361,6 +369,13 @@ class QtApp(Q.DockWorkspace):
             self.update_title()
             return False
         return True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, "_default_width_pending", False):
+            self._default_width_pending = False
+            # 독은 내용의 크기로 정해지므로, 보이기 시작한 뒤에 작업 영역 너비를 직접 정한다
+            self.resizeDocks([self.dock_of(self.char_page)], [900], Qt.Orientation.Horizontal)
 
     def closeEvent(self, event):
         if self.confirm_discard():
