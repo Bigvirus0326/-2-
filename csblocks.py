@@ -1346,18 +1346,7 @@ class Decomposer:
             return "damage", False, False
         return None
 
-    def _is_manosaba(self):
-        if not self.project:
-            return False
-        mod_id = (self.project.get("takeover") or {}).get("mod") or \
-            (self.project.get("mod") or {}).get("id", "")
-        return str(mod_id).casefold() == "manosaba"
 
-    def _manosaba_class(self, name):
-        if not self._is_manosaba():
-            return None
-        cls = self.classes.get(name)
-        return cls
 
     def _class_full(self, name):
         cls = self.classes.get(name)
@@ -1393,29 +1382,6 @@ class Decomposer:
         if not segs:
             return None
         names = [s["name"] for s in segs]
-        if lhs and self._is_manosaba() and aw and head in (
-                "ConsumeBloodOrbDamageBonus", "SekketsusoujitsuHelper.EvokeNextBloodOrb"):
-            method = segs[-1]
-            if method.get("args") is not None:
-                aa, ab = method["args"]
-                raw_args = rhs[aa:ab]
-                call_args = [raw_args[x:y].strip() for x, y in split_args(raw_args)] if raw_args.strip() else []
-                result = re.fullmatch(r"(?:decimal|var)\s+([A-Za-z_]\w*)\s*=", lhs.strip())
-                valid_args = (len(call_args) == 1 and self._native_context(call_args[0])) if head == "ConsumeBloodOrbDamageBonus" else \
-                    (len(call_args) == 2 and self._native_context(call_args[0]) and self._native_player(call_args[1]))
-                if result and valid_args:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_evoke_blood_orb", "args": {
-                        "result": result.group(1), "player": call_args[1] if len(call_args) > 1 else "Owner"}}
-        if not lhs and self._is_manosaba() and aw and len(segs) == 1 and \
-                head == "RemoveCurrentDeckHandAndDiscardFromCombat" and segs[0].get("args") is not None and \
-                not rhs[segs[0]["args"][0]:segs[0]["args"][1]].strip():
-            self.stats["calls"] += 1
-            return {"op": "manosaba_remove_main_piles", "args": {"player": "Owner"}}
-        if not lhs and self._is_manosaba() and aw and len(segs) == 1 and head == "PlayOwnerAttackAnimAsync" and \
-                segs[0].get("args") is not None and not rhs[segs[0]["args"][0]:segs[0]["args"][1]].strip():
-            self.stats["calls"] += 1
-            return {"op": "manosaba_owner_attack_anim", "args": {}}
         # DamageCmd.Attack is a fluent builder rather than a two-part call.
         # Map only the plain card-attack chain; FX/animation/custom modifiers stay intact.
         if aw and not lhs and len(segs) >= 3 and head == "DamageCmd.Attack" and \
@@ -1493,143 +1459,14 @@ class Decomposer:
                                 "amount": self._native_value(rhs[aa + a0:aa + a1]),
                                 "hits": hit_count, "vfx": vfx, "sfx": sfx, "fx_extra": fx_extra}}
 
-        if not lhs and aw and self._manosaba_class("GunBase") and head == "ExecuteGunAttack" and len(segs) == 1:
-            method = segs[0]
-            if method.get("args"):
-                a, b = method["args"]
-                raw = rhs[a:b]
-                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
-                if len(args) == 3 and self._native_context(args[0]):
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_gun_attack", "args": {"target": args[1], "amount": self._native_value(args[2])}}
 
-        # Native utility APIs provided by the attached Manosaba mod.
-        if not lhs and self._manosaba_class("KotodamaEnergy") and head == "KotodamaEnergy.Gain" and len(segs) == 2:
-            method = segs[1]
-            if method.get("args"):
-                a, b = method["args"]
-                raw = rhs[a:b]
-                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
-                if len(args) == 2 and self._native_player(args[0]):
-                    self.stats["calls"] += 1
-                    return {"op": "kotodama_gain", "args": {"amount": self._native_value(args[1])}}
 
-        if not lhs and self._manosaba_class("SakurabaEmaDogCmd") and aw and head == "SakurabaEmaDogCmd.Summon" and len(segs) == 2:
-            method = segs[1]
-            if method.get("args"):
-                a, b = method["args"]
-                raw = rhs[a:b]
-                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
-                if len(args) == 4 and self._native_context(args[0]) and self._native_player(args[1]) and \
-                        self._expr_key(self._expand_aliases(args[3])) in {"this", "Me"}:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_ema_summon", "args": {"amount": self._native_value(args[2])}}
 
-        if not lhs and self._manosaba_class("NovelSettingMonsterCmd") and aw and \
-                head == "NovelSettingMonsterCmd.Summon" and len(segs) == 2:
-            method = segs[1]
-            if method.get("gen") and method.get("args"):
-                ga, gb = method["gen"]
-                generic = rhs[ga:gb].strip().replace("global::", "")
-                short = generic.rsplit(".", 1)[-1]
-                full = self._class_full(short)
-                a, b = method["args"]
-                raw = rhs[a:b]
-                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
-                if full and len(args) in (3, 4) and self._native_context(args[0]) and self._native_player(args[1]) and \
-                        self._expr_key(self._expand_aliases(args[2])) in {"this", "Me"}:
-                    amount = self._native_value(args[3]) if len(args) == 4 else {"t": "num", "v": 1}
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_novel_summon", "args": {"monster": full, "amount": amount}}
 
-        if not lhs and self._manosaba_class("ShitoCombustOperations") and len(segs) == 2 and \
-                head in ("ShitoCombustOperations.ApplyIgniteToCard", "ShitoCombustOperations.AttachCombust"):
-            method = segs[1]
-            if method.get("args") and (aw == (method["name"] == "ApplyIgniteToCard")):
-                a, b = method["args"]
-                raw = rhs[a:b]
-                args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
-                is_ignite = method["name"] == "ApplyIgniteToCard"
-                target_idx, amount_idx = (1, 2) if is_ignite else (0, 1)
-                valid = len(args) == (3 if is_ignite else 2)
-                if is_ignite:
-                    valid = valid and self._native_context(args[0])
-                card_expr = args[target_idx] if valid else ""
-                valid = valid and bool(re.fullmatch(r"(?:(?:\([\w.?<>]+\))\s*)?(?:this|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*!?)", card_expr.strip()))
-                if valid:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_ignite" if is_ignite else "manosaba_attach_combust",
-                            "args": {"card": card_expr.strip(), "amount": self._native_value(args[amount_idx])}}
 
-        if not lhs and self._manosaba_class("ManosabaVfxCmd") and len(segs) == 2 and \
-                head.startswith("ManosabaVfxCmd.PlaySceneAtCombat"):
-            method_name = segs[1]["name"]
-            method_args = segs[1].get("args")
-            modes = {"PlaySceneAtCombatCenter", "PlaySceneAtCombatCenterAndWait",
-                     "PlaySceneAtCombatViewportPosition", "PlaySceneAtCombatViewportPositionAndWait"}
-            if method_name in modes and method_args and aw == method_name.endswith("AndWait"):
-                aa, ab = method_args
-                raw_args = rhs[aa:ab]
-                raw_parts = [raw_args[x:y].strip() for x, y in split_args(raw_args)] if raw_args.strip() else []
-                positional, named = [], {}
-                for part in raw_parts:
-                    match = re.fullmatch(r"(\w+)\s*:\s*(.+)", part, re.S)
-                    if match:
-                        named[match.group(1)] = match.group(2).strip()
-                    else:
-                        positional.append(part)
-                viewport = "ViewportPosition" in method_name
-                params = dict(named)
-                order = (["scenePath", "normalizedX", "normalizedY", "offsetX", "offsetY",
-                          "fitCoverViewport", "spriteNodeNames", "timeoutSeconds"] if viewport else
-                         ["scenePath", "fitCoverViewport", "spriteNodeNames", "timeoutSeconds"])
-                pos_index = 0
-                for param in order:
-                    if param in params:
-                        continue
-                    if pos_index < len(positional):
-                        params[param] = positional[pos_index]
-                        pos_index += 1
-                if params.get("scenePath") and (not viewport or "normalizedY" in params):
-                    scene = params["scenePath"]
-                    x = params.get("normalizedX", "0.5f")
-                    y = params.get("normalizedY", "0.5f")
-                    offset_x = params.get("offsetX", "0f")
-                    offset_y = params.get("offsetY", "0f")
-                    fit = params.get("fitCoverViewport", "false")
-                    sprite_nodes = params.get("spriteNodeNames", "null")
-                    timeout = params.get("timeoutSeconds", "30f")
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_scene_vfx", "args": {"mode": method_name, "scene": scene,
-                            "x": x, "y": y, "offset_x": offset_x, "offset_y": offset_y,
-                            "fit_cover": fit, "sprite_nodes": sprite_nodes,
-                            "timeout": self._native_value(timeout)}}
 
-        if not lhs and self._manosaba_class("ManosabaVideoCmd") and aw is False and len(segs) == 2 and \
-                head == "ManosabaVideoCmd.PlayFullscreenOneShot" and segs[1].get("args"):
-            aa, ab = segs[1]["args"]
-            raw_args = rhs[aa:ab]
-            raw_parts = [raw_args[x:y].strip() for x, y in split_args(raw_args)] if raw_args.strip() else []
-            positional, named = [], {}
-            for part in raw_parts:
-                match = re.fullmatch(r"(\w+)\s*:\s*(.+)", part, re.S)
-                if match:
-                    named[match.group(1)] = match.group(2).strip()
-                else:
-                    positional.append(part)
-            if positional:
-                self.stats["calls"] += 1
-                return {"op": "manosaba_video", "args": {"video": positional[0],
-                        "chroma_key": named.get("chromaKeyGreen", positional[1] if len(positional) > 1 else "false")}}
 
-        if not lhs and self._manosaba_class("ManosabaCombatCmd") and aw and len(segs) == 2 and \
-                head == "ManosabaCombatCmd.ForceWinWithoutDeathOrEscape" and segs[1].get("args"):
-            aa, ab = segs[1]["args"]
-            raw_args = rhs[aa:ab]
-            args = [raw_args[x:y].strip() for x, y in split_args(raw_args)] if raw_args.strip() else []
-            if len(args) == 1:
-                self.stats["calls"] += 1
-                return {"op": "manosaba_force_win", "args": {"combat_state": args[0]}}
+
 
         # Shared card/potion APIs and the source mod's own APIs are promoted to
         # Maker blocks so imported effects remain editable across different mods.
@@ -1651,21 +1488,7 @@ class Decomposer:
                     prefix = prefix[:-1].rstrip()
                 return prefix, null_safe
 
-            if self._manosaba_class("DyingMessagePower") and method_name == "Upgrade" and not aw and not call_args and \
-                    head.endswith(".Upgrade"):
-                receiver, null_safe = call_receiver(method)
-                if receiver:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_dying_message_upgrade", "args": {
-                        "power": receiver, "null_safe": null_safe}}
 
-            if self._is_manosaba() and method_name == "AfterSideTurnStart" and aw and len(call_args) == 3 and \
-                    head.endswith(".AfterSideTurnStart"):
-                receiver, _null_safe = call_receiver(method)
-                if receiver:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_run_side_turn_effect", "args": {
-                        "power": receiver, "side": call_args[0], "creatures": call_args[1], "state": call_args[2]}}
 
             if head.endswith(".EnergyCost.SetThisTurnOrUntilPlayed") and not aw and len(call_args) == 1:
                 receiver, _null_safe = call_receiver(method)
@@ -1694,117 +1517,26 @@ class Decomposer:
                     op = "card_upgrade_internal" if method_name == "UpgradeInternal" else "card_finalize_upgrade_internal"
                     return {"op": op, "args": {"card": receiver}}
 
-            if self._is_manosaba() and head in ("FanServiceSkillButtonUi.EnsureShown", "CouldItBeThatSkillButtonUi.EnsureShown") and \
-                    not aw and len(call_args) == 1:
-                button = "FanService" if head.startswith("FanService") else "CouldItBeThatSkill"
-                self.stats["calls"] += 1
-                return {"op": "manosaba_show_button", "args": {"button": button, "player": call_args[0]}}
 
-            if self._is_manosaba() and head.endswith(".OnDuplicateCardPlayed") and not aw and not call_args:
-                receiver, _null_safe = call_receiver(method)
-                if receiver:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_power_duplicate_callback", "args": {"power": receiver}}
 
-            if self._is_manosaba() and head == "PetEnemyAiPower.AssignAiSlot" and not aw and len(call_args) in (1, 2):
-                self.stats["calls"] += 1
-                return {"op": "manosaba_pet_ai_assign", "args": {
-                    "pet": call_args[0], "copy_from": call_args[1] if len(call_args) == 2 else "null"}}
 
-            if self._is_manosaba() and head == "PetEnemyAiPower.TryAdvanceToValidMove" and not aw and len(call_args) == 2:
-                self.stats["calls"] += 1
-                return {"op": "manosaba_pet_ai_advance", "args": {"pet": call_args[0], "targets": call_args[1]}}
 
-            if self._is_manosaba() and method_name == "ToggleIsInteractable" and not aw and len(call_args) == 1 and \
-                    head.endswith(".ToggleIsInteractable"):
-                interactable = re.sub(r"^on\s*:\s*", "", call_args[0]).strip()
-                if interactable in ("true", "false"):
-                    receiver, _null_safe = call_receiver(method)
-                    if receiver:
-                        self.stats["calls"] += 1
-                        return {"op": "manosaba_toggle_creature_node", "args": {
-                            "node": receiver, "interactable": interactable}}
 
             if head == "Owner.AddPotionInternal" and not aw and len(call_args) == 2:
                 self.stats["calls"] += 1
                 return {"op": "potion_add_model_at", "args": {
                     "potion": call_args[0], "player": "Owner", "slot": call_args[1]}}
 
-            if self._is_manosaba() and method_name == "Discard" and head.endswith(".Discard") and not aw and not call_args:
-                receiver, _null_safe = call_receiver(method)
-                if receiver:
-                    self.stats["calls"] += 1
-                    return {"op": "potion_discard", "args": {"potion": receiver}}
 
-            if self._is_manosaba() and head == "OrbGapChannelHelper.ChannelAt" and aw and len(call_args) == 4 and \
-                    self._native_context(call_args[0]) and self._native_player(call_args[2]):
-                self.stats["calls"] += 1
-                return {"op": "manosaba_channel_orb_at", "args": {
-                    "orb": call_args[1], "player": call_args[2], "insert_index": self._native_value(call_args[3])}}
 
-            if self._is_manosaba() and head == f"ManosabaKeywords.{method_name}" and aw and \
-                    method_name in ("ResolveLowStance", "ResolveMidStance", "ResolveHighStance") and len(call_args) == 3:
-                self.stats["calls"] += 1
-                return {"op": "manosaba_resolve_stance", "args": {
-                    "stance": method_name.removeprefix("Resolve").removesuffix("Stance"),
-                    "owner": call_args[0], "applier": call_args[1], "source": call_args[2]}}
 
-            if self._is_manosaba() and head == "NovelSettingNoahFriendsSfx.TryPlay" and \
-                    method_name == "TryPlay" and not aw and not call_args:
-                self.stats["calls"] += 1
-                return {"op": "manosaba_novel_friends_sfx", "args": {}}
 
-            if self._is_manosaba() and head == f"NanokaHelper.{method_name}" and method_name in \
-                    ("PlayGunFireSfx", "PlayAWPSfx") and not aw and len(call_args) <= 1:
-                path, default_volume = (("event:/Manosaba/audio/SFX/gun_shot.ogg", 5) if method_name == "PlayGunFireSfx"
-                                        else ("event:/Manosaba/audio/SFX/AWP.mp3", 3))
-                volume = self._native_value(call_args[0]) if call_args else {"t": "num", "v": default_volume}
-                self.stats["calls"] += 1
-                return {"op": "sfx", "args": {"path": f'"{path}"', "volume": volume}}
 
-            if self._manosaba_class("BloodOrb") and method_name == "AddLayers" and not aw and len(call_args) == 1:
-                receiver, _null_safe = call_receiver(method)
-                if receiver:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_add_layers", "args": {
-                        "orb": receiver, "amount": self._native_value(call_args[0])}}
 
-            if self._manosaba_class("WitchesCauldron") and method_name == "AddFirepower" and not aw and len(call_args) == 1:
-                receiver, _null_safe = call_receiver(method)
-                if receiver:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_add_firepower", "args": {
-                        "relic": receiver, "amount": self._native_value(call_args[0])}}
 
-            if self._manosaba_class("WitchesCauldron") and method_name == "MaximizeFirepower" and not aw and not call_args:
-                receiver, null_safe = call_receiver(method)
-                if receiver:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_maximize_firepower", "args": {
-                        "relic": receiver, "null_safe": null_safe}}
 
-            if self._manosaba_class("ManosabaTemporaryStrengthPower") and method_name == "IgnoreNextInstance" and \
-                    not aw and not call_args:
-                receiver, null_safe = call_receiver(method)
-                if receiver:
-                    self.stats["calls"] += 1
-                    return {"op": "manosaba_ignore_next_instance", "args": {
-                        "power": receiver, "null_safe": null_safe}}
 
-            setter_models = {
-                "SetPartner": ("LifelongFriendPower", "manosaba_set_partner", "partner"),
-                "SetApplier": ("MemorySharingPower", "manosaba_set_applier", "applier"),
-                "SetTarget": ("MusouKenPower", "manosaba_set_target", "target"),
-                "SetSourceCard": ("MusouKenPower", "manosaba_set_source_card", "source"),
-                "SetUpgraded": ("MemorySharingPower", "manosaba_set_upgraded", "upgraded"),
-            }
             setter = setter_models.get(method_name)
-            if setter and self._manosaba_class(setter[0]) and not aw and len(call_args) == 1:
-                receiver, null_safe = call_receiver(method)
-                if receiver:
-                    self.stats["calls"] += 1
-                    return {"op": setter[1], "args": {
-                        "power": receiver, setter[2]: call_args[0], "null_safe": null_safe}}
 
         if len(segs) != 2 or (not aw and head not in ("SfxCmd.Play", "VfxCmd.PlayOnCreature", "CardCmd.Upgrade", "CardCmd.ApplyKeyword",
                                                        "CardCmd.RemoveKeyword", "CardCmd.Preview", "CardCmd.PreviewCardPileAdd",

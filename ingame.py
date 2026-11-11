@@ -643,7 +643,7 @@ def _shift(rect, dy):
 
 def compose_card(assets, project, card, lang="ko", upgraded=False, k=K):
     """게임과 같은 카드 이미지(PIL RGBA, 장면 좌표 2배 크기)."""
-    import preview as PV  # 설명 변수 채우기 재사용
+    import previewcore as PV  # 설명 변수 채우기 재사용
     R = assets.card_rects
     cv = Canvas(-172, -232, 172, 228, k)
     import cardkind as CK
@@ -875,7 +875,7 @@ def _stack_with_icon(icon_img, tip, icon_size):
 
 
 def compose_relic(assets, project, relic, lang="ko"):
-    import preview as PV
+    import previewcore as PV
     img = (_open_user_image(relic.get("image")) or _mod_placeholder("relic")).copy()
     size = 128 * K
     img.thumbnail((size, size), Image.LANCZOS)
@@ -886,7 +886,7 @@ def compose_relic(assets, project, relic, lang="ko"):
 
 
 def compose_potion(assets, project, potion, lang="ko"):
-    import preview as PV
+    import previewcore as PV
     img = (_open_user_image(potion.get("image")) or _mod_placeholder("potion")).copy()
     size = 128 * K
     img.thumbnail((size, size), Image.LANCZOS)
@@ -898,7 +898,7 @@ def compose_potion(assets, project, potion, lang="ko"):
 
 def compose_power(assets, project, power, lang="ko", stacks=3):
     """전투 화면의 파워 아이콘(40x40 + 수치, power.tscn) + 설명 말풍선."""
-    import preview as PV
+    import previewcore as PV
     icon = _power_icon(power)
     cv = Canvas(-60, -4, 48, 48)
     cv.paste(icon, (0, 0, 40, 40))

@@ -1752,11 +1752,6 @@ def takeover(em, sts2_path="", log=print, progress=None):
             for key in ("body", "else", "third"):
                 yield from all_effect_blocks(block.get(key))
 
-    novel_monsters = sorted({str(b.get("args", {}).get("monster")) for it in P["cards"]
-                             for e in it.get("effects", []) if e.get("kind") == "code"
-                             for b in all_effect_blocks(e.get("blocks"))
-                             if b.get("op") == "manosaba_novel_summon" and
-                             isinstance(b.get("args", {}).get("monster"), str)})
     generated_power_classes = {it.get("class") for it in P["powers"]}
     kept_power_classes = {entry.split(":", 1)[1] for entry in kept if entry.startswith("power:")}
     extra_powers = []
@@ -1771,7 +1766,6 @@ def takeover(em, sts2_path="", log=print, progress=None):
     P["takeover"] = {"mod": mid, "dir": base, "src": src_out, "pck": pck_copy, "res_dir": res_dir,
                      "loc": os.path.join(base, "loc.json"), "exclude": sorted(set(exclude)),
                      "renamed_ns": moved if renamed else "", "kept": kept,
-                     "novel_monsters": novel_monsters,
                      "extra_powers": extra_powers,
                      "patches_all": any(re.search(r"\.PatchAll\s*\(", t) for _r, t in files),
                      "characters": kept_chars,       # 원래 코드 그대로 둔 캐릭터 (아키텍트 기본 대사만 채움)

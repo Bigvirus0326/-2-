@@ -63,7 +63,7 @@ def _desc(project, item, kind):
     try:
         d = M.description(project, item, kind, "ko")
         if kind == "card":
-            import preview as PV
+            import previewcore as PV
             d = PV.fill_values(project, d, item, False)
     except Exception:          # 설명을 못 만들어도 설명서는 만든다
         d = item.get("desc_ko", "")

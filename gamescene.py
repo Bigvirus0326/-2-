@@ -672,8 +672,8 @@ class Sim:
                 pass
             else:
                 desc = B.describe([b], self.p, "power", "ko")
-                import blockui
-                self.log(f"   · (시험장에서는 계산 생략) {blockui._plain(desc) or op}")
+                import gimmickrules as GR
+                self.log(f"   · (시험장에서는 계산 생략) {GR.plain(desc) or op}")
 
 
 def _pet_op(self, op, a, b):

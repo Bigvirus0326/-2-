@@ -20,8 +20,7 @@ class BeginnerHelpTests(unittest.TestCase):
                             self.assertTrue(H.field_help(block,key).strip())
 
     def test_number_and_condition_choices_have_explanations(self):
-        import blockui
-        for kind,choices in (("value",blockui.VALUE_TYPES),("cond",blockui.COND_TYPES)):
+        for kind,choices in (("value",B.VALUE_TYPES),("cond",B.COND_TYPES)):
             for code,_label in choices:
                 self.assertIn(code,H.SLOT_HELP)
                 self.assertTrue(H.slot_help(kind,code))

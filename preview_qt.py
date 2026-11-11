@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainterPath, QP
 
 import cardkind
 import modgen as M
-import preview as PV          # 글 해석·값 채우기·색 (Tk 와 무관한 부분만 쓴다)
+import previewcore as PV          # 글 해석·값 채우기·색 (Tk 와 무관한 부분만 쓴다)
 
 try:
     from PIL import Image, ImageDraw, ImageOps
@@ -383,6 +383,85 @@ def render_item(painter, project, kind, item, x=0, y=0, s=1.0, lang="ko", upgrad
 # ---------------------------------------------------------------------------
 # 캐릭터
 # ---------------------------------------------------------------------------
+SELECT_W, SELECT_H = 520, 293     # 게임의 캐릭터 선택 화면 (16:9)
+
+
+def render_select_screen(painter, project, x=0, y=0, lang="ko", s=1.0):
+    """게임의 캐릭터 선택 화면을 흉내 낸 미리보기 (16:9): 전체 배경 위에 초상화, 이름, 체력, 소개."""
+    S = lambda v: v * s  # noqa: E731
+    ch = project["character"]
+    color = ch.get("color", "#888888")
+    if not M.HEX_RE.match(color or ""):
+        color = "#888888"
+    color = "#" + color.lstrip("#")
+    W, H = S(SELECT_W), S(SELECT_H)
+    frame = QRectF(x, y, W, H)
+    painter.save()
+    clip = QPainterPath()
+    clip.addRoundedRect(frame, S(10), S(10))
+    painter.setClipPath(clip)
+    bg = pixmap(ch.get("select_bg_image"), round(W), round(H), "cover")
+    if bg:
+        _draw_pixmap_at(painter, bg, x, y)
+    else:
+        painter.fillRect(frame, QColor("#1d1f27"))
+    painter.fillRect(frame, QColor(12, 13, 18, 110))         # 글이 읽히도록 살짝 어둡게
+    painter.restore()
+    painter.setPen(QPen(QColor(color), max(2, round(S(2)))))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(frame.adjusted(1, 1, -1, -1), S(10), S(10))
+    if not ch.get("enabled"):
+        center_text(painter, x + W / 2, y + H / 2, "새 캐릭터를 만들지 않습니다\n(콘텐츠 모드)", "#aaaaaa", font(S(11), True))
+        return
+    _left_text(painter, x + S(22), y + S(16), "캐릭터 선택" if lang == "ko" else "Character Select", "#c9c2b4", font(S(9)))
+    # 초상화 (선택 화면의 132×195 칸을 키운 것)
+    pw, ph = S(165), S(244)
+    px, py = x + S(56), y + (H - ph) / 2
+    pm = pixmap(ch.get("select_image"), pw, ph, "cover", "round")
+    if pm:
+        _draw_pixmap_at(painter, pm, px + (pw - pm.width()) / 2, py + (ph - pm.height()) / 2)
+    else:
+        rounded_rect(painter, px, py, px + pw, py + ph, S(14), fill=PV._shade(color, 0.45), outline=color, width=2)
+        ph_name = M.label_of(M.PLACEHOLDER_CHARS, ch.get("placeholder"))
+        center_text(painter, px + pw / 2, py + ph / 2, f"초상화 없음\n(임시 외형:\n{ph_name})", "#dddddd", font(S(10)))
+    # 이름 · 체력 · 소개 (오른쪽 칸)
+    tw = S(230)
+    cx = x + S(262) + tw / 2
+    top_text(painter, cx, y + S(70), M.text(ch, "name", lang), color, font(S(22), True))
+    top_text(painter, cx, y + S(114), f"♥ {ch.get('hp')}", "#ff7070", font(S(13), True))
+    desc = M.character_description(ch, lang)
+    size = 11
+    while size > 7 and y + S(150) + draw_rich(painter, 0, 0, tw, desc, S(size), measure_only=True) > y + H - S(16):
+        size -= 1
+    draw_rich(painter, cx, y + S(150), tw, desc, S(size), color="#e9e4da")
+
+
+def render_character_icons(painter, project, x=0, y=0, lang="ko", s=1.0):
+    """선택 화면 아래에 따로 보이는 작은 그림들: 아이콘 · 지도 표시 · 잠김 · 에너지 구슬 · 설명용 에너지."""
+    S = lambda v: v * s  # noqa: E731
+    ch = project["character"]
+    items = (("icon_image", "아이콘", 56), ("map_marker_image", "지도 표시", 56),
+             ("select_locked_image", "잠김", 56), ("energy_icon_image", "에너지 구슬", 56),
+             ("energy_text_icon_image", "설명용 에너지", 28))
+    for i, (field, label, box) in enumerate(items):
+        cx = x + S(42) + i * S(78)
+        cy = y + S(34)
+        rect(painter, cx - S(28), cy - S(28), cx + S(28), cy + S(28), "#262a35", "#3a3f4a")
+        src = ch.get(field) or (ch.get("select_image") if field == "select_locked_image" else "")
+        im = pixmap(src, S(box), S(box), "contain")
+        if im:
+            _draw_pixmap_at(painter, im, cx - im.width() / 2, cy - im.height() / 2)
+        else:
+            center_text(painter, cx, cy, "기본", "#777777", font(S(9)))
+        top_text(painter, cx, cy + S(34), label, "#999999", font(S(8)))
+
+
+def _left_text(painter, left, top, text, color, f):
+    painter.setFont(f)
+    painter.setPen(QColor(color))
+    painter.drawText(QRectF(left, top, 400, 30), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop), text)
+
+
 def render_character(painter, project, x=0, y=0, lang="ko", s=1.0):
     S = lambda v: v * s  # noqa: E731
     ch = project["character"]
@@ -396,6 +475,15 @@ def render_character(painter, project, x=0, y=0, lang="ko", s=1.0):
     if not ch.get("enabled"):
         center_text(painter, cx, y + S(200), "새 캐릭터를 만들지 않습니다\n(콘텐츠 모드)", "#aaaaaa", font(S(11), True))
         return
+    bg = pixmap(ch.get("select_bg_image"), S(288), S(548), "cover")     # 선택 화면 전체 배경 (프레임 안을 채운다)
+    if bg:
+        painter.save()
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(x + S(6), y + S(6), S(288), S(548)), S(18), S(18))
+        painter.setClipPath(clip)
+        _draw_pixmap_at(painter, bg, x + S(6), y + S(6))
+        painter.fillRect(QRectF(x + S(6), y + S(6), S(288), S(548)), QColor(29, 31, 39, 150))   # 글이 읽히도록 어둡게
+        painter.restore()
     top_text(painter, cx, y + S(24), "캐릭터 선택 화면" if lang == "ko" else "Character Select", "#888888", font(S(9)))
     # 선택 초상화 (132x195 비율)
     w, h = S(160), S(236)
@@ -413,6 +501,18 @@ def render_character(painter, project, x=0, y=0, lang="ko", s=1.0):
     yy += linespace(S(16), True) + S(4)
     top_text(painter, cx, yy, f"♥ {ch.get('hp')}", "#ff7070", font(S(11), True))
     yy += linespace(S(11), True) + S(6)
+    # 에너지 구슬(카드에 찍히는 그림)과 설명용 에너지 아이콘
+    orb = pixmap(ch.get("energy_icon_image"), S(40), S(40), "contain")
+    text_icon = pixmap(ch.get("energy_text_icon_image"), S(22), S(22), "contain")
+    if orb:
+        _draw_pixmap_at(painter, orb, cx - S(26) - orb.width() / 2, yy + (S(40) - orb.height()) / 2)
+    else:
+        center_text(painter, cx - S(26), yy + S(20), "구슬\n기본", "#777777", font(S(8)))
+    if text_icon:
+        _draw_pixmap_at(painter, text_icon, cx + S(26) - text_icon.width() / 2, yy + (S(40) - text_icon.height()) / 2)
+    else:
+        center_text(painter, cx + S(26), yy + S(20), "글자\n기본", "#777777", font(S(8)))
+    yy += S(44)
     icons_top = y + S(462)
     desc = M.character_description(ch, lang)
     size = 10

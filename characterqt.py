@@ -1,21 +1,23 @@
-"""'캐릭터' 탭의 Qt 版: 내 캐릭터 편집 (이름·소개·색·체력·시작 덱·시작 유물·그림·미리보기).
+"""'캐릭터' 탭의 Qt 版: 내 캐릭터 · 가져온 캐릭터 편집 (이름·소개·체력·골드·덱·유물·그림·전투 모습·모션·미리보기).
 
-아직 옮기지 않은 것: 가져온 캐릭터 고르기, 전투 모습·모션(움직이는 그림), 아키텍트 대사 편집,
-카드 테두리 편집기 (지금은 Tk 앱에서 편집). 이 항목들은 Tk 앱에서 그대로 쓸 수 있다.
+가져온 캐릭터는 원래 모드의 것이라 색·카드 풀·테두리·구체 칸은 숨기고, 나머지는 바꿀 수 있다 (Tk 와 같다).
+카드 테두리 편집기·아키텍트 대사 편집은 대화상자로 연다.
 """
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                               QAbstractItemView, QPushButton, QRadioButton, QScrollArea, QSpinBox,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QButtonGroup)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog,
+                               QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
+                               QRadioButton, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout,
+                               QWidget, QButtonGroup)
 
 import cardframe as CF
 import modgen as M
 import preview_qt as PQ
 import qtkit as Q
+from combatqt import combat_pixmap
+from pets import frame_ms
 
 LANGS = [("ko", "한국어"), ("en", "영어"), ("zh", "중국어 간체")]
 ART_FIELDS = [
@@ -27,11 +29,15 @@ ART_FIELDS = [
     ("map_marker_image", "지도 표시", "49×64"),
     ("select_bg_image", "선택 화면 전체 배경", "1920×1080 (캐릭터를 고르면 화면 전체를 채움)"),
 ]
+ENERGY_KEYS = ("energy_icon_image", "energy_text_icon_image")
+MOTIONS = (("attack_frames", "공격 모션"), ("hit_frames", "피격 모션"))
+MINE_ONLY = {"id", "color", "card_h", "card_s", "card_v", *ENERGY_KEYS}              # 가져온 캐릭터는 원래 코드가 정한다
+MINE_FLAGS = ("enabled", "placeholder", "frame_style", "orb_slots", "show_stars")
+IMPORTED_ONLY = {"gold"}                                                 # 시작 골드: 비우면 원래대로
 
 
 def _set_combo(combo, value):
-    index = combo.findData(value)
-    combo.setCurrentIndex(index if index >= 0 else 0)
+    Q.set_combo_value(combo, value)
 
 
 class CharacterPanelQt(QWidget):
@@ -40,8 +46,15 @@ class CharacterPanelQt(QWidget):
         self.project = project
         self.on_change = on_change
         self.ui = ui
+        self.assets_fn = None      # 게임 그림을 읽는 함수 (app 이 넣는다)
+        self.cur = None            # None = 내 캐릭터, 숫자 = 가져온 캐릭터 순번
         self._loading = False
         self._fields = {}
+        self._mine = []            # 가져온 캐릭터일 때 숨기는 칸
+        self._gold = []            # 가져온 캐릭터일 때만 보이는 칸
+        self.motion_lists = {}
+        self.motion_times = {}
+        self._motion_token = 0     # 모션 재생을 멈추는 번호 (바뀌면 이전 재생은 멈춘다)
 
         root = QHBoxLayout(self)
         scroll = QScrollArea()
@@ -52,13 +65,23 @@ class CharacterPanelQt(QWidget):
         form = QVBoxLayout(body)
         root.addWidget(scroll, 1)
 
+        form.addWidget(self._selector_bar())
+
         self.enabled = QCheckBox("새 캐릭터 만들기  (끄면 카드는 무색, 유물/물약은 공용 풀에 추가됩니다)")
         self.enabled.toggled.connect(self.changed)
         form.addWidget(self.enabled)
+        self._mine.append(self.enabled)
 
         basics = QGridLayout()
-        self._text(basics, 0, 0, "캐릭터 ID (영문 소문자_)", "id")
+        self._text(basics, 0, 0, "캐릭터 ID (영문 소문자_)", "id", mine=True)
         self._text(basics, 0, 2, "시작 체력", "hp")
+        gold_label = QLabel("시작 골드 (비우면 원래대로)")
+        gold = QLineEdit()
+        gold.textChanged.connect(lambda _t: self.changed())
+        basics.addWidget(gold_label, 1, 0)
+        basics.addWidget(gold, 1, 1)
+        self._fields["gold"] = gold
+        self._gold += [gold_label, gold]
         form.addLayout(basics)
 
         names = QGridLayout()
@@ -68,7 +91,8 @@ class CharacterPanelQt(QWidget):
         form.addLayout(names)
 
         look = QGridLayout()
-        look.addWidget(QLabel("대표 색상"), 0, 0)
+        color_label = QLabel("대표 색상")
+        look.addWidget(color_label, 0, 0)
         color = QLineEdit()
         color.textChanged.connect(lambda _t: self.changed())
         look.addWidget(color, 0, 1)
@@ -89,7 +113,13 @@ class CharacterPanelQt(QWidget):
         self.frame_combo = QComboBox()
         self.frame_combo.currentIndexChanged.connect(lambda _i: self.changed())
         look.addWidget(self.frame_combo, 1, 3)
-        form.addLayout(look)
+        frame_edit = QPushButton("테두리 편집…")
+        frame_edit.clicked.connect(self.edit_frames)
+        look.addWidget(frame_edit, 1, 4)
+        look_box = QWidget()
+        look_box.setLayout(look)
+        form.addWidget(look_box)
+        self._mine.append(look_box)
 
         hsv = QHBoxLayout()
         hsv.addWidget(QLabel("카드 뒷면 HSV (0~1)"))
@@ -104,7 +134,10 @@ class CharacterPanelQt(QWidget):
             self._fields[key] = spin
         hsv.addWidget(QLabel("1 / 1 / 1 이 기본"))
         hsv.addStretch(1)
-        form.addLayout(hsv)
+        hsv_box = QWidget()
+        hsv_box.setLayout(hsv)
+        form.addWidget(hsv_box)
+        self._mine.append(hsv_box)
 
         counts = QHBoxLayout()
         counts.addWidget(QLabel("구체 슬롯 수"))
@@ -116,11 +149,18 @@ class CharacterPanelQt(QWidget):
         self.show_stars.toggled.connect(self.changed)
         counts.addWidget(self.show_stars)
         counts.addStretch(1)
-        form.addLayout(counts)
+        counts_box = QWidget()
+        counts_box.setLayout(counts)
+        form.addWidget(counts_box)
+        self._mine.append(counts_box)
 
         form.addWidget(self._deck_box())
         form.addWidget(self._relic_box())
+        architect = QPushButton("아키텍트 대사 편집…")
+        architect.clicked.connect(self.edit_architect)
+        form.addWidget(architect)
         form.addWidget(self._art_box())
+        form.addWidget(self._combat_box())
         form.addStretch(1)
 
         self.status = QLabel("")
@@ -141,20 +181,51 @@ class CharacterPanelQt(QWidget):
         self.preview_lang = "ko"
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        side.addWidget(self.preview)
+        self.preview.setStyleSheet(f"border: 1px solid {Q.C['line2']}; padding: 6px; background: {Q.C['stage']};")
+        side.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignTop)
+        self.preview_icons = QLabel()                    # 선택 화면 아래에 따로 보이는 작은 그림들
+        self.preview_icons.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_icons.setStyleSheet(f"border: 1px solid {Q.C['line2']}; padding: 6px; background: {Q.C['stage']};")
+        side.addWidget(self.preview_icons, 0, Qt.AlignmentFlag.AlignTop)
         side.addStretch(1)
         root.addLayout(side)
 
         self.load(project)
 
     # ---- 칸 만들기 ----
-    def _text(self, grid, row, col, label, key):
+    def _selector_bar(self):
+        box = QWidget()
+        row = QVBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        top = QHBoxLayout()
+        top.addWidget(QLabel("편집할 캐릭터"))
+        self.char_combo = QComboBox()
+        self.char_combo.setMinimumWidth(320)
+        self.char_combo.currentIndexChanged.connect(lambda _i: self._picked_char())
+        top.addWidget(self.char_combo)
+        top.addStretch(1)
+        row.addLayout(top)
+        self.sel_note = QLabel("")
+        self.sel_note.setWordWrap(True)
+        row.addWidget(self.sel_note)
+        self.selbar = box
+        return box
+
+    def _picked_char(self):
+        if not self._loading:
+            self.select_char(self.char_combo.currentData())
+
+    def _text(self, grid, row, col, label, key, mine=False):
+        label_widget = None
         if label:
-            grid.addWidget(QLabel(label), row, col)
+            label_widget = QLabel(label)
+            grid.addWidget(label_widget, row, col)
         edit = QLineEdit()
         edit.textChanged.connect(lambda _t: self.changed())
         grid.addWidget(edit, row, col + 1)
         self._fields[key] = edit
+        if mine:
+            self._mine += [w for w in (label_widget, edit) if w is not None]
         return edit
 
     def _deck_box(self):
@@ -201,31 +272,139 @@ class CharacterPanelQt(QWidget):
         layout.addWidget(QLabel("시작 시 지급할 유물을 고르세요. 여러 개를 추가할 수 있습니다. (희귀도 '시작' 권장)"))
         return box
 
+    def _thumb_label(self):
+        """그림 미리보기 칸: 고른 PNG 를 작게 보인다 (없으면 '없음')."""
+        thumb = QLabel()
+        thumb.setFixedSize(76, 76)
+        thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        thumb.setStyleSheet(f"border: 1px solid {Q.C['line2']}; background: {Q.C['surface']}; color: {Q.C['muted']};")
+        thumb.setText("없음")
+        return thumb
+
+    def _show_thumb(self, thumb, path):
+        path = (path or "").strip().strip('"')
+        if not path:
+            thumb.setPixmap(QPixmap())
+            thumb.setText("없음")
+            return
+        pix = QPixmap(path) if os.path.isfile(path) else QPixmap()
+        if pix.isNull():
+            thumb.setPixmap(QPixmap())
+            thumb.setText("못 읽음")
+            return
+        thumb.setPixmap(pix.scaled(70, 70, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+
     def _art_box(self):
         box = QGroupBox("캐릭터 그림 (선택 사항, 비우면 임시 외형 캐릭터의 그림을 씀)")
         grid = QGridLayout(box)
         for row, (key, label, hint) in enumerate(ART_FIELDS):
-            grid.addWidget(QLabel(label), row, 0)
+            thumb = self._thumb_label()
+            grid.addWidget(thumb, row, 0)
+            name = QLabel(label)
+            grid.addWidget(name, row, 1)
             edit = QLineEdit()
-            edit.textChanged.connect(lambda _t: self.changed())
-            grid.addWidget(edit, row, 1)
+            edit.textChanged.connect(lambda _t, e=edit, th=thumb: (self._show_thumb(th, e.text()), self.changed()))
+            grid.addWidget(edit, row, 2)
             browse = QPushButton("찾기…")
             browse.clicked.connect(lambda _=False, e=edit: self._browse(e))
-            grid.addWidget(browse, row, 2)
-            grid.addWidget(QLabel(hint), row, 3)
+            grid.addWidget(browse, row, 3)
+            hint_label = QLabel(hint)
+            grid.addWidget(hint_label, row, 4)
             self._fields[key] = edit
+            if key in ENERGY_KEYS:            # 에너지 아이콘은 원래 코드가 정한다 (가져온 캐릭터에서 숨긴다)
+                self._mine += [name, edit, browse, hint_label, thumb]
+        return box
+
+    def _combat_box(self):
+        box = QGroupBox("전투 모습")
+        col = QVBoxLayout(box)
+        grid = QGridLayout()
+        combat_thumb = self._thumb_label()
+        grid.addWidget(combat_thumb, 0, 0)
+        grid.addWidget(QLabel("전투 그림 (PNG)"), 0, 1)
+        combat = QLineEdit()
+        combat.textChanged.connect(lambda _t, e=combat, th=combat_thumb: (self._show_thumb(th, e.text()), self.changed()))
+        grid.addWidget(combat, 0, 2)
+        browse = QPushButton("찾기…")
+        browse.clicked.connect(lambda _=False: self._browse(combat))
+        grid.addWidget(browse, 0, 3)
+        grid.addWidget(QLabel("비우면 가져온 캐릭터는 원래 모습, 새 캐릭터는 임시 외형을 씁니다"), 0, 4)
+        self._fields["combat_image"] = combat
+        col.addLayout(grid)
+        tune = QHBoxLayout()
+        tune.addWidget(QLabel("크기 %"))
+        self.combat_scale = QSpinBox()
+        self.combat_scale.setRange(10, 400)
+        self.combat_scale.setSingleStep(5)
+        self.combat_scale.valueChanged.connect(lambda _v: self.changed())
+        tune.addWidget(self.combat_scale)
+        tune.addWidget(QLabel("띄우기(px)"))
+        self.combat_lift = QSpinBox()
+        self.combat_lift.setRange(-200, 300)
+        self.combat_lift.setSingleStep(5)
+        self.combat_lift.valueChanged.connect(lambda _v: self.changed())
+        tune.addWidget(self.combat_lift)
+        self.combat_flip = QCheckBox("좌우 반전 (캐릭터는 오른쪽을 봐야 함)")
+        self.combat_flip.toggled.connect(self.changed)
+        tune.addWidget(self.combat_flip)
+        tune.addStretch(1)
+        col.addLayout(tune)
+        self.combat_canvas = QLabel()
+        self.combat_canvas.setFixedSize(300, 320)
+        self.combat_canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col.addWidget(self.combat_canvas)
+        col.addWidget(QLabel("기본 전투 그림을 지정한 뒤 모션에 사용할 PNG를 재생 순서대로 추가하세요."))
+        for key, title in MOTIONS:
+            motion = QGroupBox(title)
+            layout = QVBoxLayout(motion)
+            listing = QListWidget()
+            listing.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            listing.setMaximumHeight(90)
+            layout.addWidget(listing)
+            self.motion_lists[key] = listing
+            row = QHBoxLayout()
+            row.addWidget(QLabel("프레임당 ms"))
+            timing = QSpinBox()
+            timing.setRange(16, 5000)
+            timing.setSingleStep(10)
+            timing.valueChanged.connect(lambda _v, k=key: self.motion_speed_changed(k))
+            row.addWidget(timing)
+            self.motion_times[key] = timing
+            for label, action in (("PNG 추가", "add"), ("선택 제거", "remove"), ("재생", "play")):
+                button = QPushButton(label)
+                button.clicked.connect(lambda _=False, k=key, a=action: self.edit_motion(k, a))
+                row.addWidget(button)
+            row.addStretch(1)
+            layout.addLayout(row)
+            col.addWidget(motion)
         return box
 
     # ---- 읽기 · 쓰기 ----
     def ch(self):
+        imp = M.imported_characters(self.project)
+        if self.cur is not None and 0 <= self.cur < len(imp):
+            return imp[self.cur]
         return self.project["character"]
+
+    def imported(self):
+        return self.cur is not None and self.ch() is not self.project["character"]
+
+    def assets(self):
+        return self.assets_fn() if self.assets_fn else None
+
+    def select_char(self, value):
+        self.cur = None if value in ("", "mine", None) else int(value)
+        self.load(self.project)
 
     def load(self, project):
         """프로젝트를 바꿔 끼운다(열기·되돌리기). 칸을 다시 채우되 바뀐 것으로 치지 않는다."""
         self.project = project
+        if self.cur is not None and self.cur >= len(M.imported_characters(project)):
+            self.cur = None
         ch = self.ch()
         self._loading = True
         try:
+            self._fill_char_choices()
             self.enabled.setChecked(bool(ch.get("enabled")))
             for key, widget in self._fields.items():
                 if isinstance(widget, QDoubleSpinBox):
@@ -239,20 +418,56 @@ class CharacterPanelQt(QWidget):
             _set_combo(self.frame_combo, ch.get("frame_style", ""))
             self.orb_slots.setValue(int(ch.get("orb_slots", 0) or 0))
             self.show_stars.setChecked(bool(ch.get("show_stars")))
+            self.combat_scale.setValue(int(ch.get("combat_scale", 100) or 100))
+            self.combat_lift.setValue(int(ch.get("combat_lift", 0) or 0))
+            self.combat_flip.setChecked(bool(ch.get("combat_flip")))
+            for key, spin in self.motion_times.items():
+                spin.setValue(frame_ms(ch, key))
             self._refresh_deck_and_relic_choices()
             self.refresh_deck()
             self.refresh_relics()
         finally:
             self._loading = False
+        self._apply_kind_visibility()
         self.update_swatch()
         self.update_preview()
+        self.refresh_motion_lists()
+        self.update_combat_preview()
+
+    def _fill_char_choices(self):
+        imp = M.imported_characters(self.project)
+        self.selbar.setVisible(bool(imp))
+        self.char_combo.blockSignals(True)
+        self.char_combo.clear()
+        mine_label = "내 캐릭터 (새로 만들기)" + ("" if self.project["character"].get("enabled") else " — 꺼짐")
+        self.char_combo.addItem(mine_label, "mine")
+        for i, c in enumerate(imp):
+            self.char_combo.addItem(f"가져온 캐릭터: {M.text(c, 'name', 'ko') or c['class']} ({c['class']})", str(i))
+        self.char_combo.setCurrentIndex(self.char_combo.findData("mine" if not self.imported() else str(self.cur)))
+        self.char_combo.blockSignals(False)
+        if imp:
+            self.sel_note.setText(
+                ("원래 모드의 캐릭터입니다. 이름·소개·체력·골드·시작 덱·시작 유물·선택 화면 그림·아이콘·전투 모습·모션·아키텍트 대사를 바꿀 수 있습니다. "
+                 "전투 그림을 비우면 원래 모습이 유지됩니다. 색·카드 풀은 원래 설정을 씁니다.")
+                if self.imported() else f"이 모드에는 가져온 캐릭터가 {len(imp)}명 있습니다. 위에서 골라 편집하세요.")
+
+    def _apply_kind_visibility(self):
+        imported = self.imported()
+        for widget in self._mine:
+            widget.setVisible(not imported)
+        for widget in self._gold:
+            widget.setVisible(imported)
 
     def changed(self, *_):
         if self._loading:
             return
         ch = self.ch()
-        ch["enabled"] = self.enabled.isChecked()
+        imported = self.imported()
         for key, widget in self._fields.items():
+            if imported and key in MINE_ONLY:
+                continue
+            if not imported and key in IMPORTED_ONLY:
+                continue
             if isinstance(widget, QDoubleSpinBox):
                 ch[key] = float(widget.value())
                 continue
@@ -262,16 +477,30 @@ class CharacterPanelQt(QWidget):
                     ch[key] = int(val)
                 except ValueError:
                     pass
+            elif key == "gold":
+                if not val:
+                    ch.pop("gold", None)
+                else:
+                    try:
+                        ch[key] = int(val)
+                    except ValueError:
+                        pass
             elif key.endswith("_image"):
                 ch[key] = val.strip('"')
             else:
                 ch[key] = val
-        ch["placeholder"] = self.placeholder.currentData()
-        ch["frame_style"] = self.frame_combo.currentData()
-        ch["orb_slots"] = int(self.orb_slots.value())
-        ch["show_stars"] = bool(self.show_stars.isChecked())
+        if not imported:
+            ch["enabled"] = self.enabled.isChecked()
+            ch["placeholder"] = self.placeholder.currentData()
+            ch["frame_style"] = self.frame_combo.currentData()
+            ch["orb_slots"] = int(self.orb_slots.value())
+            ch["show_stars"] = bool(self.show_stars.isChecked())
+        ch["combat_scale"] = int(self.combat_scale.value())
+        ch["combat_lift"] = int(self.combat_lift.value())
+        ch["combat_flip"] = bool(self.combat_flip.isChecked())
         self.update_swatch()
         self.update_preview()
+        self.update_combat_preview()
         if self.on_change:
             self.on_change()
 
@@ -279,11 +508,33 @@ class CharacterPanelQt(QWidget):
         if self.on_change:
             self.on_change()
 
+    def edit_frames(self):
+        from cardframeqt import FrameStyleDialogQt
+        sel = self.ch().get("frame_style") or None
+        dialog = FrameStyleDialogQt(self, self.project, self.assets_fn,
+                                    select=sel if sel not in ("", CF.GAME) else None, on_change=self._frames_changed)
+        dialog.exec()
+
+    def _frames_changed(self):
+        self.load(self.project)
+        self._notify()
+
+    def edit_architect(self):
+        from dialogsqt import ArchitectDialogQt
+        if ArchitectDialogQt(self, self.project, self.ch()).exec():
+            self._notify()
+
+    def refresh_choices(self):
+        """카드·유물 목록이 바뀌면 덱·유물 고르기 목록을 다시 채운다."""
+        self._refresh_deck_and_relic_choices()
+        self.refresh_deck()
+        self.refresh_relics()
+
     # ---- 색 · 그림 ----
     def update_swatch(self):
         c = self._fields["color"].text().strip()
         color = c if M.HEX_RE.match(c) and c.startswith("#") else "#" + c.lstrip("#")
-        self.swatch.setStyleSheet(f"background: {color if M.HEX_RE.match(color) else '#888888'};")
+        self.swatch.setStyleSheet(f"background: {color if M.HEX_RE.match(color) else Q.C['muted']};")
 
     def pick_color(self):
         current = self._fields["color"].text().strip()
@@ -389,6 +640,72 @@ class CharacterPanelQt(QWidget):
         self.refresh_relics()
         self._notify()
 
+    # ---- 전투 모습 · 모션 ----
+    def motion_speed_changed(self, key):
+        if self._loading:
+            return
+        value = int(self.motion_times[key].value())
+        character = self.ch()
+        if frame_ms(character, key) != value:
+            character[key + "_ms"] = value
+            self._notify()
+
+    def refresh_motion_lists(self):
+        for key, listing in self.motion_lists.items():
+            listing.clear()
+            for i, frame in enumerate(self.ch().get(key, []), 1):
+                listing.addItem(f"{i}. {os.path.basename(frame['image'])}")
+
+    def edit_motion(self, key, action):
+        ch = self.ch()
+        frames = ch.get(key, [])
+        if action == "play":
+            self._play_motion(key)
+            return
+        if action == "add":
+            paths, _ = QFileDialog.getOpenFileNames(self, "모션 그림 고르기", "", "PNG 이미지 (*.png)")
+            if not paths:
+                return
+            ch[key] = frames + [{"image": path} for path in paths]
+        else:
+            row = self.motion_lists[key].currentRow()
+            if row < 0:
+                return
+            ch[key] = [frame for i, frame in enumerate(frames) if i != row]
+        self._notify()
+        self.refresh_motion_lists()
+        self.update_combat_preview()
+
+    def _play_motion(self, key):
+        ch = self.ch()
+        frames = list(ch.get(key, []))
+        if not frames:
+            return
+        self._motion_token += 1
+        token = self._motion_token
+
+        def show(index):
+            if token != self._motion_token:
+                return
+            if index == len(frames):
+                self.update_combat_preview()
+                return
+            self.combat_canvas.setPixmap(combat_pixmap(self.assets(), frames[index]["image"], ch.get("combat_scale"),
+                                                       ch.get("combat_flip"), ch.get("combat_lift"), ""))
+            QTimer.singleShot(frame_ms(ch, key), lambda: show(index + 1))
+        show(0)
+
+    def update_combat_preview(self):
+        self._motion_token += 1          # 그림을 새로 그리면 재생 중인 모션은 멈춘다
+        ch = self.ch()
+        if ch.get("combat_image"):
+            self.combat_canvas.setPixmap(combat_pixmap(self.assets(), ch.get("combat_image"), ch.get("combat_scale"),
+                                                       ch.get("combat_flip"), ch.get("combat_lift"),
+                                                       M.text(ch, "name", "ko")))
+        else:
+            self.combat_canvas.clear()
+            self.combat_canvas.setText("(그림 없음 — 임시 외형\n캐릭터의 애니메이션)")
+
     # ---- 미리보기 ----
     def set_preview_lang(self, lang):
         self.preview_lang = lang
@@ -396,14 +713,33 @@ class CharacterPanelQt(QWidget):
 
     def update_preview(self):
         u = self.ui
-        width, height = int(310 * u), int(570 * u)
-        image = QImage(width, height, QImage.Format.Format_ARGB32)
-        image.fill(QColor("#121318"))
-        painter = QPainter(image)
-        try:
-            PQ.render_character(painter, self.project, 5 * u, 5 * u, self.preview_lang, u)
-        except Exception as e:  # noqa: BLE001
-            painter.setPen(QColor("#ff6666"))
-            painter.drawText(image.rect(), int(Qt.AlignmentFlag.AlignCenter), f"미리보기 오류:\n{e}")
-        painter.end()
-        self.preview.setPixmap(QPixmap.fromImage(image))
+        P = self.project
+        if self.imported():
+            ich = self.ch()
+            fake = dict(P["character"])
+            fake.update({k: v for k, v in ich.items() if k.startswith(("name_", "desc_")) or k in ("hp", "deck", "relics")})
+            fake.update({"enabled": True, "color": "#8a8a8a",
+                         "select_image": ich.get("select_image") or ich.get("orig_select_image") or ""})
+            fake["deck"] = [d for d in ich.get("deck", []) if not d["card"].startswith("raw:")]
+            fake["relics"] = [r for r in ich.get("relics", []) if not r.startswith("raw:")]
+            P = dict(P, character=fake)
+        dpr = self.preview.devicePixelRatioF()           # 화면 배율대로 크게 만들어 글자와 테두리가 흐리지 않게
+
+        def draw(width, height, render):
+            image = QImage(round(width * dpr), round(height * dpr), QImage.Format.Format_ARGB32)
+            image.setDevicePixelRatio(dpr)
+            image.fill(QColor("#121318"))
+            painter = QPainter(image)
+            try:
+                render(painter)
+            except Exception as e:  # noqa: BLE001
+                painter.setPen(QColor("#ff6666"))
+                painter.drawText(0, 0, width, height, int(Qt.AlignmentFlag.AlignCenter), f"미리보기 오류:\n{e}")
+            painter.end()
+            return QPixmap.fromImage(image)
+
+        lang = self.preview_lang
+        self.preview.setPixmap(draw(int(PQ.SELECT_W * u), int(PQ.SELECT_H * u),
+                                    lambda pt: PQ.render_select_screen(pt, P, 0, 0, lang, u)))
+        self.preview_icons.setPixmap(draw(int(PQ.SELECT_W * u), int(104 * u),
+                                          lambda pt: PQ.render_character_icons(pt, P, 0, 0, lang, u)))

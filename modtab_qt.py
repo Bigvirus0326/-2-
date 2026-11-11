@@ -13,6 +13,13 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout, QGroupBox
 
 import qtkit as Q
 
+def _caption(text):
+    """칸 이름: 입력 칸과 붙어 보이지 않도록 오른쪽 여백을 둔다."""
+    caption = QLabel(text)
+    caption.setContentsMargins(0, 0, 14, 0)
+    return caption
+
+
 INFO_FIELDS = [("id", "모드 ID (영문, 대문자 시작)", 0, 0), ("name", "표시 이름", 0, 2),
                ("author", "제작자", 1, 0), ("version", "버전", 1, 2),
                ("description", "설명", 2, 0), ("min_game_version", "최소 게임 버전", 3, 0),
@@ -65,7 +72,7 @@ class ModTabQt(QWidget):
         info = QGroupBox("01  모드 정보")
         grid = QGridLayout(info)
         for key, label, r, c in INFO_FIELDS:
-            grid.addWidget(QLabel(label), r, c)
+            grid.addWidget(_caption(label), r, c)
             edit = QLineEdit(str(mod.get(key, "")))
             edit.textChanged.connect(lambda text, k=key: self._mod_edited(k, text))
             span = 3 if key == "description" else 1
@@ -76,7 +83,7 @@ class ModTabQt(QWidget):
         env = QGroupBox("02  제작 환경 · 이 PC에 저장")
         env_grid = QGridLayout(env)
         for r, (key, label, mode) in enumerate(ENV_FIELDS):
-            env_grid.addWidget(QLabel(label), r, 0)
+            env_grid.addWidget(_caption(label), r, 0)
             edit = QLineEdit(settings.get(key, ""))
             edit.textChanged.connect(lambda text, k=key: self._setting_edited(k, text))
             env_grid.addWidget(edit, r, 1)
@@ -100,6 +107,7 @@ class ModTabQt(QWidget):
         act_grid = QGridLayout(act)
         for i, (text, desc) in enumerate(STEPS):
             button = QPushButton(text)
+            button.setProperty("primary", i == 0)        # 이 탭의 주된 동작 하나만 강조한다
             button.clicked.connect(actions[i])
             act_grid.addWidget(button, i, 0)
             act_grid.addWidget(QLabel(desc), i, 1)

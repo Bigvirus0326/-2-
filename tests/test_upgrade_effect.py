@@ -4,7 +4,7 @@ import unittest
 import blockcode as B
 import gimmick as G
 import modgen as M
-import preview as P
+import previewcore as P
 
 
 class UpgradeEffectTests(unittest.TestCase):

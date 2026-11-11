@@ -48,10 +48,18 @@ class AppQtTests(TestCase):
             p.stop()
 
     def test_opens_on_the_first_tab_with_all_ten_tabs(self):
-        bars = [b for b in self.app.findChildren(QTabBar) if b.count() > 1]
+        bars = [b for b in self.app.findChildren(QTabBar) if b.count() == len(A.TAB_TITLES)]   # 기믹 탭 안의 탭 줄은 제외
         self.assertEqual(len(bars), 1)
-        self.assertEqual(bars[0].count(), len(A.TAB_TITLES))
         self.assertEqual(bars[0].tabText(bars[0].currentIndex()), A.TAB_TITLES[0])
+
+    def test_card_edit_marks_dirty_and_reaches_the_character_deck_choices(self):
+        card_tab = self.app.item_pages[0]
+        card_tab.refresh_list(0)
+        card_tab._fields["name_ko"][1].setText("바뀐 카드")
+        self.assertTrue(self.app.dirty)
+        choices = self.app.char_page.deck_card
+        labels = [choices.itemText(i) for i in range(choices.count())]
+        self.assertTrue(any("바뀐 카드" in label for label in labels))
 
     def test_starts_with_a_clean_new_project(self):
         self.assertEqual(self.app.project_path, "")

@@ -22,7 +22,6 @@ CATS = {
     "var": ("변수", "#ff8c1a"),
     "gimmick": ("기믹 (소환·자원·선택)", "#d6457a"),
     "class": ("직업 시스템 (구체·별·골골이)", "#2a9d8f"),
-    "mod_api": ("Manosaba 전용", "#a14bc5"),
     "fx": ("이펙트 · 버튼", "#e07a1f"),
 }
 
@@ -316,73 +315,6 @@ SPECS = {
     "button_off": {"cat": "fx", "ko": "버튼 {button} 끄기", "args": {"button": ("button", "")}},
     "sfx": {"cat": "fx", "ko": "소리 {path} 재생 · 음량 {volume}",
             "args": {"path": ("code", '"event:/sfx"'), "volume": ("value", {"t": "num", "v": 1})}},
-    "kotodama_gain": {"cat": "mod_api", "ko": "언령 에너지 {amount} 얻기",
-                       "args": {"amount": ("value", {"t": "num", "v": 1})}},
-    "manosaba_ema_summon": {"cat": "mod_api", "ko": "에마 소환 · 체력 {amount}",
-                             "args": {"amount": ("value", {"t": "num", "v": 5})}},
-    "manosaba_novel_summon": {"cat": "mod_api", "ko": "소설 속 몬스터 {monster} 소환 · 체력 {amount}",
-                               "args": {"monster": ("manosaba_monster", ""),
-                                        "amount": ("value", {"t": "num", "v": 5})}},
-    "manosaba_ignite": {"cat": "mod_api", "ko": "카드 {card}의 점화 {amount} 낮추기",
-                         "args": {"card": ("code", "cardModel"), "amount": ("value", {"t": "num", "v": 1})}},
-    "manosaba_attach_combust": {"cat": "mod_api", "ko": "카드 {card}에 연소 {amount} 부여",
-                                 "args": {"card": ("code", "cardModel"), "amount": ("value", {"t": "num", "v": 1})}},
-    "manosaba_gun_attack": {"cat": "mod_api", "ko": "총격 {target}에게 피해 {amount}",
-                             "args": {"target": ("code", "target"), "amount": ("value", {"t": "num", "v": 6})}},
-    "manosaba_scene_vfx": {"cat": "mod_api", "ko": "Manosaba 장면 이펙트 {mode} · 장면 {scene} · 화면 좌표 {x}, {y} · 맞춤 {fit_cover} · 스프라이트 {sprite_nodes}",
-                            "args": {"mode": ("code", "PlaySceneAtCombatCenterAndWait"), "scene": ("code", '"res://Manosaba/scenes/"'),
-                                     "x": ("code", "0.5f"), "y": ("code", "0.5f"), "offset_x": ("code", "0f"),
-                                     "offset_y": ("code", "0f"), "fit_cover": ("code", "false"),
-                                     "sprite_nodes": ("code", "null"), "timeout": ("value", {"t": "num", "v": 30})}},
-    "manosaba_video": {"cat": "mod_api", "ko": "Manosaba 영상 {video} 재생 · 초록색 키 {chroma_key}",
-                       "args": {"video": ("code", '"res://Manosaba/video/"'), "chroma_key": ("code", "false")}},
-    "manosaba_force_win": {"cat": "mod_api", "ko": "전투 즉시 승리 · 전투 상태 {combat_state}",
-                            "args": {"combat_state": ("code", "CombatState")}},
-    "manosaba_resolve_stance": {"cat": "mod_api", "ko": "Manosaba 태세 {stance} 적용 · 생물 {owner} · 적용자 {applier} · 카드 {source}",
-                                 "args": {"stance": ("code", "Low"), "owner": ("code", "Owner.Creature"),
-                                          "applier": ("code", "Owner.Creature"), "source": ("code", "this")}},
-    "manosaba_novel_friends_sfx": {"cat": "mod_api", "ko": "Manosaba 소설 친구 효과음 재생", "args": {}},
-    "manosaba_add_layers": {"cat": "mod_api", "ko": "혈액 구체 {orb} 층 {amount} 추가",
-                             "args": {"orb": ("code", "bloodOrb"), "amount": ("value", {"t": "num", "v": 1})}},
-    "manosaba_add_firepower": {"cat": "mod_api", "ko": "화력 유물 {relic}에 {amount} 추가",
-                                "args": {"relic": ("code", "relic"), "amount": ("value", {"t": "num", "v": 1})}},
-    "manosaba_maximize_firepower": {"cat": "mod_api", "ko": "화력 유물 {relic}의 화력 최대로 만들기 · null 허용 {null_safe}",
-                                     "args": {"relic": ("code", "relic"), "null_safe": ("bool", True)}},
-    "manosaba_ignore_next_instance": {"cat": "mod_api", "ko": "파워 {power} 다음 적용 한 번 무시",
-                                       "args": {"power": ("code", "temporaryPower"), "null_safe": ("bool", False)}},
-    "manosaba_set_partner": {"cat": "mod_api", "ko": "파워 {power} 동료 대상 {partner}로 설정",
-                              "args": {"power": ("code", "power"), "partner": ("code", "target"), "null_safe": ("bool", False)}},
-    "manosaba_set_applier": {"cat": "mod_api", "ko": "파워 {power} 적용자 {applier}로 설정",
-                              "args": {"power": ("code", "power"), "applier": ("code", "Owner.Creature"), "null_safe": ("bool", False)}},
-    "manosaba_set_target": {"cat": "mod_api", "ko": "파워 {power} 대상 {target}로 설정",
-                             "args": {"power": ("code", "power"), "target": ("code", "target"), "null_safe": ("bool", False)}},
-    "manosaba_set_source_card": {"cat": "mod_api", "ko": "파워 {power} 출처 카드 {source}로 설정",
-                                  "args": {"power": ("code", "power"), "source": ("code", "this"), "null_safe": ("bool", False)}},
-    "manosaba_set_upgraded": {"cat": "mod_api", "ko": "파워 {power} 강화 상태 {upgraded}로 설정",
-                               "args": {"power": ("code", "power"), "upgraded": ("code", "IsUpgraded"), "null_safe": ("bool", False)}},
-    "manosaba_channel_orb_at": {"cat": "mod_api", "ko": "혈액 구체 {orb}를 플레이어 {player}의 구체 슬롯 {insert_index} 위치에 영창",
-                                 "args": {"orb": ("code", "orbModel.ToMutable()"), "player": ("code", "Owner"),
-                                          "insert_index": ("value", {"t": "num", "v": 0})}},
-    "manosaba_evoke_blood_orb": {"cat": "mod_api", "ko": "혈액 구체 발현 · 결과 변수 {result} · 플레이어 {player}",
-                                  "args": {"result": ("code", "num"), "player": ("code", "Owner")}},
-    "manosaba_remove_main_piles": {"cat": "mod_api", "ko": "손패·뽑기·버리기 더미 카드를 전투에서 제거 · 플레이어 {player}",
-                                    "args": {"player": ("code", "Owner")}},
-    "manosaba_owner_attack_anim": {"cat": "mod_api", "ko": "Manosaba 카드 소유자 공격 동작 재생", "args": {}},
-    "manosaba_show_button": {"cat": "mod_api", "ko": "Manosaba 전투 버튼 {button} 표시 · 플레이어 {player}",
-                              "args": {"button": ("code", "FanService"), "player": ("code", "Owner")}},
-    "manosaba_power_duplicate_callback": {"cat": "mod_api", "ko": "파워 {power} 복제 카드 효과 호출",
-                                          "args": {"power": ("code", "power")}},
-    "manosaba_pet_ai_assign": {"cat": "mod_api", "ko": "동료 {pet}의 적 행동 슬롯을 {copy_from} 기준으로 지정",
-                                "args": {"pet": ("code", "pet"), "copy_from": ("code", "null")}},
-    "manosaba_pet_ai_advance": {"cat": "mod_api", "ko": "동료 {pet}의 다음 적 행동 선택 · 대상 목록 {targets}",
-                                 "args": {"pet": ("code", "pet"), "targets": ("code", "targets")}},
-    "manosaba_toggle_creature_node": {"cat": "mod_api", "ko": "전투 생물 노드 {node} 상호작용 가능 {interactable}",
-                                       "args": {"node": ("code", "nCreature"), "interactable": ("code", "true")}},
-    "manosaba_dying_message_upgrade": {"cat": "mod_api", "ko": "파워 {power} 사망 메시지 강화 · null 허용 {null_safe}",
-                                        "args": {"power": ("code", "dyingMessagePower"), "null_safe": ("bool", True)}},
-    "manosaba_run_side_turn_effect": {"cat": "mod_api", "ko": "파워 {power}의 {side} 턴 시작 효과 실행 · 생물 {creatures} · 전투 상태 {state}",
-                                       "args": {"power": ("code", "power"), "side": ("code", "enemy.Side"),
-                                                "creatures": ("code", "creatures"), "state": ("code", "state")}},
 }
 
 # Call Mapping can connect unknown APIs from any imported mod to these shared
@@ -417,15 +349,6 @@ PALETTE = [
     ("gimmick", ["pay", "summon", "command", "unsummon", "choice", "pick", "random_transform", "pick_transform", "pick_each", "random_each", "picked_action", "card_tag", "delayed"]),
     ("class", ["channel", "orb_channel_model", "orb_channel_type", "orb_passive_model", "evoke", "orb_passive_all", "orb_slots", "orb_slots_to", "orb_grow", "stars", "forge",
                "osty_summon", "osty_attack", "osty_kill", "pet_summon", "pet_attack", "pet_act", "pet_kill", "add_pet_model"]),
-    ("mod_api", ["kotodama_gain", "manosaba_ema_summon", "manosaba_novel_summon", "manosaba_ignite", "manosaba_attach_combust",
-                 "manosaba_gun_attack", "manosaba_scene_vfx", "manosaba_video", "manosaba_force_win",
-                 "manosaba_resolve_stance", "manosaba_novel_friends_sfx", "manosaba_add_layers", "manosaba_add_firepower",
-                 "manosaba_maximize_firepower", "manosaba_ignore_next_instance", "manosaba_set_partner",
-                 "manosaba_set_applier", "manosaba_set_target", "manosaba_set_source_card", "manosaba_set_upgraded",
-                 "manosaba_channel_orb_at", "manosaba_evoke_blood_orb", "manosaba_remove_main_piles",
-                 "manosaba_owner_attack_anim", "manosaba_show_button", "manosaba_power_duplicate_callback",
-                 "manosaba_pet_ai_assign", "manosaba_pet_ai_advance", "manosaba_toggle_creature_node",
-                 "manosaba_dying_message_upgrade", "manosaba_run_side_turn_effect"]),
     ("fx", ["fx", "button_switch", "sfx", "play_vfx_on_creature"]),
 ]
 PALETTE = [(cat,[op for op in ops if op != "picked_action"]) for cat,ops in F.install(SPECS, PALETTE)]
@@ -679,6 +602,24 @@ def _first_custom_power():
 
 def block_spec(b):
     return F.block_spec(b, SPECS)
+
+
+def fix_unknown_blocks(blocks):
+    """지워진 블록(예: 예전 Manosaba 전용 블록)은 '직접 코드' 블록으로 바꾼다. 안에 든 블록도 같이 고친다."""
+    out = []
+    for b in blocks or []:
+        if not isinstance(b, dict):
+            continue
+        op = b.get("op")
+        if op not in SPECS:
+            out.append({"op": "source_step", "args": {"source": f"// 지워진 블록: {op}"}})
+            continue
+        nb = dict(b)
+        for key in ("body", "else", "third"):
+            if isinstance(nb.get(key), list):
+                nb[key] = fix_unknown_blocks(nb[key])
+        out.append(nb)
+    return out
 
 
 def block_caption(b):
@@ -1253,20 +1194,6 @@ def _describe_one(b, project, owner_kind, lang, card, item):
             f"Apply {V('amount')} from {a.get('power', '')} to {a.get('creature', '')}."
     if op == "flash":
         return ""
-    if op == "kotodama_gain":
-        return f"언령 에너지를 {V('amount')} 얻습니다." if ko else f"Gain {V('amount')} Kotodama energy."
-    if op == "manosaba_ema_summon":
-        return f"에마를 소환하거나 체력을 {V('amount')}만큼 늘립니다." if ko else f"Summon Ema or raise her HP by {V('amount')}."
-    if op == "manosaba_novel_summon":
-        n = str(a.get("monster", "")).split(".")[-1]
-        return f"{n}을(를) 소환합니다 (체력 {V('amount')})." if ko else f"Summon {n} with {V('amount')} HP."
-    if op == "manosaba_ignite":
-        return f"고른 카드의 점화를 {V('amount')} 낮춥니다." if ko else f"Reduce the selected card's Ignite by {V('amount')}."
-    if op == "manosaba_attach_combust":
-        return f"고른 카드에 연소 {V('amount')}를 부여합니다." if ko else f"Attach {V('amount')} Combust to the selected card."
-    if op == "manosaba_gun_attack":
-        return f"총격으로 {a.get('target', '')}에게 피해 {V('amount')}를 줍니다." if ko else \
-            f"Fire a gun attack at {a.get('target', '')} for {V('amount')} damage."
     if op == "wait":
         return f"{V('duration')}초 기다립니다." if ko else f"Wait {V('duration')} seconds."
     if op == "wait_scaled":
@@ -1335,71 +1262,6 @@ def _describe_one(b, project, owner_kind, lang, card, item):
             f"Transform {a.get('card', '')} into {a.get('card_type', '')}."
     if op == "stun":
         return f"{a.get('creature', '')}을(를) 기절시킵니다." if ko else f"Stun {a.get('creature', '')}."
-    if op == "manosaba_scene_vfx":
-        return f"전투 장면 이펙트 {a.get('scene', '')}를 재생합니다." if ko else \
-            f"Play combat scene effect {a.get('scene', '')}."
-    if op == "manosaba_video":
-        return f"영상 {a.get('video', '')}를 재생합니다." if ko else f"Play video {a.get('video', '')}."
-    if op == "manosaba_force_win":
-        return "Manosaba 전투를 승리로 끝냅니다." if ko else "End the Manosaba combat in victory."
-    if op == "manosaba_resolve_stance":
-        return f"{a.get('stance', '')} 태세를 {a.get('owner', '')}에게 적용합니다." if ko else \
-            f"Resolve {a.get('stance', '')} stance for {a.get('owner', '')}."
-    if op == "manosaba_novel_friends_sfx":
-        return "Manosaba 소설 친구 효과음을 재생합니다." if ko else "Play the Manosaba novel friends sound."
-    if op == "manosaba_add_layers":
-        return f"혈액 구체 {a.get('orb', '')}에 층 {V('amount')}을 추가합니다." if ko else \
-            f"Add {V('amount')} layers to BloodOrb {a.get('orb', '')}."
-    if op == "manosaba_add_firepower":
-        return f"화력 유물 {a.get('relic', '')}에 {V('amount')} 화력을 추가합니다." if ko else \
-            f"Add {V('amount')} firepower to {a.get('relic', '')}."
-    if op == "manosaba_maximize_firepower":
-        return f"화력 유물 {a.get('relic', '')}의 화력을 최대로 만듭니다." if ko else \
-            f"Maximize firepower on {a.get('relic', '')}."
-    if op == "manosaba_channel_orb_at":
-        return f"혈액 구체 {a.get('orb', '')}를 {a.get('player', '')}의 {V('insert_index')}번 위치에 영창합니다." if ko else \
-            f"Channel {a.get('orb', '')} into slot {V('insert_index')} for {a.get('player', '')}."
-    if op == "manosaba_evoke_blood_orb":
-        return f"혈액 구체를 발현해 결과를 {a.get('result', '')}에 저장합니다." if ko else \
-            f"Evoke a Blood Orb and store the result in {a.get('result', '')}."
-    if op == "manosaba_remove_main_piles":
-        return f"{a.get('player', '')}의 손패·뽑기·버리기 더미 카드를 전투에서 제거합니다." if ko else \
-            f"Remove {a.get('player', '')}'s hand, draw, and discard cards from combat."
-    if op == "manosaba_owner_attack_anim":
-        return "Manosaba 카드 소유자의 공격 동작을 재생합니다." if ko else "Play the card owner's Manosaba attack animation."
-    if op == "manosaba_show_button":
-        return f"Manosaba 전투 버튼 {a.get('button', '')}를 표시합니다." if ko else \
-            f"Show Manosaba combat button {a.get('button', '')}."
-    if op == "manosaba_power_duplicate_callback":
-        return f"파워 {a.get('power', '')}의 복제 카드 효과를 실행합니다." if ko else \
-            f"Run the duplicate card callback on {a.get('power', '')}."
-    if op == "manosaba_pet_ai_assign":
-        return f"동료 {a.get('pet', '')}의 행동 슬롯을 {a.get('copy_from', '')} 기준으로 지정합니다." if ko else \
-            f"Assign the pet {a.get('pet', '')}'s AI slot from {a.get('copy_from', '')}."
-    if op == "manosaba_pet_ai_advance":
-        return f"동료 {a.get('pet', '')}의 적 행동을 다음 유효한 동작으로 넘깁니다." if ko else \
-            f"Advance {a.get('pet', '')} to its next valid enemy move."
-    if op == "manosaba_toggle_creature_node":
-        return f"전투 생물 노드 {a.get('node', '')}의 상호작용 가능 상태를 {a.get('interactable', '')}(으)로 합니다." if ko else \
-            f"Set interaction on creature node {a.get('node', '')} to {a.get('interactable', '')}."
-    if op == "manosaba_dying_message_upgrade":
-        return f"파워 {a.get('power', '')}의 사망 메시지를 강화합니다." if ko else \
-            f"Upgrade the dying message on power {a.get('power', '')}."
-    if op == "manosaba_run_side_turn_effect":
-        return f"파워 {a.get('power', '')}의 {a.get('side', '')} 턴 시작 효과를 실행합니다." if ko else \
-            f"Run the turn-start effect on {a.get('power', '')} for {a.get('side', '')}."
-    if op == "manosaba_ignore_next_instance":
-        return f"파워 {a.get('power', '')}의 다음 적용을 한 번 무시합니다." if ko else \
-            f"Ignore the next instance on power {a.get('power', '')}."
-    setter_labels = {"manosaba_set_partner": ("동료", "partner", "partner"),
-                     "manosaba_set_applier": ("적용자", "applier", "applier"),
-                     "manosaba_set_target": ("대상", "target", "target"),
-                     "manosaba_set_source_card": ("출처 카드", "source", "source card"),
-                     "manosaba_set_upgraded": ("강화 상태", "upgraded", "upgraded state")}
-    if op in setter_labels:
-        label, key, en_label = setter_labels[op]
-        return f"파워 {a.get('power', '')}의 {label}을(를) {a.get(key, '')}(으)로 설정합니다." if ko else \
-            f"Set power {a.get('power', '')} {en_label} to {a.get(key, '')}."
     if op == "card_keyword":
         import modgen as M
         keyword = M.KEYWORD_NAMES["ko" if ko else "en"].get(a.get("keyword"), a.get("keyword"))
@@ -2432,222 +2294,6 @@ class _Gen:
             return [f"{ind}VfxCmd.PlayOnCreature({a.get('creature') or 'target'}, {a.get('vfx') or '"vfx/vfx_attack_slash"'});"]
         if op == "doom_kill":
             return [f"{ind}await DoomPower.DoomKill({a.get('creatures') or 'creatures'});"]
-        if op in ("kotodama_gain", "manosaba_ema_summon", "manosaba_novel_summon",
-                  "manosaba_ignite", "manosaba_attach_combust", "manosaba_scene_vfx",
-                  "manosaba_video", "manosaba_force_win", "manosaba_resolve_stance",
-                  "manosaba_novel_friends_sfx", "manosaba_add_layers", "manosaba_add_firepower",
-                  "manosaba_maximize_firepower", "manosaba_ignore_next_instance", "manosaba_set_partner",
-                  "manosaba_set_applier", "manosaba_set_target", "manosaba_set_source_card", "manosaba_set_upgraded",
-                  "manosaba_channel_orb_at", "manosaba_evoke_blood_orb", "manosaba_remove_main_piles",
-                  "manosaba_owner_attack_anim", "manosaba_show_button", "manosaba_power_duplicate_callback",
-                  "manosaba_pet_ai_assign", "manosaba_pet_ai_advance", "manosaba_toggle_creature_node",
-                  "manosaba_dying_message_upgrade", "manosaba_run_side_turn_effect"):
-            if (self.project.get("takeover") or {}).get("mod", "").casefold() != "manosaba":
-                self.errors.append("Manosaba 전용 블록은 Manosaba 모드 프로젝트에서만 쓸 수 있습니다.")
-                return []
-            if op == "manosaba_channel_orb_at":
-                player = str(a.get("player") or C.player).strip()
-                orb = str(a.get("orb") or "orbModel.ToMutable()").strip()
-                if not player or not orb:
-                    self.errors.append("영창할 구체와 플레이어 식을 입력하세요.")
-                    return []
-                return [f"{ind}await global::Manosaba.Characters.JogasakiNoah.Cards.OrbGapChannelHelper."
-                        f"ChannelAt({cc}, {orb}, {player}, (int)({self.val(a.get('insert_index'))}));"]
-            if op == "manosaba_evoke_blood_orb":
-                import re
-                result_name = str(a.get("result") or "num").strip()
-                player = str(a.get("player") or C.player).strip()
-                if not re.fullmatch(r"[A-Za-z_]\w*", result_name) or not player:
-                    self.errors.append("결과 변수 이름과 플레이어 식을 확인하세요.")
-                    return []
-                return [f"{ind}decimal {result_name} = await global::Manosaba.Characters.JogasakiNoah.Cards."
-                        f"SekketsusoujitsuHelper.EvokeNextBloodOrb({cc}, {player});"]
-            if op == "manosaba_remove_main_piles":
-                player = str(a.get("player") or C.player).strip()
-                if not player:
-                    self.errors.append("플레이어 식을 입력하세요.")
-                    return []
-                cards = self.uid("removedCards")
-                return [f"{ind}var {cards} = new global::System.Collections.Generic.List<global::MegaCrit.Sts2.Core.Entities.Cards.CardModel>();",
-                        f"{ind}{cards}.AddRange(PileType.Draw.GetPile({player}).Cards);",
-                        f"{ind}{cards}.AddRange(PileType.Hand.GetPile({player}).Cards);",
-                        f"{ind}{cards}.AddRange(PileType.Discard.GetPile({player}).Cards);",
-                        f"{ind}if ({cards}.Count > 0) await CardPileCmd.RemoveFromCombat({cards});"]
-            if op == "manosaba_owner_attack_anim":
-                if C.kind != "card":
-                    self.errors.append("소유자 공격 동작 블록은 카드 효과에서만 쓸 수 있습니다.")
-                    return []
-                return [f"{ind}await PlayOwnerAttackAnimAsync();"]
-            if op == "manosaba_show_button":
-                button_paths = {
-                    "FanService": "global::manosaba.Characters.SawatariCoco.Visuals.FanServiceSkillButtonUi",
-                    "CouldItBeThatSkill": "global::Manosaba.Characters.TachibanaSherry.Visuals.CouldItBeThatSkillButtonUi",
-                }
-                button = button_paths.get(str(a.get("button") or "FanService").strip())
-                if not button:
-                    self.errors.append("표시할 버튼은 FanService 또는 CouldItBeThatSkill입니다.")
-                    return []
-                return [f"{ind}{button}.EnsureShown({a.get('player') or C.player});"]
-            if op == "manosaba_power_duplicate_callback":
-                return [f"{ind}{a.get('power') or 'power'}.OnDuplicateCardPlayed();"]
-            if op == "manosaba_pet_ai_assign":
-                pet = str(a.get("pet") or "pet").strip()
-                copied = str(a.get("copy_from") or "null").strip()
-                if not pet:
-                    self.errors.append("동료 생물 식을 입력하세요.")
-                    return []
-                args = pet + (f", {copied}" if copied and copied != "null" else "")
-                return [f"{ind}global::Manosaba.Characters.JogasakiNoah.Powers.PetEnemyAiPower.AssignAiSlot({args});"]
-            if op == "manosaba_pet_ai_advance":
-                pet = str(a.get("pet") or "pet").strip()
-                targets = str(a.get("targets") or "targets").strip()
-                if not pet or not targets:
-                    self.errors.append("동료 생물과 대상 목록 식을 입력하세요.")
-                    return []
-                return [f"{ind}global::Manosaba.Characters.JogasakiNoah.Powers.PetEnemyAiPower.TryAdvanceToValidMove({pet}, {targets});"]
-            if op == "manosaba_toggle_creature_node":
-                node = str(a.get("node") or "nCreature").strip()
-                interactable = str(a.get("interactable") or "true").strip()
-                if not node or interactable not in ("true", "false"):
-                    self.errors.append("전투 생물 노드 식과 상호작용 가능 값을 확인하세요.")
-                    return []
-                return [f"{ind}{node}.ToggleIsInteractable(on: {interactable});"]
-            if op == "manosaba_dying_message_upgrade":
-                power = str(a.get("power") or "dyingMessagePower").strip()
-                if not power:
-                    self.errors.append("사망 메시지 파워 식을 입력하세요.")
-                    return []
-                accessor = "?." if a.get("null_safe") else "."
-                return [f"{ind}{power}{accessor}Upgrade();"]
-            if op == "manosaba_run_side_turn_effect":
-                power = str(a.get("power") or "power").strip()
-                side = str(a.get("side") or "enemy.Side").strip()
-                creatures = str(a.get("creatures") or "creatures").strip()
-                state = str(a.get("state") or "state").strip()
-                if not power or not side or not creatures or not state:
-                    self.errors.append("파워, 턴 진영, 생물 목록, 전투 상태를 입력하세요.")
-                    return []
-                return [f"{ind}await {power}.AfterSideTurnStart({side}, {creatures}, {state});"]
-            if op == "manosaba_resolve_stance":
-                stance = str(a.get("stance") or "Low").strip().capitalize()
-                if stance not in ("Low", "Mid", "High"):
-                    self.errors.append("태세는 Low, Mid, High 중에서 선택하세요.")
-                    return []
-                return [f"{ind}await global::Manosaba.Characters.Common.Overrides.ManosabaKeywords."
-                        f"Resolve{stance}Stance({a.get('owner') or 'Owner.Creature'}, "
-                        f"{a.get('applier') or 'Owner.Creature'}, {a.get('source') or 'this'});"]
-            if op == "manosaba_novel_friends_sfx":
-                return [f"{ind}global::manosaba.Characters.NatsumeAnan.Cards.NovelSettingNoahFriendsSfx.TryPlay();"]
-            if op == "manosaba_add_layers":
-                orb = str(a.get("orb") or "bloodOrb").strip()
-                if not orb:
-                    self.errors.append("층을 추가할 혈액 구체 식을 입력하세요.")
-                    return []
-                return [f"{ind}{orb}.AddLayers({self.block_amount(b)});"]
-            if op == "manosaba_add_firepower":
-                relic = str(a.get("relic") or "relic").strip()
-                if not relic:
-                    self.errors.append("화력을 추가할 유물 식을 입력하세요.")
-                    return []
-                return [f"{ind}{relic}.AddFirepower((int)({self.block_amount(b)}));"]
-            if op == "manosaba_maximize_firepower":
-                relic = str(a.get("relic") or "relic").strip()
-                if not relic:
-                    self.errors.append("화력을 최대로 만들 유물 식을 입력하세요.")
-                    return []
-                accessor = "?." if a.get("null_safe") else "."
-                return [f"{ind}{relic}{accessor}MaximizeFirepower();"]
-            if op == "manosaba_ignore_next_instance":
-                power = str(a.get("power") or "temporaryPower").strip()
-                if not power:
-                    self.errors.append("파워 식을 입력하세요.")
-                    return []
-                accessor = "?." if a.get("null_safe") else "."
-                return [f"{ind}{power}{accessor}IgnoreNextInstance();"]
-            setter_specs = {
-                "manosaba_set_partner": ("partner", "SetPartner"),
-                "manosaba_set_applier": ("applier", "SetApplier"),
-                "manosaba_set_target": ("target", "SetTarget"),
-                "manosaba_set_source_card": ("source", "SetSourceCard"),
-                "manosaba_set_upgraded": ("upgraded", "SetUpgraded"),
-            }
-            if op in setter_specs:
-                field, method = setter_specs[op]
-                power = str(a.get("power") or "power").strip()
-                value = str(a.get(field) or "").strip()
-                if not power or not value:
-                    self.errors.append("파워와 설정할 값을 입력하세요.")
-                    return []
-                accessor = "?." if a.get("null_safe") else "."
-                return [f"{ind}{power}{accessor}{method}({value});"]
-            if op == "manosaba_scene_vfx":
-                mode = str(a.get("mode") or "PlaySceneAtCombatCenterAndWait").strip()
-                methods = {"PlaySceneAtCombatCenter", "PlaySceneAtCombatCenterAndWait",
-                           "PlaySceneAtCombatViewportPosition", "PlaySceneAtCombatViewportPositionAndWait"}
-                scene = str(a.get("scene") or "").strip()
-                if mode not in methods or not scene:
-                    self.errors.append("Manosaba 장면 효과의 호출 방식과 장면 경로를 입력하세요.")
-                    return []
-                args = [scene]
-                if "ViewportPosition" in mode:
-                    args.extend([f"(float)({a.get('x') or '0.5f'})", f"(float)({a.get('y') or '0.5f'})",
-                                 f"offsetX: (float)({a.get('offset_x') or '0f'})",
-                                 f"offsetY: (float)({a.get('offset_y') or '0f'})"])
-                args.extend([f"fitCoverViewport: {a.get('fit_cover') or 'false'}",
-                             f"spriteNodeNames: {a.get('sprite_nodes') or 'null'}"])
-                if mode.endswith("AndWait"):
-                    args.append(f"timeoutSeconds: (float)({self.val(a.get('timeout'))})")
-                prefix = "await " if mode.endswith("AndWait") else ""
-                return [f"{ind}{prefix}global::Manosaba.Characters.Common.Commands.ManosabaVfxCmd.{mode}({', '.join(args)});"]
-            if op == "manosaba_video":
-                video = str(a.get("video") or "").strip()
-                if not video:
-                    self.errors.append("재생할 영상 경로를 입력하세요.")
-                    return []
-                return [f"{ind}global::Manosaba.Characters.Common.Commands.ManosabaVideoCmd."
-                        f"PlayFullscreenOneShot({video}, chromaKeyGreen: {a.get('chroma_key') or 'false'});"]
-            if op == "manosaba_force_win":
-                return [f"{ind}await global::Manosaba.Characters.Common.Commands.ManosabaCombatCmd."
-                        f"ForceWinWithoutDeathOrEscape({a.get('combat_state') or 'CombatState'});"]
-            amount = self.block_amount(b)
-            if op == "kotodama_gain":
-                return with_player([f"{ind}global::manosaba.Characters.NatsumeAnan.KotodamaEnergy."
-                                    f"Gain({C.player}, (int)({amount}));"])
-            if op == "manosaba_ema_summon":
-                if C.kind != "card":
-                    self.errors.append("에마 소환은 카드 효과에서만 쓸 수 있습니다.")
-                    return []
-                return [f"{ind}await global::Manosaba.Characters.Common.Monsters.SakurabaEmaDogCmd."
-                        f"Summon({cc}, {C.player}, {amount}, {C.src});"]
-            if op == "manosaba_novel_summon":
-                if C.kind != "card":
-                    self.errors.append("소설 속 몬스터 소환은 카드 효과에서만 쓸 수 있습니다.")
-                    return []
-                takeover = self.project.get("takeover") or {}
-                monster = str(a.get("monster") or "").replace("global::", "").strip()
-                if monster not in (takeover.get("novel_monsters") or []):
-                    self.errors.append("소환할 Manosaba 몬스터를 선택하세요.")
-                    return []
-                return [f"{ind}await global::Manosaba.Characters.Common.Monsters.NovelSettingMonsterCmd."
-                        f"Summon<global::{monster}>({cc}, {C.player}, {C.src}, {amount});"]
-            if op in ("manosaba_ignite", "manosaba_attach_combust"):
-                if C.kind != "card":
-                    self.errors.append("점화·연소 블록은 카드 효과에서만 쓸 수 있습니다.")
-                    return []
-                card = str(a.get("card") or "").strip()
-                if not card:
-                    self.errors.append("대상 카드 식을 입력하세요.")
-                    return []
-                if op == "manosaba_ignite":
-                    return [f"{ind}await global::manosaba.Characters.ShitoAlisa.ShitoCombustOperations."
-                            f"ApplyIgniteToCard({cc}, {card}, {amount});"]
-                return [f"{ind}global::manosaba.Characters.ShitoAlisa.ShitoCombustOperations."
-                        f"AttachCombust({card}, (int)({amount}));"]
-        if op == "manosaba_gun_attack":
-            if (self.project.get("takeover") or {}).get("mod", "").casefold() != "manosaba" or C.kind != "card":
-                self.errors.append("총격 블록은 Manosaba 카드 효과에서만 쓸 수 있습니다.")
-                return []
-            return [f"{ind}await ExecuteGunAttack({cc}, {a.get('target') or 'target'}, {self.block_amount(b)});"]
         if op == "max_hp":
             return [f"{ind}await CreatureCmd.GainMaxHp({me}, {self.block_amount(b)});"]
         if op == "heal":
@@ -3451,3 +3097,49 @@ def compile_blocks(blocks, project, C, ind="        ", prefix="Blk", extras=None
     lines += g.stmts(blocks, ind + "    ")
     lines.append(f"{ind}}}")
     return lines, g.errors
+
+
+# 값·조건 고르기 창의 종류 목록 (Tk 와 Qt 가 같이 쓴다)
+VALUE_TYPES = [("num", "숫자"), ("stack", "파워가 쌓인 수치"), ("stat", "체력 / 방어도"), ("count", "카드 수 / 적 수"),
+               ("energy", "남은 에너지"), ("amount", "이 파워가 쌓인 수치 (파워 전용)"), ("round", "현재 턴 수"),
+               ("rand", "무작위 범위 (최소~최대)"), ("var", "변수에 저장한 숫자"), ("op", "계산 (값 ○ 값)"),
+               ("played", "사용한 카드 수 (이번 턴/전투 · 종류·태그별) — 연계"), ("summons", "소환수 수"),
+               ("event", "발동 당시 수치 (넘친 양 / 기준치 도달 시)"),
+               ("orbs", "구체 수 / 구체 슬롯 수"), ("orb_passive", "이 구체의 지속 수치 (구체 전용, 밀집 적용)"),
+               ("orb_evoke", "이 구체의 발현 수치 (구체 전용, 밀집 적용)"), ("stars", "별 수"),
+               ("energy_x", "X (이 카드에 쓴 에너지, X 비용 카드 전용)"),
+               ("star_x", "X (이 카드에 쓴 별, 별 X 카드 전용)"), ("osty", "골골이 체력"), ("pet", "동료(골골이형) 체력"),
+               ("card_state", "카드에 저장한 숫자 (한 장마다 따로)")]
+COND_TYPES = [("group", "조건 묶음 · 모두 / 하나 이상"), ("hp_percent", "체력 비율 비교 (%)"),
+              ("pile_count", "덱·더미에 카드가 있음 / 장수 비교"), ("card_identity", "고른 카드가 지정 카드임"),
+              ("cmp", "비교 (값 ○ 값)"), ("chance", "확률 %"), ("has", "파워를 가지고 있음"),
+              ("and", "그리고 (둘 다)"), ("or", "또는 (하나라도)"), ("not", "아니다"),
+              ("osty_alive", "골골이가 살아 있음"), ("pet_alive", "동료(골골이형)가 살아 있음"),
+              ("card_var_has", "카드에 저장한 값이 있음 (그 한 장)"), ("card_is", "카드의 규칙·태그·종류·추가 능력 확인")]
+
+
+# 팔레트에 보이는 이름과 검색 낱말 (Tk 와 Qt 가 같이 쓴다)
+PALETTE_NAMES = {
+    "damage": "피해 주기 · 대상과 횟수 선택",
+    "block": "방어도 얻기", "draw": "카드 뽑기", "energy": "에너지 얻기",
+    "apply_power": "파워 부여하기", "remove_power": "파워 제거하기",
+    "heal": "체력 회복하기", "lose_hp": "방어도를 무시하고 체력 잃기",
+    "pick": "카드 골라서 한 가지 동작 실행",
+    "select_cards": "카드 고르기 · 직접 선택 / 무작위 선택",
+    "select_enemies": "적에게 반복 · 모든 적 / 무작위 적",
+    "pick_each": "카드 골라서 한 장마다 여러 동작 실행",
+    "random_each": "무작위 카드 N장 선택 · 강화 / 버리기 / 소멸 등 여러 동작 실행",
+    "card_number_edit": "카드 수치 바꾸기 · 비용·피해·방어 등",
+    "hand_aura_stat": "더미 지속 보정 · 비용·피해·방어",
+    "aura_card_effect": "조건에 맞는 카드 사용 시 · 저장한 효과 실행",
+    "aura_power_amount": "다른 카드의 파워 부여 중첩 보정",
+    "card_cost_edit": "고른 카드 비용 증가 감소 설정 · 이번 턴 전투 다음 사용까지",
+    "card_damage_edit": "고른 카드 피해량 데미지 증가 감소 설정 · 이번 전투",
+    "picked_action": "고른 카드에 동작 추가 · ‘한 장마다 실행’ 안에서 사용",
+    "pick_transform": "고른 카드를 지정한 카드로 변화시키기",
+    "if": "조건을 만족하면 실행", "if_else": "조건에 따라 두 갈래로 실행",
+    "repeat": "안에 넣은 블록 반복하기",
+}
+
+
+PALETTE_KEYWORDS = {"hand_aura_stat": "손패 뽑을 카드 더미 버린 카드 더미 지속 보정 비용 피해량 방어도 키워드", "card_number_edit": "고른 카드 비용 피해량 방어도 카드 뽑기 장수 에너지 체력 회복 손실 최대 체력 골드 수치 증가 감소 설정 이번 턴 전투 다음 사용 시까지"}

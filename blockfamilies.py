@@ -33,13 +33,8 @@ GROUPS = [
  ("card_model_action", "카드 직접 조작", [("card_exhaust","소멸"),("card_discard","버리기"),("card_remove_combat","전투에서 제거"),("card_autoplay","자동 사용"),("card_transform_to","지정 유형으로 변화")]),
  ("kill_action", "처치", [("kill_creature","생물 처치"),("doom_kill","Doom 처치")]),
  ("visual_effect_action", "이펙트 재생", [("fx","만든 이펙트"),("play_vfx_on_creature","게임 이펙트 직접 지정")]),
- ("sound_action", "소리 재생", [("sfx","소리 경로 지정"),("manosaba_novel_friends_sfx","Manosaba 소설 친구 효과음")]),
- ("animation_action", "동작 재생", [("trigger_creature_anim","생물 지정"),("manosaba_owner_attack_anim","Manosaba 카드 소유자 공격")]),
- ("manosaba_summon_action", "Manosaba 소환", [("manosaba_ema_summon","에마"),("manosaba_novel_summon","소설 속 몬스터")]),
- ("manosaba_firepower_action", "Manosaba 화력", [("manosaba_add_firepower","더하기"),("manosaba_maximize_firepower","최대로 설정")]),
- ("manosaba_blood_orb_action", "혈액 구체", [("manosaba_add_layers","층 추가"),("manosaba_channel_orb_at","위치 지정 · 영창"),("manosaba_evoke_blood_orb","발현")]),
- ("manosaba_pet_ai_action", "동료 적 행동", [("manosaba_pet_ai_assign","행동 슬롯 지정"),("manosaba_pet_ai_advance","다음 행동 선택")]),
- ("manosaba_source_action", "Manosaba 출처 설정", [("manosaba_set_partner","동료"),("manosaba_set_applier","부여자"),("manosaba_set_target","대상"),("manosaba_set_source_card","출처 카드"),("manosaba_set_upgraded","강화 상태")]),
+ ("sound_action", "소리 재생", [("sfx","소리 경로 지정")]),
+ ("animation_action", "동작 재생", [("trigger_creature_anim","생물 지정")]),
 ]
 FAMILIES = {op: (title, variants) for op,title,variants in GROUPS}
 LEGACY = {old: family for family,_,variants in GROUPS for old,_ in variants}
@@ -135,7 +130,7 @@ def switch(b,new_mode,specs):
 
 
 def modes(b,owner=None):
-    card_only={"card_attack","manosaba_ema_summon","manosaba_novel_summon","manosaba_ignite","manosaba_attach_combust","manosaba_gun_attack","manosaba_owner_attack_anim"}
+    card_only={"card_attack"}
     return [(op,label) for op,label in FAMILIES[b["op"]][1]
             if (op not in card_only or owner in (None,"card")) and (op!="orb_grow" or owner in (None,"orb"))]
 
