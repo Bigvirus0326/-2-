@@ -386,13 +386,18 @@ def _fix_item(kind, raw, ctx, patch):
     raw = copy.deepcopy(raw)
     name = raw.get("name_ko") or raw.get("name_en") or raw.get("id") or "?"
     where = f"{NOUN[kind]} '{name}'"
-    base = FACTORY[kind](raw.get("id") or "x")
+    ident = _fix_id(raw.get("id") or name, where, patch)
+    base = FACTORY[kind](ident or "x")
+    # 고치는 파워는 지금 내용에서 시작한다: 답에서 빠진 칸은 그대로 남는다 (카드·유물·물약은 새 항목으로 만든다)
+    old = next((p for p in ctx["project_view"].get("powers", []) if p["id"] == ident), None) if kind == "power" else None
+    if old:
+        base = copy.deepcopy(old)
     allowed = set(base) | EXTRA_KEYS
     unknown = [k for k in raw if k not in allowed and k not in ("kind", "category", "item_type", "image")]
     if unknown:
         patch.fixes.append(f"{where}: 모르는 칸 무시 — {', '.join(unknown)}")
     it = base
-    it["id"] = _fix_id(raw.get("id") or name, where, patch)
+    it["id"] = ident
     for k, v in raw.items():
         if k in allowed and k not in ("id", "effects", "modifiers", "image"):
             it[k] = v
@@ -428,7 +433,7 @@ def _fix_item(kind, raw, ctx, patch):
         it["gtags"] = [t for t in (raw.get("gtags") or []) if t in ctx["tags"]]
         if len(it["gtags"]) != len(raw.get("gtags") or []):
             patch.errors.append(f"{where}: gtags 에 없는 태그가 있습니다 (있는 태그: {', '.join(ctx['tags']) or '없음'}).")
-    if kind == "power":
+    if kind == "power" and (old is None or "modifiers" in raw):
         mods = []
         for i, m in enumerate(raw.get("modifiers") or []):
             w = f"{where} 상시 효과 {i + 1}"
@@ -444,7 +449,8 @@ def _fix_item(kind, raw, ctx, patch):
                 nm["ref"] = _power_ref(nm["ref"], ctx, w, "ref", patch)
             mods.append(nm)
         it["modifiers"] = mods
-    it["effects"] = _fix_effects(raw.get("effects"), kind, ctx, where, patch)
+    if old is None or "effects" in raw:
+        it["effects"] = _fix_effects(raw.get("effects"), kind, ctx, where, patch)
     if not it["effects"] and not it.get("modifiers") and kind != "power":
         patch.fixes.append(f"{where}: 효과가 없습니다.")
     for lang in ("ko", "en"):
@@ -486,14 +492,16 @@ def read_patch(text, project):
         ident = _fix_id(raw.get("id"), label, patch)
         if not ident:
             patch.errors.append(f"{label}에 ID가 필요합니다.")
-        item = factory(ident)
+        old = next((x for x in g.get(group, []) if x["id"] == ident), None)
+        item = copy.deepcopy(old) if old else factory(ident)   # 고치는 기믹은 지금 내용에서 시작 (빠진 칸은 그대로)
         for key in item.keys() & raw.keys() - {"id", "image"}:
             if type(raw[key]) is type(item[key]):
                 item[key] = copy.deepcopy(raw[key])
             else:
                 patch.errors.append(f"{label} {ident}: {key} 값 형식을 확인하세요.")
         prepared[id(raw)] = item
-        view.setdefault("gimmicks", {}).setdefault(group, []).append(item)
+        lst = view.setdefault("gimmicks", {}).setdefault(group, [])
+        lst[:] = [x for x in lst if x["id"] != ident] + [item]
     ctx.update(project_view=view, tags=[t["id"] for t in G.tags(view)],
                summons={t["id"] for t in view["gimmicks"].get("summons", [])} if "gimmicks" in view else set())
     seen = {}

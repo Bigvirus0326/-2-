@@ -5,7 +5,7 @@
 """
 import os
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton,
@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComb
                                QWidget, QButtonGroup)
 
 import cardframe as CF
+from cardlibqt import CARD_MIME
+from itemtabqt import _CardRowDelegate
 import modgen as M
 import preview_qt as PQ
 import qtkit as Q
@@ -40,6 +42,120 @@ def _set_combo(combo, value):
     Q.set_combo_value(combo, value)
 
 
+def _set_drop_hover(widget, cls_name, on):
+    """라이브러리 항목이 끌려 들어왔을 때 놓을 수 있는 목록에 강조 테두리를 보인다."""
+    if getattr(widget, "_drop_hover", False) == on:
+        return
+    widget._drop_hover = on
+    widget.setStyleSheet(f"{cls_name} {{ border: 2px solid {Q.C['accent']}; }}" if on else "")
+
+
+class _DeckTable(QTableWidget):
+    """시작 덱 목록: 카드 라이브러리의 카드를 끌어 놓으면 dropped 신호를 보낸다."""
+    dropped = Signal()
+
+    def dragEnterEvent(self, event):
+        _set_drop_hover(self, "QTableWidget", self._take(event))
+
+    def dragMoveEvent(self, event):
+        self._take(event)
+
+    def dragLeaveEvent(self, event):
+        _set_drop_hover(self, "QTableWidget", False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        _set_drop_hover(self, "QTableWidget", False)
+        if self._take(event):
+            self.dropped.emit()
+
+    def _take(self, event):
+        if event.mimeData().hasFormat(CARD_MIME):
+            event.acceptProposedAction()
+            return True
+        event.ignore()
+        return False
+
+
+class _RelicList(QListWidget):
+    """시작 유물 목록: 라이브러리의 항목을 끌어 놓으면 dropped 신호를 보낸다."""
+    dropped = Signal()
+
+    def dragEnterEvent(self, event):
+        _set_drop_hover(self, "QListWidget", self._take(event))
+
+    def dragMoveEvent(self, event):
+        self._take(event)
+
+    def dragLeaveEvent(self, event):
+        _set_drop_hover(self, "QListWidget", False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        _set_drop_hover(self, "QListWidget", False)
+        if self._take(event):
+            self.dropped.emit()
+
+    def _take(self, event):
+        if event.mimeData().hasFormat(CARD_MIME):
+            event.acceptProposedAction()
+            return True
+        event.ignore()
+        return False
+
+
+class _DeckRowDelegate(_CardRowDelegate):
+    """시작 덱 한 줄: 카드 목록과 같은 모양, 오른쪽 끝에 장수. 원작·없는 카드는 이름 글만 보인다."""
+
+    def _entry(self, index):
+        deck = self.tab.ch().get("deck", [])
+        return deck[index.row()] if 0 <= index.row() < len(deck) else None
+
+    def _card_at(self, index):
+        entry = self._entry(index)
+        if entry is None:
+            return None
+        card = next((c for c in self.tab.project["cards"] if c["id"] == entry["card"]), None)
+        if card is None:                          # 원작·원래 코드 카드: 목록 글을 이름으로 쓴다
+            label = index.data(Qt.ItemDataRole.DisplayRole) or entry["card"]
+            return {"name_ko": label, "no_cost": True, "type": "", "rarity": ""}
+        return card
+
+    def _extra_text(self, index):
+        entry = self._entry(index)
+        return f"× {entry['count']}" if entry else ""
+
+
+class _HeightGrip(QWidget):
+    """목록 바로 아래의 손잡이: 끌면 목록(target)의 높이가 바뀐다. 고정 높이라 아래 칸이 목록을 눌러 줄이지 않는다."""
+
+    def __init__(self, target, height):
+        super().__init__()
+        self.target = target
+        self._drag = None
+        target.setFixedHeight(height)
+        self.setFixedHeight(10)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("위아래로 끌어서 목록 높이를 바꿉니다")
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(Q.C["line2"]))
+        painter.drawRoundedRect(self.width() // 2 - 24, 3, 48, 4, 2, 2)
+
+    def mousePressEvent(self, event):
+        self._drag = (event.globalPosition().y(), self.target.height())
+
+    def mouseMoveEvent(self, event):
+        if self._drag:
+            y0, h0 = self._drag
+            self.target.setFixedHeight(max(60, int(h0 + event.globalPosition().y() - y0)))
+
+    def mouseReleaseEvent(self, _event):
+        self._drag = None
+
+
 class CharacterPanelQt(QWidget):
     def __init__(self, project, on_change=None, ui=1.0, parent=None):
         super().__init__(parent)
@@ -52,6 +168,8 @@ class CharacterPanelQt(QWidget):
         self._fields = {}
         self._mine = []            # 가져온 캐릭터일 때 숨기는 칸
         self._gold = []            # 가져온 캐릭터일 때만 보이는 칸
+        self.card_drop_fn = None   # 라이브러리에서 끌어 놓은 카드를 가져온다 (app 이 넣는다, done(카드 id) 로 알림)
+        self.relic_drop_fn = None  # 라이브러리에서 끌어 놓은 유물을 가져온다 (app 이 넣는다, done(유물 id) 로 알림)
         self.motion_lists = {}
         self.motion_times = {}
         self._motion_token = 0     # 모션 재생을 멈추는 번호 (바뀌면 이전 재생은 멈춘다)
@@ -231,12 +349,21 @@ class CharacterPanelQt(QWidget):
     def _deck_box(self):
         box = QGroupBox("시작 덱")
         layout = QVBoxLayout(box)
-        self.deck_table = QTableWidget(0, 2)
-        self.deck_table.setHorizontalHeaderLabels(["카드", "장수"])
+        self.deck_table = _DeckTable(0, 1)
+        self.deck_table.horizontalHeader().setVisible(False)          # 카드 목록처럼 머리글 없이 줄만 보인다
+        self.deck_table.horizontalHeader().setStretchLastSection(True)
+        self.deck_table.verticalHeader().setVisible(False)
+        self.deck_table.verticalHeader().setDefaultSectionSize(_DeckRowDelegate.ROW_H)
+        self.deck_table.setItemDelegate(_DeckRowDelegate(self))
+        self.deck_table.setShowGrid(False)
         self.deck_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.deck_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.deck_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.deck_table.setAcceptDrops(True)
+        self.deck_table.setToolTip("카드 라이브러리의 카드를 여기로 끌어 놓으면 한 장 들어갑니다")
+        self.deck_table.dropped.connect(self.deck_drop)
         layout.addWidget(self.deck_table)
+        layout.addWidget(_HeightGrip(self.deck_table, 150))
         row = QHBoxLayout()
         self.deck_card = QComboBox()
         self.deck_card.setMinimumWidth(260)
@@ -263,9 +390,13 @@ class CharacterPanelQt(QWidget):
         row.addWidget(self.relic_combo, 1)
         row.addWidget(add)
         layout.addLayout(row)
-        self.relic_list = QListWidget()
+        self.relic_list = _RelicList()
         self.relic_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.relic_list.setAcceptDrops(True)
+        self.relic_list.setToolTip("라이브러리의 유물을 여기로 끌어 놓으면 시작 유물에 들어갑니다")
+        self.relic_list.dropped.connect(self.relic_drop)
         layout.addWidget(self.relic_list)
+        layout.addWidget(_HeightGrip(self.relic_list, 120))
         remove = QPushButton("선택 삭제")
         remove.clicked.connect(self.relic_remove)
         layout.addWidget(remove)
@@ -579,19 +710,24 @@ class CharacterPanelQt(QWidget):
             else:
                 label = f"{names.get(d['card'], '⚠ 없음')} ({d['card']})"
             self.deck_table.setItem(row, 0, QTableWidgetItem(label))
-            self.deck_table.setItem(row, 1, QTableWidgetItem(str(d["count"])))
             total += int(d["count"])
         self.deck_total.setText(f"총 {total}장")
 
     def deck_add(self):
         cid = self.deck_card.currentData()
-        if not cid:
-            return
-        n = max(1, int(self.deck_count.value()))
+        if cid:
+            self._put_in_deck(cid, max(1, int(self.deck_count.value())))
+
+    def deck_drop(self):
+        """카드 라이브러리에서 끌어 놓은 카드: 가져온 뒤 덱에 한 장 넣는다."""
+        if self.card_drop_fn is not None:
+            self.card_drop_fn(lambda cid: self._put_in_deck(cid, 1, add=True))
+
+    def _put_in_deck(self, cid, n, add=False):
         deck = self.ch().setdefault("deck", [])
         for d in deck:
             if d["card"] == cid:
-                d["count"] = n
+                d["count"] = d["count"] + n if add else n
                 break
         else:
             deck.append({"card": cid, "count": n})
@@ -624,8 +760,15 @@ class CharacterPanelQt(QWidget):
 
     def relic_add(self):
         relic_id = self.relic_combo.currentData()
-        if not relic_id:
-            return
+        if relic_id:
+            self._put_relic(relic_id)
+
+    def relic_drop(self):
+        """라이브러리에서 끌어 놓은 유물: 가져온 뒤 시작 유물에 넣는다."""
+        if self.relic_drop_fn is not None:
+            self.relic_drop_fn(self._put_relic)
+
+    def _put_relic(self, relic_id):
         ids = self.ch().setdefault("relics", [])
         if relic_id not in ids:
             ids.append(relic_id)

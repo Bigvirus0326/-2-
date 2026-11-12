@@ -41,6 +41,30 @@ INT_RANGE = (-9999, 9999)     # 프로젝트 값을 위젯이 고쳐 쓰지 않�
 PREVIEW_W, PREVIEW_H = 320, 460
 
 
+def item_preview(kind, project, item, lang, upgraded, views=None, stacks=3):
+    """카드 탭 미리보기와 같은 그림 (PREVIEW_W × PREVIEW_H). 게임 화면 모드면 게임 틀로 합성한다.
+    돌려 주는 값: (그림, 메모 글)."""
+    note = ""
+    if views is not None and views.mode == "game":
+        img, err = views.image(kind, item, lang, upgraded, views.stacks)
+        if img is not None:
+            pixmap = views.pixmap(img).scaled(PREVIEW_W, PREVIEW_H, Qt.AspectRatioMode.KeepAspectRatio,
+                                              Qt.TransformationMode.SmoothTransformation)
+            return pixmap, f"게임 파일({views.version()})의 실제 틀·글꼴로 합성한 화면입니다."
+        note = f"게임 화면을 만들 수 없어 간단히 표시합니다: {err}"
+    image = QImage(PREVIEW_W, PREVIEW_H, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#121318"))
+    painter = QPainter(image)
+    try:
+        PQ.render_item(painter, project, kind, item, 10, 10, 1.0, lang, upgraded=upgraded, stacks=stacks)
+    except Exception as e:  # noqa: BLE001 - 미리보기가 실패해도 편집은 계속된다
+        painter.setPen(QColor("#ff6666"))
+        painter.drawText(image.rect(), int(Qt.AlignmentFlag.AlignCenter), f"미리보기 오류:\n{e}")
+    finally:
+        painter.end()
+    return QPixmap.fromImage(image), note
+
+
 # ---------------------------------------------------------------------------
 # 화면과 무관한 규칙 (Tk 앱의 App.all_ids · rename_ref 와 같다)
 # ---------------------------------------------------------------------------
@@ -244,11 +268,20 @@ class _CardRowDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         return QSize(option.rect.width(), self.ROW_H)
 
-    def paint(self, painter, option, index):
+    def _card_at(self, index):
+        """줄이 보여 줄 카드 (None 이면 기본 그림)."""
         i = index.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(i, int) or not (0 <= i < len(self.tab.items)):
+        return self.tab.items[i] if isinstance(i, int) and 0 <= i < len(self.tab.items) else None
+
+    def _extra_text(self, index):
+        """줄 오른쪽 끝에 붙일 글 (기본은 없음)."""
+        return ""
+
+    def paint(self, painter, option, index):
+        card = self._card_at(index)
+        if card is None:
             return super().paint(painter, option, index)
-        card = self.tab.items[i]
+        extra = self._extra_text(index)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         rect = option.rect
         ink = QColor(option.palette.highlightedText().color() if selected else Q.C["text"])
@@ -282,9 +315,14 @@ class _CardRowDelegate(QStyledItemDelegate):
         painter.drawText(QRect(tx, rect.top(), name_w + 4, text_h), int(Qt.AlignmentFlag.AlignVCenter), name)
         font.setBold(False)
         painter.setFont(font)
+        extra_w = metrics.horizontalAdvance(extra) + 12 if extra else 0
         painter.setPen(QColor(Q.C["muted"]) if not selected else ink)
-        painter.drawText(QRect(tx + name_w + 12, rect.top(), max(0, rect.right() - tx - name_w - 20), text_h),
+        painter.drawText(QRect(tx + name_w + 12, rect.top(), max(0, rect.right() - tx - name_w - 20 - extra_w), text_h),
                          int(Qt.AlignmentFlag.AlignVCenter), kind)
+        if extra:
+            painter.setPen(ink)
+            painter.drawText(QRect(rect.right() - extra_w - 4, rect.top(), extra_w, text_h),
+                             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight), extra)
         rarity = card.get("rarity")
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(PV.RARITY_COLORS.get(rarity, "#5d5d5d")))
@@ -304,11 +342,15 @@ class _RelicRowDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         return QSize(option.rect.width(), self.ROW_H)
 
-    def paint(self, painter, option, index):
+    def _item_at(self, index):
+        """줄이 보여 줄 유물 (None 이면 기본 글)."""
         i = index.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(i, int) or not (0 <= i < len(self.tab.items)):
+        return self.tab.items[i] if isinstance(i, int) and 0 <= i < len(self.tab.items) else None
+
+    def paint(self, painter, option, index):
+        relic = self._item_at(index)
+        if relic is None:
             return super().paint(painter, option, index)
-        relic = self.tab.items[i]
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         rect = option.rect
         ink = QColor(option.palette.highlightedText().color() if selected else Q.C["text"])
@@ -501,7 +543,16 @@ class ItemTabQt(FieldsMixin, QWidget):
                 row += 2
         self._image(g, row)
         row += 1
-        self._text(g, row, "고급: 추가 C# 코드", "extra_code", height=6, mono=True)
+        edit = self._text(g, row, "고급: 추가 C# 코드", "extra_code", height=6, mono=True)
+        self._code_widgets = [g.itemAtPosition(row, 0).widget(), edit]
+        self.apply_code_visibility()
+
+    def apply_code_visibility(self):
+        """보기 › C# 코드 보기가 꺼져 있으면 추가 C# 코드 칸과 원본 코드 버튼을 숨긴다 (저장된 값은 그대로)."""
+        for w in getattr(self, "_code_widgets", []):
+            w.setVisible(not B.HIDE_CODE)
+        if getattr(self, "clone", None) is not None:
+            self.clone.code_btn.setVisible(not B.HIDE_CODE)
 
     # ---- 목록 ----
     @property
@@ -584,11 +635,17 @@ class ItemTabQt(FieldsMixin, QWidget):
                 return
 
     # ---- 편집 ----
+    def _locked(self, it):
+        """원작에서 가져온 항목은 고치지 못한다 (복제하면 복사본은 고칠 수 있다)."""
+        return bool((it.get("clone") or {}).get("game_original"))
+
     def _load_item(self, idx):
         self.cur = idx
         it = self.items[idx]
-        self.editor_title.setText(it.get("name_ko") or it.get("id") or self.noun + " 편집")
-        self.form.setEnabled(True)
+        locked = self._locked(it)
+        self.editor_title.setText((it.get("name_ko") or it.get("id") or self.noun + " 편집")
+                                  + ("  ·  원작 (읽기 전용)" if locked else ""))
+        self.form.setEnabled(not locked)
         self._loading = True
         try:
             self.load_extra(it)              # 고를 목록을 먼저 채운 뒤에 값을 넣는다
@@ -730,30 +787,10 @@ class ItemTabQt(FieldsMixin, QWidget):
             self.preview.clear()
             self.preview_note.setText("")
             return
-        if self.views is not None and self.views.mode == "game":
-            img, err = self.views.image(self.kind, self.items[self.cur], self.preview_lang,
-                                        self.upgraded.isChecked(), self.views.stacks)
-            if img is not None:
-                pixmap = self.views.pixmap(img).scaled(PREVIEW_W, PREVIEW_H, Qt.AspectRatioMode.KeepAspectRatio,
-                                                       Qt.TransformationMode.SmoothTransformation)
-                self.preview.setPixmap(pixmap)
-                self.preview_note.setText(f"게임 파일({self.views.version()})의 실제 틀·글꼴로 합성한 화면입니다.")
-                return
-            self.preview_note.setText(f"게임 화면을 만들 수 없어 간단히 표시합니다: {err}")
-        else:
-            self.preview_note.setText("")
-        image = QImage(PREVIEW_W, PREVIEW_H, QImage.Format.Format_ARGB32)
-        image.fill(QColor("#121318"))
-        painter = QPainter(image)
-        try:
-            PQ.render_item(painter, self.project, self.kind, self.items[self.cur], 10, 10, 1.0,
-                           self.preview_lang, upgraded=self.upgraded.isChecked(), stacks=self._stacks())
-        except Exception as e:  # noqa: BLE001 - 미리보기가 실패해도 편집은 계속된다
-            painter.setPen(QColor("#ff6666"))
-            painter.drawText(image.rect(), int(Qt.AlignmentFlag.AlignCenter), f"미리보기 오류:\n{e}")
-        finally:
-            painter.end()
-        self.preview.setPixmap(QPixmap.fromImage(image))
+        pixmap, note = item_preview(self.kind, self.project, self.items[self.cur], self.preview_lang,
+                                    self.upgraded.isChecked(), self.views, self._stacks())
+        self.preview_note.setText(note)
+        self.preview.setPixmap(pixmap)
 
     def set_views(self, views):
         """게임 화면 설정을 붙인다: 모드·스택 수가 바뀌면 이 탭의 그림도 다시 그린다."""
@@ -825,6 +862,8 @@ class ItemTabQt(FieldsMixin, QWidget):
         it = copy.deepcopy(self.items[self.cur])
         it["id"] = unique_id(self.project, it["id"])
         it["name_ko"] = (it.get("name_ko") or "") + " (복사)"
+        if it.get("clone"):
+            it["clone"].pop("game_original", None)     # 원작 카드의 복사본은 고칠 수 있다
         pos = self.cur + 1
         self.items.insert(pos, it)
         self._leave_search()
@@ -839,7 +878,7 @@ class ItemTabQt(FieldsMixin, QWidget):
         return [self.cur] if self.cur is not None else []
 
     def bulk_edit(self):
-        picked = self.selected_indices()
+        picked = [i for i in self.selected_indices() if not self._locked(self.items[i])]
         if picked:
             BulkEditDialogQt(self, picked, self).exec()
 
@@ -1004,8 +1043,8 @@ class CardTabQt(ItemTabQt):
 
     # ---- 목록 칸 (카드 전용 캐릭터 고르기) ----
     def build_list_filters(self, col):
-        library = _small_button("카드 라이브러리…", lambda: self.library_fn() if self.library_fn else None)
-        library.setToolTip("원작·참고 프로젝트에서 카드를 골라 가져오거나 이 카드에 적용합니다.")
+        library = _small_button("라이브러리…", lambda: self.library_fn() if self.library_fn else None)
+        library.setToolTip("원작·참고 프로젝트에서 카드·유물·물약·파워·키워드를 골라 가져오거나 이 카드에 적용합니다.")
         col.addWidget(library)
         self._pool_filter = QComboBox()
         self._pool_filter.currentIndexChanged.connect(lambda _i: self.refresh_list(self.cur))

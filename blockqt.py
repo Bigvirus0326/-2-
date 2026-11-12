@@ -119,6 +119,10 @@ def _value_text(editor, b, key):
     if label is not None:
         return label
     text = str(value if value is not None else "")
+    if B.HIDE_CODE and text and kind == "source":   # 코드 대신 줄 수만 보인다 (칸을 누르면 볼 수 있음)
+        return f"원본 코드 {sum(1 for line in text.splitlines() if line.strip())}줄"
+    if B.HIDE_CODE and text and kind == "code":
+        return B.friendly_code(text, "원본 식")
     return text if text else "(비어 있음)"
 
 
@@ -751,6 +755,7 @@ class BlockEditorQt(QDialog):
         self.code_view.setStyleSheet("font-family: Consolas;")
         self.code_view.setMaximumHeight(200)
         self.tabs.addTab(self.code_view, "C# 코드 (자동)")
+        self.tabs.setTabVisible(self.tabs.indexOf(self.code_view), not B.HIDE_CODE)   # 기본은 숨김 (보기 › C# 코드 보기)
         desc_page = QWidget()
         dc = QVBoxLayout(desc_page)
         self.auto = QCheckBox("설명은 블록에서 자동으로 만들기")

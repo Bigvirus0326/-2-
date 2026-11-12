@@ -5,10 +5,10 @@ DockWorkspace: 탭 끌어서 분리·결합, 숨기기, 배치 저장을 QDockWi
 import base64
 import html
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPixmap
-from PySide6.QtWidgets import (QDialog, QDockWidget, QFrame, QMainWindow, QPlainTextEdit, QRubberBand, QScrollArea,
-                               QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPalette, QPixmap
+from PySide6.QtWidgets import (QApplication, QDialog, QDockWidget, QFrame, QMainWindow, QPlainTextEdit, QRubberBand,
+                               QScrollArea, QTabBar, QTabWidget, QVBoxLayout, QWidget)
 
 # 색. 바탕·면·글자는 따뜻한 무채색 (카드 게임의 종이·잉크 느낌), 강조는 불씨색 한 가지만 쓴다.
 # 긴 작업 화면에서 눈이 편하도록 채도는 아주 낮게 둔다.
@@ -28,6 +28,16 @@ FONT = "Malgun Gothic"
 def apply_theme(app, size=10):
     """앱 전체의 글꼴과 평면 스타일 (Qt 스타일시트)."""
     app.setStyle("Fusion")
+    # 팔레트를 직접 정한다. 없으면 Windows 다크 모드의 어두운 바탕이 남고, 글자만 어둡게 칠해져 안 보인다.
+    pal = QPalette()
+    for role, color in ((QPalette.ColorRole.Window, C["bg"]), (QPalette.ColorRole.WindowText, C["text"]),
+                        (QPalette.ColorRole.Base, C["surface"]), (QPalette.ColorRole.AlternateBase, C["bg"]),
+                        (QPalette.ColorRole.Text, C["text"]), (QPalette.ColorRole.Button, C["surface"]),
+                        (QPalette.ColorRole.ButtonText, C["text"]), (QPalette.ColorRole.PlaceholderText, C["muted"]),
+                        (QPalette.ColorRole.Highlight, C["accent_soft"]), (QPalette.ColorRole.HighlightedText, C["text"]),
+                        (QPalette.ColorRole.ToolTipBase, C["console"]), (QPalette.ColorRole.ToolTipText, C["console_fg"])):
+        pal.setColor(role, QColor(color))
+    app.setPalette(pal)
     app.setFont(QFont(FONT, size))
     app.setStyleSheet(f"""
         QWidget {{ color: {C['text']}; }}
@@ -151,6 +161,61 @@ class TabHost(QTabWidget):
             self.setTabVisible(i, show)
 
 
+def _tab_bar_at(workspace, pos):
+    """전역 좌표 pos 밑에 있는 작업 창의 탭 줄 (없으면 None). 떨어져 나와 끌리는 창은 마우스를 통과시켜 무시한다."""
+    widget = QApplication.widgetAt(pos)
+    while widget is not None and widget.window() is workspace:
+        if isinstance(widget, QTabBar) and widget.parentWidget() is workspace:
+            return widget
+        widget = widget.parentWidget()
+    return None
+
+
+class _DockTabWatch(QObject):
+    """작업 창의 탭 줄에서 탭을 끌면 그 탭이 바로 떨어져 나와 커서를 따라간다.
+    놓으면 탭 줄 위면 그 탭 옆에, 메인 창 위면 첫 탭 옆에 다시 붙고, 밖이면 떨어진 채로 둔다."""
+
+    def __init__(self, workspace):
+        super().__init__(workspace)
+        self.workspace = workspace
+        self._press = None      # (누른 탭의 제목, 누른 자리, 누른 탭의 자리)
+        self._dock = None       # 떨어져 나와 끌리는 창
+        self._grab = QPoint()   # 창 안에서 커서가 잡은 자리
+
+    def eventFilter(self, bar, event):
+        if not isinstance(bar, QTabBar) or bar.parentWidget() is not self.workspace:
+            return False
+        kind = event.type()
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            index = bar.tabAt(pos)
+            self._press = (bar.tabText(index), pos, bar.tabRect(index)) if index >= 0 else None
+            return False
+        if kind == QEvent.Type.MouseMove:
+            if self._dock is not None:
+                self.workspace.move_floating(self._dock, QCursor.pos() - self._grab)
+                return True
+            if self._press is not None:
+                title, press, rect = self._press
+                pos = event.position().toPoint()
+                if (pos - press).manhattanLength() >= QApplication.startDragDistance() and not bar.rect().contains(pos):
+                    self._press = None
+                    dock = self.workspace.dock_by_title(title)
+                    if dock is not None:
+                        self._grab = QPoint(min(max(press.x() - rect.left(), 16), 160), 12)
+                        self._dock = dock
+                        self.workspace.detach_dock(dock, QCursor.pos() - self._grab)
+                        return True
+            return False
+        if kind == QEvent.Type.MouseButtonRelease:
+            self._press = None
+            if self._dock is not None:
+                dock, self._dock = self._dock, None
+                self.workspace.attach_dock(dock)
+                return True
+        return False
+
+
 class DockWorkspace(QMainWindow):
     """작업 탭을 도킹 창으로 묶는다: 탭을 끌어 옮기거나, 밖으로 떼어 내거나, 숨길 수 있다.
 
@@ -164,21 +229,70 @@ class DockWorkspace(QMainWindow):
         self.setTabPosition(Qt.DockWidgetArea.AllDockWidgetAreas, QTabWidget.TabPosition.North)
         self._docks = {}   # 페이지 위젯 -> QDockWidget
         self._first = None
+        self._tab_watch = _DockTabWatch(self)
 
     def add_page(self, page: QWidget, title: str) -> QWidget:
         dock = QDockWidget(title, self)
         dock.setObjectName(title)
-        dock.setWidget(page)
+        if isinstance(page, ScrollPage):
+            dock.setWidget(page)
+        else:    # 넓은 페이지가 창 전체를 화면보다 넓히지 않게 스크롤 칸에 담는다 (가장자리에 붙일 자리가 남는다)
+            wrap = ScrollPage()
+            wrap.set_content(page)
+            dock.setWidget(wrap)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         if self._first is None:
             self._first = dock
         else:
             self.tabifyDockWidget(self._first, dock)
         self._docks[page] = dock
+        self._watch_tab_bars()
         return page
 
     def dock_of(self, page: QWidget) -> QDockWidget:
         return self._docks[page]
+
+    def _watch_tab_bars(self):
+        """이 창의 탭 줄마다 끌기 감시를 한 번만 붙인다 (탭 줄은 탭이 묶일 때 생긴다)."""
+        for bar in self.findChildren(QTabBar):
+            if bar.parentWidget() is self and not bar.property("dock_watch"):
+                bar.setProperty("dock_watch", True)
+                bar.installEventFilter(self._tab_watch)
+
+    def dock_by_title(self, title):
+        return next((d for d in self._docks.values() if d.windowTitle() == title), None)
+
+    def detach_dock(self, dock, top_left):
+        """탭을 떼어 떨어진 창으로 만든다. 끄는 동안 창은 마우스를 통과시켜 탭 줄을 가리지 않는다."""
+        dock.setFloating(True)
+        dock.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        dock.move(top_left)
+        dock.show()
+
+    def move_floating(self, dock, top_left):
+        dock.move(top_left)
+
+    def attach_dock(self, dock):
+        """놓은 자리에 따라 다시 붙인다. 탭 줄 위면 그 탭 옆, 메인 창 위면 첫 탭 옆, 그 밖이면 떨어진 채로 둔다."""
+        dock.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        pos = QCursor.pos()
+        bar = _tab_bar_at(self, pos)
+        if bar is None and not self.frameGeometry().contains(pos):
+            return
+        target = None
+        if bar is not None:
+            index = bar.tabAt(bar.mapFromGlobal(pos))
+            target = self.dock_by_title(bar.tabText(index)) if index >= 0 else self._first
+        else:
+            target = self._first
+        if target is None or target is dock:          # 자기 탭 위에 놓았으면 다른 탭 옆으로
+            target = next((d for d in self._docks.values() if d is not dock and not d.isFloating() and not d.isHidden()), None)
+        if target is None:
+            return
+        dock.setFloating(False)
+        self.tabifyDockWidget(target, dock)
+        dock.raise_()
+        self._watch_tab_bars()
 
     def select(self, page: QWidget):
         self._docks[page].raise_()
@@ -209,6 +323,7 @@ class DockWorkspace(QMainWindow):
         for dock in self._docks.values():
             if dock is not self._first and dock not in self.tabifiedDockWidgets(self._first):
                 self.tabifyDockWidget(self._first, dock)
+        self._watch_tab_bars()
 
     def reset_layout(self):
         """배치 초기화: 모든 탭을 보이게 하고 한 탭 묶음으로 모은다."""

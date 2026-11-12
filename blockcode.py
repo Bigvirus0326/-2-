@@ -10,7 +10,26 @@
 from __future__ import annotations
 
 import copy
+import re
 import blockfamilies as F
+
+# 화면에서 C# 코드를 숨긴다 (앱의 '보기 › C# 코드 보기' 가 꺼져 있으면 True). 생성되는 코드에는 영향이 없다.
+HIDE_CODE = False
+_FRIENDLY = {"cardPlay.Target": "카드의 대상", "target": "대상", "Owner": "나", "Owner.Player": "나", "Owner.Creature": "나",
+             "Owner?.Creature": "나", "Me": "나", "this": "이 항목", "cardPlay.Card": "사용한 카드", "cardPlay": "카드 사용",
+             "choiceContext": "현재 선택", "null": "없음", "true": "예", "false": "아니오", "Amount": "이 파워 수치"}
+
+
+def friendly_code(code, fallback="원본 코드"):
+    """화면용: 자주 쓰는 C# 식은 말로, 숫자·글자는 그대로, 나머지는 fallback."""
+    t = " ".join(str(code or "").split())
+    if t in _FRIENDLY:
+        return _FRIENDLY[t]
+    if re.fullmatch(r"-?\d+(?:\.\d+)?[mMfF]?", t):
+        return t.rstrip("mMfF")
+    if re.fullmatch(r'"[^"]*"', t):
+        return t
+    return fallback
 
 # ---------------------------------------------------------------------------
 # 블록 정의 (팔레트와 화면이 같이 쓴다)
@@ -179,6 +198,9 @@ SPECS = {
     "wait": {"cat": "flow", "ko": "{duration}초 기다리기", "args": {"duration": ("value", {"t": "num", "v": 1})}},
     "wait_scaled": {"cat": "flow", "ko": "게임 속도에 맞춰 기다리기 · 최소 {minimum} · 최대 {maximum}",
                     "args": {"minimum": ("code", "0.1f"), "maximum": ("code", "0.25f")}},
+    "early_return": {"cat": "flow", "ko": "여기서 끝내기 (아래 행동을 하지 않음)", "args": {}},
+    "loop_break": {"cat": "flow", "ko": "반복 그만하기", "args": {}},
+    "loop_continue": {"cat": "flow", "ko": "이번 반복 건너뛰기", "args": {}},
     "trigger_creature_anim": {"cat": "action", "ko": "생물 {creature} 동작 {animation} 재생 · 지연 {delay}",
                                "args": {"creature": ("code", "target"), "animation": ("code", '"Attack"'), "delay": ("code", "0.15f")}},
     "play_vfx_on_creature": {"cat": "fx", "ko": "생물 {creature}에 이펙트 {vfx} 재생",
@@ -344,7 +366,7 @@ PALETTE = [
                "card_finalize_upgrade_internal", "card_transform_to", "keyword_this", "keyword_cards",
                "card_state_edit", "card_var_new", "card_var_remove", "card_number_edit", "hand_aura_stat", "aura_power_amount", "aura_card_effect", "card_do",
                "card_ref_keyword", "card_enchant", "card_enchant_clear", "add_card_pos", "draw_bottom"]),
-    ("flow", ["shared_call", "if", "if_else", "repeat", "each_enemy", "random_enemy", "filtered_players", "wait", "wait_scaled"]),
+    ("flow", ["shared_call", "if", "if_else", "repeat", "each_enemy", "random_enemy", "filtered_players", "wait", "wait_scaled", "early_return", "loop_break", "loop_continue"]),
     ("var", ["edit_var"]),
     ("gimmick", ["pay", "summon", "command", "unsummon", "choice", "pick", "random_transform", "pick_transform", "pick_each", "random_each", "picked_action", "card_tag", "delayed"]),
     ("class", ["channel", "orb_channel_model", "orb_channel_type", "orb_passive_model", "evoke", "orb_passive_all", "orb_slots", "orb_slots_to", "orb_grow", "stars", "forge",
@@ -835,7 +857,7 @@ def value_label(v, project=None, lang="ko", card=False):
             num += f"(+{_fmt(up)})"
         return f"{v.get('name')}={num}" if lang == "ko" else num
     if t == "src":
-        return "직접 수식 " + _short_code(v.get("code"))
+        return friendly_code(v.get("code"), "원본 수식") if HIDE_CODE else "직접 수식 " + _short_code(v.get("code"))
     return "?"
 
 
@@ -950,6 +972,11 @@ def cond_label(c, project=None, lang="ko", card=False):
         return cmp_text(c, project, lang, card)
     if t == "chance":
         return f"{V(c.get('pct'))}% 확률" if lang == "ko" else f"a {V(c.get('pct'))}% chance"
+    if t == "exists":
+        who = (WHO if lang == "ko" else WHO_EN).get(c.get("who", "self"), "")
+        if lang == "ko":
+            return f"{who}이(가) {'없음' if c.get('neg') else '있음'}"
+        return f"{who} {'is missing' if c.get('neg') else 'exists'}"
     if t == "has":
         who = (WHO if lang == "ko" else WHO_EN).get(c.get("who", "self"), "")
         p = _pname(project, c.get("power"), lang) if project else c.get("power")
@@ -973,7 +1000,7 @@ def cond_label(c, project=None, lang="ko", card=False):
         who = ref_word(c, lang)
         return _card_is_word(project or {"gimmicks": {}, "mod": {"id": "M"}}, who, c.get("filter"), lang)
     if t == "src":
-        return "직접 조건 " + _short_code(c.get("code"), 48)
+        return "원본 조건" if HIDE_CODE else "직접 조건 " + _short_code(c.get("code"), 48)
     return "?"
 
 
@@ -1087,6 +1114,35 @@ def describe(blocks, project, owner_kind, lang="ko", item=None):
     return " ".join(out)
 
 
+def _fixed_num(v):
+    """고정 숫자 값({"t": "num", "v": n}) 이면 n, 아니면 None."""
+    return int(v["v"]) if isinstance(v, dict) and v.get("t") == "num" and isinstance(v.get("v"), (int, float)) else None
+
+
+def _pay_power_short(b, project, owner_kind, item):
+    """'내 파워 N 이상이면 그 파워 N 을 내고 …' 꼴을 짧게: '파워 N: 나머지 효과'. 아니면 None."""
+    args = b.get("args") or {}
+    c = args.get("cond") or {}
+    stack = c.get("a") or {}
+    need = _fixed_num(c.get("b"))
+    if c.get("t") != "cmp" or c.get("op") != ">=" or stack.get("t") != "stack" or stack.get("who", "self") != "self" or need is None:
+        return None
+    body = b.get("body") or []
+    if not body:
+        return None
+    first = expand_compact(body[0])
+    fa = first.get("args", {})
+    pays = first.get("op") == "remove_power" or (first.get("op") == "power_action" and fa.get("mode") == "remove_power")
+    if not pays or fa.get("who", "self") != "self" or fa.get("power") != stack.get("power") or _fixed_num(fa.get("amount")) != need:
+        return None
+    rest = describe(body[1:], project, owner_kind, "ko", item)
+    if not rest:
+        return None
+    import modgen as M
+    name = (M.power_meta(project, stack.get("power")) or {}).get("ko") or stack.get("power")
+    return f"[gold]{name}[/gold] {need}: {rest}"
+
+
 def _describe_one(b, project, owner_kind, lang, card, item):
     b = expand_compact(b)
     a = b.get("args", {})
@@ -1194,6 +1250,12 @@ def _describe_one(b, project, owner_kind, lang, card, item):
             f"Apply {V('amount')} from {a.get('power', '')} to {a.get('creature', '')}."
     if op == "flash":
         return ""
+    if op == "early_return":
+        return "여기서 끝냅니다." if ko else "End here."
+    if op == "loop_break":
+        return "반복을 그만합니다." if ko else "Stop the loop."
+    if op == "loop_continue":
+        return "이번 반복을 건너뜁니다." if ko else "Skip to the next loop."
     if op == "wait":
         return f"{V('duration')}초 기다립니다." if ko else f"Wait {V('duration')} seconds."
     if op == "wait_scaled":
@@ -1360,6 +1422,10 @@ def _describe_one(b, project, owner_kind, lang, card, item):
                                                               "Discard": "your discard pile"}.get(a.get("pile"))
         return f"{nm} {V('count')}장을 {pile}에 넣습니다." if ko else f"Add {V('count')} {nm} into {pile}."
     if op in ("if", "if_else"):
+        if ko and op == "if":
+            short = _pay_power_short(b, project, owner_kind, item)
+            if short:
+                return short
         c = a.get("cond") or {}
         cond = cond_label(c, project, lang, card)
         body = describe(b.get("body"), project, owner_kind, lang, item)
@@ -1797,6 +1863,9 @@ class _Gen:
             return f"({self.val(c.get('a'))} {c.get('op', '>=')} {self.val(c.get('b'))})"
         if t == "chance":
             return f"({self.rng()}.NextInt(100) < (int)({self.val(c.get('pct'))}))"
+        if t == "exists":   # 생물이 있는지 (값이 null 인지 확인하는 조건)
+            cr = self.creature(c.get("who", "self"))
+            return f"({cr} {'==' if c.get('neg') else '!='} null)"
         if t == "has":
             import modgen as M
             pm = M.power_meta(self.project, c.get("power"))
@@ -2283,6 +2352,10 @@ class _Gen:
                     f"{ind}else if ({n} < 0) OrbCmd.RemoveSlots({player}, -{n});"]
         if op == "add_pet_model":
             return [f"{ind}await PlayerCmd.AddPet({a.get('pet') or 'petCreature'}, {a.get('player') or C.player});"]
+        if op == "early_return":
+            return [f"{ind}return;"]
+        if op in ("loop_break", "loop_continue"):   # 반복 블록 안에서만 의미가 있다 (원본 코드의 break / continue 와 같다)
+            return [f"{ind}{'break' if op == 'loop_break' else 'continue'};"]
         if op == "wait":
             return [f"{ind}await Cmd.Wait((float)({self.val(a.get('duration'))}));"]
         if op == "wait_scaled":
@@ -3139,6 +3212,9 @@ PALETTE_NAMES = {
     "pick_transform": "고른 카드를 지정한 카드로 변화시키기",
     "if": "조건을 만족하면 실행", "if_else": "조건에 따라 두 갈래로 실행",
     "repeat": "안에 넣은 블록 반복하기",
+    "early_return": "이 지점에서 효과를 끝내고 아래 블록을 건너뜁니다",
+    "loop_break": "반복 안에서 사용: 반복을 바로 끝냅니다",
+    "loop_continue": "반복 안에서 사용: 이번 차례의 남은 블록을 건너뜁니다",
 }
 
 

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeade
 from dialogsqt import RawVarDialogQt
 from qtkit import code_window as _code_window
 import qtkit as Q
+import blockcode as B
 
 
 class ClonePanelQt(QWidget):
@@ -37,9 +38,10 @@ class ClonePanelQt(QWidget):
         edit = QPushButton("수치 편집")
         edit.clicked.connect(self.edit)
         side.addWidget(edit)
-        code = QPushButton("원본 코드 보기")
-        code.clicked.connect(self.show_code)
-        side.addWidget(code)
+        self.code_btn = QPushButton("원본 코드 보기")
+        self.code_btn.clicked.connect(self.show_code)
+        self.code_btn.setVisible(not B.HIDE_CODE)   # 보기 › C# 코드 보기가 켜져 있을 때만
+        side.addWidget(self.code_btn)
         self.pool = QComboBox()
         self.pool.addItem("내 카드/유물 풀", "mine")
         self.pool.addItem("원본 캐릭터 풀", "theirs")

@@ -168,7 +168,10 @@ class EffectDialogQt(QDialog):
         self.code.setStyleSheet("font-family: Consolas;")
         self.code.setPlainText(e.get("code", ""))
         code.addWidget(self.code)
-        code.addWidget(_label(ER.CODE_HELP.get(owner_kind, "")))
+        self.code_note = _label("")   # 코드를 숨길 때 대신 보이는 안내
+        code.addWidget(self.code_note)
+        self.code_help = _label(ER.CODE_HELP.get(owner_kind, ""))
+        code.addWidget(self.code_help)
         grid = QGridLayout()
         self._text_boxes = {}
         for row, (lang, text) in enumerate(LANG_NAMES):
@@ -261,6 +264,20 @@ class EffectDialogQt(QDialog):
         enabled = not (has and self.auto_text)
         for box in self._text_boxes.values():
             box.setEnabled(enabled)
+        self._apply_code_visibility()
+
+    def _apply_code_visibility(self):
+        """보기 › C# 코드 보기가 꺼져 있으면 코드 칸 대신 짧은 안내만 보인다 (저장되는 코드는 그대로)."""
+        hide = blockcode.HIDE_CODE
+        self.code_box.setTitle("새 능력 (블록 코딩)" if hide else "새 능력 (블록 코딩 또는 직접 C# 코드)")
+        for w in (self.code, self.code_help, self.unblock_btn):
+            w.setVisible(not hide)
+        raw = "" if self.blocks else self.code.toPlainText().strip()
+        if hide and raw:
+            n = sum(1 for line in raw.splitlines() if line.strip())
+            self.code_note.setText(f"이 능력은 원본 코드 {n}줄로 동작합니다. 블록으로 바꾸려면 '블록 코딩으로 만들기'를 누르세요.\n"
+                                   "(코드를 보려면 보기 › C# 코드 보기를 켜세요)")
+        self.code_note.setVisible(bool(hide and raw))
 
     def open_blocks(self):
         from blockqt import edit_blocks
@@ -458,6 +475,10 @@ class EffectListQt(QWidget):
             button = QPushButton(text)
             button.clicked.connect(slot)
             buttons.addWidget(button)
+        self.ai_btn = QPushButton("🤖 AI로 다시 만들기")
+        Q.tip(self.ai_btn, "블록으로 바뀌지 않은 원본 코드 부분을 AI에게 블록으로 다시 만들게 합니다.")
+        self.ai_btn.clicked.connect(self.rebuild_with_ai)
+        buttons.addWidget(self.ai_btn)
         buttons.addStretch(1)
         root.addLayout(buttons)
 
@@ -488,6 +509,29 @@ class EffectListQt(QWidget):
             self.tree.addTopLevelItem(row)
         if select is not None and 0 <= select < len(self.effects):
             self.tree.setCurrentItem(self.tree.topLevelItem(select))
+        self.ai_btn.setVisible(self._can_rebuild())
+
+    def _can_rebuild(self):
+        """이 목록이 항목의 기본 효과이고, 그 안에 직접 코드가 남아 있을 때만."""
+        import airebuild as AR
+        item = self.item_of()
+        if not item or self.effects is not item.get("effects"):
+            return False
+        try:
+            return bool(AR.direct_code_parts(self.project_of(), self.owner_kind, item))
+        except Exception:  # noqa: BLE001 - 버튼 표시 여부만 정한다
+            return False
+
+    def rebuild_with_ai(self):
+        from airebuildqt import RebuildDialogQt
+        item = self.item_of()
+        if not self._can_rebuild():
+            return
+        dialog = RebuildDialogQt(self, self.project_of(), self.owner_kind, item)
+        if dialog.exec() and dialog.effects is not None:
+            self.effects[:] = dialog.effects   # 항목의 효과 리스트를 그대로 고친다 (다른 칸은 그대로)
+            self.refresh()
+            self.on_change()
 
     def _sel(self):
         row = self.tree.currentItem()

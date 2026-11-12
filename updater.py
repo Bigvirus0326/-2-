@@ -21,7 +21,7 @@ import threading
 import urllib.request
 import zipfile
 
-VERSION = "0.12"
+VERSION = "p1.0"
 REPO = "Bigvirus0326/-2-"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"

@@ -17,32 +17,32 @@ import modgen as M
 FORMAT_TAG = "sts2mod-patch"   # AI 답의 머리 표시 (붙여넣기 창이 알아봄)
 
 ARG_KIND_TEXT = {
-    "who_multi": 'who: "self" | "target" | "it"(each_enemy/random_enemy 안의 그 적) | "all" | "random"',
-    "value": "value 객체",
+    "who_multi": "self|target|it|all|random",
+    "value": "값",
     "int": "정수",
-    "bool": "true/false",
-    "power": 'power 참조 (아래 "파워 참조")',
-    "card_filter": '"Any" | "Attack" | "Skill" | "Power" | "tag:<태그ID>"',
-    "which": '"random" | "all"',
-    "hand_action": '"upgrade" | "exhaust" | "discard"',
-    "keyword": '"Exhaust" | "Ethereal" | "Innate" | "Retain" | "Unplayable" | "Sly" | "Eternal"',
-    "kw_action": '"add"(부여) | "remove"(제거)',
-    "kw_where": '"hand" | "draw" | "discard" | "all"(세 더미 전부)',
-    "card": '"this"(이 카드) 또는 카드 ID',
-    "pile": '"Hand" | "Draw" | "Discard"',
-    "cond": "cond 객체",
-    "varname": "변수 이름 (영문 한 글자~단어)",
-    "summon": "소환수 ID",
-    "summon_any": '소환수 ID 또는 "*"(전부)',
-    "label": '{"ko": "...", "en": "...", "zh": "..."}',
-    "pick_pile": '"Hand" | "Draw" | "Discard" | "Exhaust"',
-    "pick_action": '"hand" | "draw_at" (+ "action_n": 1=top, -1=bottom) | "exhaust" | "discard" | "upgrade"',
-    "delay_when": '"start"(다음 내 턴 시작) | "end"(이번 턴 끝)',
-    "orb": '게임 구체 "Lightning" | "Frost" | "Dark" | "Plasma" | "Glass" 또는 새 구체 "o:<구체ID>"',
-    "evoke_which": '"front" | "last"',
-    "pet": "동료 ID",
-    "fx": "이펙트 ID",
-    "button": "버튼 ID",
+    "bool": "bool",
+    "power": "파워참조",
+    "card_filter": "Any|Attack|Skill|Power|tag:<태그ID>",
+    "which": "random|all",
+    "hand_action": "upgrade|exhaust|discard",
+    "keyword": "Exhaust|Ethereal|Innate|Retain|Unplayable|Sly|Eternal",
+    "kw_action": "add|remove",
+    "kw_where": "hand|draw|discard|all",
+    "card": "this|카드ID",
+    "pile": "Hand|Draw|Discard",
+    "cond": "cond",
+    "varname": "변수명",
+    "summon": "소환수ID",
+    "summon_any": "소환수ID|*",
+    "label": "{ko,en,zh}",
+    "pick_pile": "Hand|Draw|Discard|Exhaust",
+    "pick_action": "hand|draw_at(+action_n 1=위,-1=아래)|exhaust|discard|upgrade",
+    "delay_when": "start|end",
+    "orb": "Lightning|Frost|Dark|Plasma|Glass|o:<구체ID>",
+    "evoke_which": "front|last",
+    "pet": "동료ID",
+    "fx": "이펙트ID",
+    "button": "버튼ID",
 }
 
 
@@ -78,6 +78,13 @@ def project_summary(project):
     return "\n".join(out)
 
 
+def _arg_text(spec, body_keys):
+    """'| 인수: k:종류, ... | 안쪽: body' 꼴 (없으면 빈 문자열)."""
+    args = ", ".join(f"{k}:{ARG_KIND_TEXT.get(kind, kind)}" for k, (kind, _d) in spec["args"].items())
+    bodies = ", ".join(key for key in body_keys if spec.get(key))
+    return (f" | 인수: {args}" if args else "") + (f" | 안쪽: {bodies}" if bodies else "")
+
+
 def _blocks_reference():
     lines = []
     for cat, ops in B.PALETTE:
@@ -86,24 +93,12 @@ def _blocks_reference():
             if op in ("source_step", "original_play"):
                 continue     # 원본 모드 복제 카드 전용 (AI 가 새로 만들 블록이 아님)
             if op in B.F.FAMILIES:
-                lines.append(f'  "{op}": {B.F.FAMILIES[op][0]} — args.mode에서 실행 방식 선택')
-                for mode,label in B.F.FAMILIES[op][1]:
-                    mode_spec = B.SPECS[mode]
-                    fields = ", ".join(f"{k}: {ARG_KIND_TEXT.get(kind, kind)}" for k,(kind,_d) in mode_spec["args"].items())
-                    bodies = ", ".join(key for key in B.BODY_KEYS if mode_spec.get(key))
-                    lines.append(f'    mode="{mode}" ({label}) — args {{{fields}}}' + (f" — 안쪽 목록: {bodies}" if bodies else ""))
+                lines.append(f'"{op}" {B.F.FAMILIES[op][0]} (mode 로 실행 방식 선택)')
+                for mode, label in B.F.FAMILIES[op][1]:
+                    lines.append(f'  mode="{mode}" {label}' + _arg_text(B.SPECS[mode], B.BODY_KEYS))
                 continue
             spec = B.SPECS[op]
-            args = ", ".join(f"{k}: {ARG_KIND_TEXT.get(kind, kind)}" for k, (kind, _d) in spec["args"].items())
-            extra = []
-            if spec.get("body"):
-                extra.append("body")
-            if spec.get("else"):
-                extra.append("else")
-            if spec.get("third"):
-                extra.append("third")
-            lines.append(f'  "{op}": {spec["ko"]}' + (f"  — args {{{args}}}" if args else "") +
-                         (f"  — 안쪽 블록 목록: {', '.join(extra)}" if extra else ""))
+            lines.append(f'"{op}" {spec["ko"]}' + _arg_text(spec, ("body", "else", "third")))
     return "\n".join(lines)
 
 
@@ -138,25 +133,54 @@ EXAMPLE = {
 }
 
 
+def _gimmick_section():
+    """기믹(태그·소환수·구체·동료·이펙트·버튼) 만들기 설명. 종류별 형식은 툴의 기본값에서 만든다."""
+    import aipaste as AP
+    examples = {group: [{k: v for k, v in factory().items() if k != "image"}] for group, _, factory in AP.GIMMICKS.values()}
+    return ("## 기믹 (gimmicks) — 태그·소환수·구체·동료·이펙트·버튼\n"
+            "- 최상위 gimmicks 객체에 종류별 목록으로 넣는다. 필요한 종류만 넣으면 된다.\n"
+            "- 같은 ID 를 쓰면 그 기믹을 바꾸는 것으로 처리된다 (고칠 기믹은 아래 '지금 있는 파워·기믹 전체 내용'에서 가져와 고친다).\n"
+            "- 같은 답의 카드와 블록에서도 새 ID 를 참조할 수 있다.\n"
+            "- 종류별 기본 형식 (필요한 칸만 채워서 쓴다):\n"
+            + json.dumps({"gimmicks": examples}, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def current_items_json(project):
+    """지금 있는 파워·기믹의 전체 내용 (고칠 때의 기준). 그림 칸은 뺀다. 없으면 빈 문자열."""
+    import aipaste as AP
+    g = project.get("gimmicks") or {}
+
+    def strip(rows):
+        return [{k: v for k, v in r.items() if k != "image"} for r in rows]
+    data = {}
+    if project.get("powers"):
+        data["powers"] = strip(project["powers"])
+    gim = {group: strip(g[group]) for group, _, _ in AP.GIMMICKS.values() if g.get(group)}
+    if gim:
+        data["gimmicks"] = gim
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")) if data else ""
+
+
 def build_prompt(project, request="", include_blocks=True, include_project=True):
     custom_powers = [f"c:{p['id']}" for p in project.get("powers", [])]
     game_powers = ", ".join(f'"{k}"({v[1]}, 기본 대상 {v[3]})' for k, v in M.POWERS.items())
     parts = [f"""# 슬레이 더 스파이어 2 모드 메이커 — AI 작업 설명서
 
-너는 '슬더스2 모드 메이커'라는 툴의 프로젝트에 넣을 카드·유물·물약·파워를 만드는 도우미다.
-사용자가 원하는 것을 아래 형식의 JSON 으로 만들어 준다. 사용자는 그 JSON 을 툴의 'AI 결과 붙여넣기' 창에 붙여 넣고,
+너는 '슬더스2 모드 메이커'라는 툴의 프로젝트에 넣을 카드·유물·물약·파워·기믹을 만들고 고치는 도우미다.
+사용자가 원하는 것을 아래 형식의 JSON 으로 만들거나 고쳐 준다. 사용자는 그 JSON 을 툴의 'AI 결과 붙여넣기' 창에 붙여 넣고,
 툴이 검사·미리보기한 뒤 프로젝트에 넣는다. 툴이 C# 코드를 만들어 주므로 너는 C# 를 쓰지 않는다.
 
 ## 답하는 방법 (꼭 지킬 것)
 1. 먼저 무엇을 만들지 한두 줄로 설명한다 (선택).
 2. 그다음 ```json 코드 블록 **하나**에 결과를 넣는다. 맨 위에 "format": "{FORMAT_TAG}" 를 넣는다.
 3. JSON 은 주석·끝 쉼표 없이 올바른 JSON 이어야 한다.
-4. 새로 만드는 것만 넣는다. 이미 있는 ID 를 쓰면 그 항목을 **바꾸는** 것으로 처리된다 (사용자가 고칠 것을 요청했을 때만 그렇게 한다).
-5. 빠뜨린 칸은 기본값으로 채워지므로 필요한 칸만 쓰면 된다. 그림(image) 칸은 쓰지 않는다.
+4. 새로 만드는 것만 넣는다. 이미 있는 ID 를 쓰면 그 항목을 **바꾸는** 것으로 처리된다 (사용자가 고쳐 달라고 했을 때만 그렇게 한다).
+   파워·기믹은 고칠 칸만 보내도 나머지는 그대로 남는다. 카드·유물·물약을 고칠 때는 전체 항목을 다시 보낸다 (빠진 칸은 기본값이 된다).
+5. 새로 만드는 항목에서 빠뜨린 칸은 기본값으로 채워진다. 그림(image) 칸은 쓰지 않는다.
 6. 사용자가 툴에서 받은 오류 목록을 보내면, 그 오류를 고친 **전체 JSON** 을 다시 보낸다.
 
 ## 최상위 형식
-{{"format": "{FORMAT_TAG}", "cards": [...], "relics": [...], "potions": [...], "powers": [...]}}
+{{"format": "{FORMAT_TAG}", "cards": [...], "relics": [...], "potions": [...], "powers": [...], "gimmicks": {{...}}}}
 
 ## 공통 규칙
 - id: 영문 소문자로 시작, 소문자·숫자·밑줄(_)만 (예: "fire_slash"). 다른 카드·유물·물약·파워·기믹과 겹치면 안 된다.
@@ -216,6 +240,8 @@ def build_prompt(project, request="", include_blocks=True, include_project=True)
 - 스택 비례(선택): scale_power 파워 참조, scale_per 수, scale_on "self" | "target" — 그 파워 1 스택마다 수치 + scale_per.
 - code: 블록 코딩으로 만든 새 능력. {{"kind": "code", "auto_text": true, "blocks": [블록...]}}
   위의 단순 효과로 안 되는 것(반복, 조건 분기, 손패 조작, 카드 만들기, 하나 고르기, 소환, 구체, 별, 동료 등)은 code 로 만든다.
+  짧은 설명을 직접 쓰려면 code 효과에 text_ko·text_en·text_zh 를 적고 auto_text 를 false 로 둔다 (예: text_ko "포격 2: 피해를 8 줍니다").
+  비워 두면 블록에서 설명을 자동으로 만든다.
 
 ## 파워 참조 (power 칸에 쓰는 문자열)
 - 게임 파워: {game_powers}
@@ -223,6 +249,7 @@ def build_prompt(project, request="", include_blocks=True, include_project=True)
   같은 답 안에서 새로 만드는 파워도 "c:<ID>" 로 참조할 수 있다.
 - 소환수의 단계: "s:<소환수ID>"
 """]
+    parts.append(_gimmick_section())
     if include_blocks:
         parts.append(f"""## 블록 코딩 (effects 의 kind "code")
 블록 = {{"op": 이름, "args": {{...}}, "body": [블록...], "else": [블록...], "third": [블록...]}}
@@ -253,20 +280,19 @@ cond 객체 (조건):
 - {{"t": "and"|"or", "a": cond, "b": cond}},  {{"t": "not", "a": cond}}
 - {{"t": "osty_alive"}}, {{"t": "pet_alive", "pet": 동료ID}}
 
-블록 목록 (op: 화면에 보이는 모양 — args):
+블록 목록 (op: 화면에 보이는 모양 | 인수 이름:값 종류 | 안쪽 블록 목록). who 의 it 은 each_enemy·random_enemy 안의 그 적이다:
 {_blocks_reference()}
 
 주의: 소환수·구체·동료·이펙트·버튼·태그 블록은 프로젝트에 그 기믹이 있어야 쓸 수 있다 (아래 '지금 프로젝트' 참고).
 """)
-    parts.append("## 예시\n```json\n" + json.dumps(EXAMPLE, ensure_ascii=False, indent=1) + "\n```\n")
+    parts.append("## 예시\n```json\n" + json.dumps(EXAMPLE, ensure_ascii=False, separators=(",", ":")) + "\n```\n")
     if include_project:
         parts.append("## 지금 프로젝트에 있는 것 (ID 가 겹치지 않게, 참조할 때 사용)\n" + project_summary(project) + "\n")
+        current = current_items_json(project)
+        if current:
+            parts.append("## 지금 있는 파워·기믹 전체 내용 (고쳐 달라는 항목은 여기서 가져와 바꿀 칸만 고친다)\n"
+                         "```json\n" + current + "\n```\n")
     parts.append("## 사용자의 요청\n" + ((request or "").strip() or "(사용자가 이 아래에 요청을 적는다)") + "\n")
-    import aipaste as AP
-    examples = {group: [{k: v for k, v in factory().items() if k != "image"}]
-                for group, _, factory in AP.GIMMICKS.values()}
-    parts.append("기믹 생성: 최상위 gimmicks 객체에 필요한 종류만 넣는다. 같은 답의 카드와 블록에서도 새 ID를 참조할 수 있다. 종류별 형식:"
-                 + json.dumps({"gimmicks": examples}, ensure_ascii=False))
     return "\n".join(parts)
 
 

@@ -43,7 +43,7 @@ class GuidePageQt(QWidget):
         self.app = app
         self.host = host
         root = QVBoxLayout(self)
-        head = QLabel("ChatGPT · Claude · Gemini 같은 채팅 AI에게 카드·유물·물약·파워·기믹을 만들게 합니다.")
+        head = QLabel("ChatGPT · Claude · Gemini 같은 채팅 AI에게 카드·유물·물약·파워·기믹을 만들거나 고치게 합니다.")
         head.setStyleSheet("font-weight: bold;")
         root.addWidget(head)
         steps = QLabel("1. 아래에 만들고 싶은 것을 적고 '설명서 복사'를 누릅니다.\n"
@@ -65,7 +65,8 @@ class GuidePageQt(QWidget):
         opt.addWidget(self.blocks)
         self.proj = QCheckBox("지금 프로젝트 목록 포함")
         self.proj.setChecked(True)
-        self.proj.setToolTip("있는 카드·파워·태그·소환수 ID 를 알려줘서 겹치지 않고, 참조할 수 있게 합니다.")
+        self.proj.setToolTip("있는 카드·파워·태그·소환수 ID 를 알려줘서 겹치지 않고, 참조할 수 있게 합니다. "
+                             "지금 있는 파워·기믹의 전체 내용도 넣어서 AI 가 고칠 수 있게 합니다.")
         self.proj.toggled.connect(lambda _c: self._size())
         opt.addWidget(self.proj)
         opt.addStretch(1)
@@ -351,14 +352,15 @@ class PastePageQt(QWidget):
             pass
         self.desc.setText(re.sub(r"\[/?[a-z]+\]", "", desc))
         self.canvas.clear()
-        if x["kind"] in AP.GIMMICKS:
-            if x["exists"] and not self.keep.isChecked():
-                group = AP.GIMMICKS[x["kind"]][0]
-                old = next(r for r in self.app.project["gimmicks"][group] if r["id"] == item["id"])
+        if x["kind"] in AP.GIMMICKS or x["kind"] == "power":
+            old = self._old(x)
+            if old is not None:   # 고치는 파워·기믹은 그림 대신 변경 전 → 변경 후
                 self.canvas.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-                self.canvas.setText("변경 전 → 변경 후\n\n" + ("\n".join(AP.change_lines(old, item)) or "변경 없음"))
+                self.canvas.setText("변경 전 → 변경 후\n\n" + ("\n".join(AP.change_lines(old, x["item"])) or "변경 없음"))
                 self.canvas.setStyleSheet(f"background: {Q.C['stage']}; color: white;")
-            return
+                return
+            if x["kind"] in AP.GIMMICKS:
+                return
         self.canvas.setStyleSheet(f"background: {Q.C['stage']};")
         self.canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
         assets = self.app.game_assets()
@@ -374,6 +376,14 @@ class PastePageQt(QWidget):
         k = min(300 / im.width, 380 / im.height)
         im = im.resize((max(1, int(im.width * k)), max(1, int(im.height * k))))
         self.canvas.setPixmap(PQ._qpixmap(im))
+
+    def _old(self, x):
+        """이 답이 고치는 기존 파워·기믹 (새로 만들거나 '새 ID 로 추가'면 None)."""
+        if not x["exists"] or self.keep.isChecked():
+            return None
+        pool = ((self.app.project.get("gimmicks") or {}).get(AP.GIMMICKS[x["kind"]][0], []) if x["kind"] in AP.GIMMICKS
+                else self.app.project.get("powers", []))
+        return next((r for r in pool if r["id"] == x["item"]["id"]), None)
 
     # ---- 버튼 ----
     def copy_fix(self):

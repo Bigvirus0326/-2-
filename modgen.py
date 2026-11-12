@@ -1449,7 +1449,8 @@ def _canonical_vars(project, item, owner_kind):
         return []
     out = []
     prop = "ValueProp.Move" if owner_kind == "card" else "ValueProp.Unpowered"
-    for e in item["effects"]:
+    # extra_vars: 효과 없이 수치 변수만 선언한다 (가져온 카드의 블록이 이 이름을 읽는다)
+    for e in list(item["effects"]) + list(item.get("extra_vars") or []):
         a = int(e["amount"])
         k = e["kind"]
         if k == "damage":

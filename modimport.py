@@ -1355,7 +1355,8 @@ REGENERATED = {
 }
 
 
-def clone_item(em, item, project, target_pool="mine"):
+def clone_item(em, item, project, target_pool="mine", native_powers=True):
+    """native_powers: 파워를 블록으로 옮길 수 있으면 옮긴다. 통째로 열기(takeover)는 원본 클래스를 그대로 써야 하므로 끈다."""
     """외부 항목 -> 내 프로젝트 항목 (원본 클래스를 상속해 원래 동작 유지). 그림은 로컬 파일로 꺼낸다."""
     kind = item["_kind"]
     c = item.get("_cls")
@@ -1410,6 +1411,10 @@ def clone_item(em, item, project, target_pool="mine"):
         "usings": [u for u in c.usings if not u.startswith("using static") or True],
         "body": body.strip("\n"), "pool": target_pool, "their_pool": pool_full,
     }
+    if kind == "power" and native_powers:
+        import powerconv
+        if powerconv.convert(em, c, new, project):   # 블록으로 완전히 옮겨졌으면 원본 클래스를 쓰지 않는다
+            return new
     if kind == "card":
         M.expose_clone_play(new)
         if new["effects"] and new["effects"][0].get("original_effect"):
@@ -1698,7 +1703,7 @@ def takeover(em, sts2_path="", log=print, progress=None):
                 kept.append(f"{kind}:{it['class']}")
                 continue
             try:
-                new = clone_item(em, it, P, "theirs")
+                new = clone_item(em, it, P, "theirs", native_powers=False)
             except Exception as exc:  # noqa: BLE001
                 log(f"  가져오지 못해 원래 코드로 둡니다: {it['class']} ({exc})")
                 kept.append(f"{kind}:{it['class']}")

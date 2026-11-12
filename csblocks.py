@@ -595,6 +595,200 @@ def _num(text):
     return None
 
 
+_PURE_REF = re.compile(r"[A-Za-z_][\w.?]*(?:\s*\?\?\s*[A-Za-z_][\w.?]*)?")   # 값을 바꾸지 않는 이름·맴버 (Me, cardPlay.Target ?? Me)
+_TYPED_LHS = re.compile(r"[\w.<>\[\]?]+\s+([A-Za-z_]\w*)\s*=")                 # 'Creature t =' 같은 자료형 선언
+
+
+def _game_power_key(cls):
+    """게임 기본 파워 클래스 이름(StrengthPower) -> 값 블록의 파워 키(Strength)."""
+    import modgen as M
+    return next((k for k, v in M.POWERS.items() if v[0] == cls), None)
+
+
+_COMMON_BLOCK = re.compile(r"\s*await\s+CommonActions\.CardBlock\(\s*this\s*,\s*([^()]+?)\s*\)\s*;?\s*")
+_COMMON_DRAW = re.compile(r"\s*await\s+CommonActions\.Draw\(\s*this\s*,\s*([^()]+?)\s*\)\s*;?\s*")
+
+
+_EXISTS = re.compile(r"\(?\s*(Owner\??\.Creature|Me|cardPlay\.Target)\s*(==|!=)\s*null\s*\)?")
+
+
+def _exists_cond(text):
+    """'대상 == null' 같은 생물 유무 확인을 블록의 조건으로 바꾼다. 해당하지 않으면 None."""
+    m = _EXISTS.fullmatch(text.strip())
+    if not m:
+        return None
+    who = "target" if m.group(1) == "cardPlay.Target" else "self"
+    return {"t": "exists", "who": who, "neg": m.group(2) == "=="}
+
+
+def _has_raw(seq):
+    """블록 목록 안(안쪽 포함)에 직접 코드·직접 호출이 있으면 True."""
+    for b in seq or []:
+        if b.get("op") in ("source_step", "src_call", "src_loop"):
+            return True
+        if any(_has_raw(b.get(k)) for k in ("body", "else", "third")):
+            return True
+    return False
+
+
+def _common_rewrite(rhs):
+    """BaseLib 'CommonActions' 의 자주 쓰는 도우미를 같은 효과의 게임 호출 문장으로 바꾼다.
+    CardBlock(this, play) == CreatureCmd.GainBlock(Owner.Creature, 방어도 변수, 이동, play)
+    Draw(this, ctx)       == CardPileCmd.Draw(ctx, 뽑을 장수 변수, Owner)"""
+    m = _COMMON_BLOCK.fullmatch(rhs)
+    if m:
+        return f"await CreatureCmd.GainBlock(Owner.Creature, DynamicVars.Block.BaseValue, ValueProp.Move, {m.group(1)})"
+    m = _COMMON_DRAW.fullmatch(rhs)
+    if m:
+        return f"await CardPileCmd.Draw({m.group(1)}, DynamicVars.Cards.BaseValue, Owner)"
+    return rhs
+
+
+_ARITH_UNSAFE = re.compile(r'[<>?:=!&|{}\[\]"%]')
+
+
+def _split_arith(e):
+    """최상위 사칙 연산 한 번을 (왼쪽, 연산자, 오른쪽) 으로 나눈다. 비교·대입·삼항·제네릭 등이 섞이면 None.
+    나눗셈은 C# 정수 나눗셈과 값 블록의 내림 계산이 달라 제외한다."""
+    if _ARITH_UNSAFE.search(e):
+        return None
+    depth, levels = 0, []
+    for ch in e:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        levels.append(depth)
+
+    def binary(i):   # 앞에 피연산자가 있어야 이항 연산자다 (단항 - 제외)
+        j = i - 1
+        while j >= 0 and e[j] == " ":
+            j -= 1
+        return j >= 0 and (e[j].isalnum() or e[j] in "_)")
+
+    for ops in ("+-", "*/"):
+        cand = [i for i, ch in enumerate(e) if ch in ops and levels[i] == 0 and binary(i)]
+        if cand:
+            i = cand[-1]
+            left, right = e[:i].strip(), e[i + 1:].strip()
+            if e[i] == "/" or not left or not right:
+                return None
+            return left, e[i], right
+    return None
+
+
+def _plain_value(rhs):
+    """값 넣기 블록에 그대로 넣어도 되는 한 줄짜리 식인지 (대입·람다·객체 생성·블록 등은 제외)."""
+    return bool(rhs.strip()) and not re.search(r"\b(?:await|new|delegate|stackalloc|throw)\b|=>|[{};]", rhs)
+
+
+def _strings(v):
+    """dict·list 안의 글 값들 (키는 빼고)."""
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, dict):
+        return [x for item in v.values() for x in _strings(item)]
+    if isinstance(v, (list, tuple)):
+        return [x for item in v for x in _strings(item)]
+    return []
+
+
+def _walk_blocks(seq):
+    for b in seq or []:
+        yield b
+        for key in ("body", "else", "third"):
+            yield from _walk_blocks(b.get(key))
+
+
+def _settle_aliases(blocks):
+    """'_alias' 표식(자료형 선언 = 값): 그 이름을 직접 코드나 직접 호출이 쓰면 선언을 되살리고, 아니면 버린다.
+    블록으로 바뀐 곳은 이름 대신 원래 값을 쓰므로 선언이 없어도 된다."""
+    markers = []
+
+    def collect(seq):
+        for b in seq or []:
+            if b.get("op") == "_alias":
+                markers.append(b)
+            for key in ("body", "else", "third"):
+                collect(b.get(key))
+
+    def live_text(seq, out, restored):
+        for b in seq or []:
+            if b.get("op") != "_alias" or id(b) in restored:
+                out.append(" ".join(_strings({k: v for k, v in b.items() if k not in ("op", "body", "else", "third")})))   # 값만 본다 (칸 이름 creature 등은 제외)
+            for key in ("body", "else", "third"):
+                live_text(b.get(key), out, restored)
+        return out
+
+    collect(blocks)
+    # 블록 칸에 적힌 이름은 원래 값으로 바꾼다 (선언을 되살리지 않도록). 값이 같은 별칭만 해당된다.
+    values = {}
+    for m in markers:
+        rhs = m["args"]["source"].split("=", 1)[1].strip().rstrip(";").strip()
+        values[m["args"]["name"]] = rhs
+
+    # 같은 이름이 람다 매개변수·새 선언·반복 변수로 다시 쓰이면 바꾸지 않는다 (그 이름은 다른 값이다)
+    all_text = " ".join(x for b in _walk_blocks(blocks) if b.get("op") != "_alias"
+                        for x in _strings({k: v for k, v in b.items() if k not in ("op", "body", "else", "third")}))
+    for name in list(values):
+        n = re.escape(name)
+        if re.search(rf"(?<![\w.]){n}\s*=>|\([^()]*\b{n}\s*[,)][^()]*\)\s*=>|\b(?:from|foreach\s*\([^()]*?)\s+{n}\s+in\b"
+                     rf"|\b(?!(?:in|is|as|return|await|new|out|ref|else|case|yield|throw)\b)[\w<>\[\]?]+\s+{n}\s*[=;,)]|(?<![\w.]){n}\s*(?:[+\-*/]?=(?!=)|\+\+|--)", all_text):
+            del values[name]
+
+    def subst(v):
+        if isinstance(v, str):
+            out = v
+            for _ in range(8):
+                nxt = rename(out, values)
+                if nxt == out:
+                    break
+                out = nxt
+            return out
+        if isinstance(v, dict):
+            return {k: (x if k in ("body", "else", "third", "op") else subst(x)) for k, x in v.items()}
+        if isinstance(v, list):
+            return [subst(x) for x in v]
+        return v
+
+    def apply(seq):
+        for b in seq or []:
+            if b.get("op") == "_alias":
+                continue
+            for k in list(b):
+                if k not in ("op", "body", "else", "third"):
+                    b[k] = subst(b[k])
+            for key in ("body", "else", "third"):
+                if key in b:
+                    apply(b[key])
+    if values:
+        apply(blocks)
+    restored = set()
+    changed = True
+    while changed:
+        changed = False
+        text = "\n".join(live_text(blocks, [], restored))
+        for m in markers:
+            if id(m) not in restored and re.search(r"\b" + re.escape(m["args"]["name"]) + r"\b", text):
+                restored.add(id(m))
+                changed = True
+
+    def rebuild(seq):
+        out = []
+        for b in seq or []:
+            if b.get("op") == "_alias":
+                if id(b) in restored:
+                    out.append({"op": "source_step", "args": {"source": b["args"]["source"]}})
+                continue
+            for key in ("body", "else", "third"):
+                if key in b:
+                    b[key] = rebuild(b[key])
+            out.append(b)
+        return out
+
+    return rebuild(blocks)
+
+
 class Decomposer:
     def __init__(self, card, chain, class_names=(), max_depth=6, project=None):
         self.card = card
@@ -617,6 +811,14 @@ class Decomposer:
     def resolve(self, expr, env=None, depth=0, start=0):
         """식 -> 값 블록 ({"t":"num"/"dynvar"}) 또는 None."""
         e = expr.strip()
+        if e == "Amount" and getattr(self, "own_power", None):
+            return {"t": "stack", "power": self.own_power, "who": "self"}
+        m = (re.fullmatch(r"(?:Owner(?:\.Creature)?|Me)\??\.(?:GetPowerAmount|GetPower)<(\w+)>\(\)(?:\??\.Amount)?", e)
+             or re.fullmatch(r"N<(\w+)>\(Me\)", e))
+        if m:   # 내 생물의 게임 기본 파워 수치 (예: GetPowerAmount<StrengthPower>())
+            key = _game_power_key(m.group(1))
+            if key:
+                return {"t": "stack", "power": key, "who": "self"}
         if depth > 6 or not e:
             return None
         while e.startswith("(") and _close(e, 0) == len(e) - 1:
@@ -669,6 +871,12 @@ class Decomposer:
             env2 = {p["name"]: (vals[i] if i < len(vals) else _num(p["default"] or "0") or 0)
                     for i, p in enumerate(pm["params"])}
             return self._eval_body(pm, env2, depth + 1, li)
+        sp = _split_arith(e)   # 'a + b' 같은 사칙 연산 (값 블록의 op)
+        if sp:
+            a = self.resolve(sp[0], env, depth + 1, start)
+            b = self.resolve(sp[2], env, depth + 1, start)
+            if a is not None and b is not None:
+                return {"t": "op", "op": sp[1], "a": a, "b": b}
         return None
 
     def _up(self, normal, upgraded):
@@ -812,10 +1020,21 @@ class Decomposer:
         return value
 
     def raw(self, code):
+        if re.fullmatch(r"return\s*(?:Task\.CompletedTask)?\s*;", code.strip()):
+            return [{"op": "early_return", "args": {}}]   # 생성 코드의 메서드는 async Task 이므로 'return;' 과 같다
+        if code.strip() in ("break;", "continue;"):   # 원래 자리에 그대로 들어가므로 반복을 끝내는/건너뛰는 뜻이 같다
+            return [{"op": "loop_break" if code.strip() == "break;" else "loop_continue", "args": {}}]
         self.stats["raw"] += 1
         return [{"op": "source_step", "args": {"source": dedent(code)}}]
 
     def node(self, st):
+        blocks = self._node(st)
+        # 옮기는 모드(whole_raw): 안쪽에 직접 코드가 남는 if·반복 문장은 문장 전체를 직접 코드 한 줄로 둔다 (순서·원문 보존)
+        if getattr(self, "whole_raw", False) and st["k"] in ("if", "loop", "block", "switch") and st.get("src") and _has_raw(blocks):
+            return self.raw(st["src"])
+        return blocks
+
+    def _node(self, st):
         k = st["k"]
         if k == "block":
             return [{"op": "src_loop", "args": {"head": ""}, "body": self.blocks(st["body"])}]
@@ -827,7 +1046,8 @@ class Decomposer:
             if folded is False:
                 self.stats["folded"] += 1
                 return self.blocks(st["else"] or [])
-            cond = {"t": "src", "code": one_line(st["cond"])}
+            text = one_line(self._expand_aliases(st["cond"]))   # 별칭은 펼쳐서 선언이 필요 없게 한다
+            cond = _exists_cond(text) or {"t": "src", "code": text}
             if st["else"] is None:
                 return [{"op": "if", "args": {"cond": cond}, "body": self.blocks(st["then"])}]
             return [{"op": "if_else", "args": {"cond": cond}, "body": self.blocks(st["then"]),
@@ -911,8 +1131,11 @@ class Decomposer:
     # ---- 한 문장 ----
     def stmt(self, code):
         code = code.strip()
-        if code in (";", ""):
+        if code in (";", "", "await Task.CompletedTask;"):   # 아무 일도 하지 않는 줄
             return []
+        inc =re.fullmatch(r"([A-Za-z_][\w.]*)\s*(\+\+|--)\s*;", code)
+        if inc:   # 'x++;' 는 '값 넣기 x += 1;' 과 같다
+            code = f"{inc.group(1)} {inc.group(2)[0]}= 1;"
         decl = re.match(r"^((?:[\w.?<>\[\],]+\s+)?[A-Za-z_]\w*(?:\.\w+|\[[^\]]*\])*\s*(?:[+\-*/]?=)(?!=|>))\s*(.+);$", code, re.S)
         lhs, rhs = (decl.group(1), decl.group(2)) if decl else ("", code[:-1] if code.endswith(";") else code)
         if lhs:
@@ -921,6 +1144,11 @@ class Decomposer:
             nm = re.match(r"^(?:[\w.?<>\[\],]+\s+)?([A-Za-z_]\w*)", lhs)
             if nm:
                 self.taken.add(nm.group(1))
+        if lhs and re.fullmatch(r"_\s*=", lhs.strip()) and _PURE_REF.fullmatch(rhs.strip()):
+            return []                                  # '_ = Me;' 처럼 값을 버리는 줄은 아무 일도 하지 않는다
+        typed = _TYPED_LHS.match(lhs.strip()) if lhs else None
+        if typed and _PURE_REF.fullmatch(rhs.strip()):
+            return [{"op": "_alias", "args": {"name": typed.group(1), "source": code}}]   # 쓰는 곳이 없으면 decompose 에서 버린다
         # 도우미 메서드 펼치기
         if not lhs:
             inl = self.try_inline(rhs)
@@ -933,7 +1161,13 @@ class Decomposer:
             slot = self._slot_value("v", rhs, v, "값", self._lhs_type(lhs))
             return [self._call_block(label, [lhs + " ", "v", ";"], [slot])]
         blk = self.call(lhs, rhs)
-        return [blk] if blk else self.raw(code)
+        if blk or not lhs or not _plain_value(rhs):
+            return [blk] if blk else self.raw(code)
+        # 기존 '값 넣기' 블록에 원래 식을 그대로 넣는다 (직접 코드 블록 대신)
+        nm = re.match(r"^(?:[\w.?<>\[\],]+\s+)?([A-Za-z_][\w.]*)\s*([+\-*/]?=)", lhs.strip())
+        label = "값 넣기: " + (f"{nm.group(1)} {nm.group(2)}" if nm else lhs.strip())
+        slot = self._slot_value("v", rhs, {"t": "src", "code": one_line(self._expand_aliases(rhs))}, "값", self._lhs_type(lhs))
+        return [self._call_block(label, [lhs + " ", "v", ";"], [slot])]
 
     def _lhs_type(self, lhs):
         m = re.match(r"^\s*(\w+)\s+\w+\s*=", lhs)
@@ -1047,10 +1281,18 @@ class Decomposer:
             return None   # 기다리지 않는 Task 호출은 그대로
         body = pm["body"] if pm["body"] is not None else f"{'await ' if ret == 'Task' and not is_async else ''}{pm['expr']};"
         if pm["body"] is not None and ret == "Task" and not is_async:
-            mm = re.fullmatch(r"\s*return\s+(.+);\s*", body, re.S)
-            if not mm:
+            # 기다리지 않는 Task 본문: 'return Task.CompletedTask;' 는 조기 반환으로, 마지막 'return X;' 는 'await X;' 로 바꾼다
+            body = re.sub(r"return\s+Task\.CompletedTask\s*;", "return;", body)
+            try:
+                head = parse_stmts(body)
+            except (ValueError, IndexError, KeyError):
                 return None
-            body = f"await {mm.group(1).strip()};"
+            last = head[-1] if head else None
+            mm = re.fullmatch(r"return\s+(.+);", last["code"], re.S) if last and last["k"] == "stmt" else None
+            if mm:
+                body = _src(head[:-1]) + f"\nawait {mm.group(1).strip()};"
+            elif not head:
+                return None
         if re.search(r"\byield\b", body):
             return None
         level_name, _lvl_body, privates = self.chain.levels[li]
@@ -1152,7 +1394,7 @@ class Decomposer:
         out = []
         for k, st in enumerate(stmts):
             if st["k"] == "if" and st["else"] is None and len(st["then"]) == 1 and st["then"][0]["k"] == "stmt" and \
-                    st["then"][0]["code"] == "return;":
+                    st["then"][0]["code"] in ("return;", "return Task.CompletedTask;"):
                 rest = self._guard_returns(stmts[k + 1:])
                 if rest is None:
                     return None
@@ -1187,7 +1429,7 @@ class Decomposer:
 
     def value(self, text):
         v = self.resolve(text)
-        return v if v is not None else {"t": "src", "code": one_line(text)}
+        return v if v is not None else {"t": "src", "code": one_line(self._expand_aliases(text))}
 
     def _slot_value(self, key, orig, v, name, typ=None):
         if typ is None:
@@ -1206,7 +1448,7 @@ class Decomposer:
 
     def _native_value(self, text):
         value = self.resolve(self._expand_aliases(text))
-        return value if value is not None else {"t": "src", "code": one_line(text)}
+        return value if value is not None else {"t": "src", "code": one_line(self._expand_aliases(text))}
 
     def _mapped_call(self, signature, segs, rhs, lhs=""):
         """Use a user's exact-call mapping before the built-in API recognizers."""
@@ -1536,7 +1778,6 @@ class Decomposer:
 
 
 
-            setter = setter_models.get(method_name)
 
         if len(segs) != 2 or (not aw and head not in ("SfxCmd.Play", "VfxCmd.PlayOnCreature", "CardCmd.Upgrade", "CardCmd.ApplyKeyword",
                                                        "CardCmd.RemoveKeyword", "CardCmd.Preview", "CardCmd.PreviewCardPileAdd",
@@ -1565,9 +1806,11 @@ class Decomposer:
             a, b = method["args"]
             raw = rhs[a:b]
             call_args = [raw[x:y].strip() for x, y in split_args(raw)] if raw.strip() else []
-            if not aw and head == "SfxCmd.Play" and len(call_args) == 2:
+            if not aw and head == "SfxCmd.Play" and len(call_args) in (1, 2):
                 self.stats["calls"] += 1
-                return {"op": "sfx", "args": {"path": call_args[0], "volume": self._native_value(call_args[1])}}
+                # 음량을 생략하면 1 로 본다 (게임 기본값이라고 확인하지는 못함)
+                volume = self._native_value(call_args[1]) if len(call_args) == 2 else {"t": "num", "v": 1}
+                return {"op": "sfx", "args": {"path": call_args[0], "volume": volume}}
             if aw and head == "Cmd.Wait" and len(call_args) == 1:
                 self.stats["calls"] += 1
                 return {"op": "wait", "args": {"duration": self._native_value(call_args[0])}}
@@ -1593,7 +1836,8 @@ class Decomposer:
                             "played": flags[0] == "true", "triggered": flags[1] == "true"}}
             if not aw and head == "CardCmd.Upgrade" and len(call_args) in (1, 2):
                 self.stats["calls"] += 1
-                return {"op": "card_upgrade", "args": {"card": call_args[0],
+                one = re.fullmatch(r"new\s*\[\s*\]\s*\{\s*(\w+)\s*\}", call_args[0])   # CardCmd.Upgrade(new[] { card }) 는 한 장
+                return {"op": "card_upgrade", "args": {"card": one.group(1) if one else call_args[0],
                         "style": call_args[1] if len(call_args) == 2 else ""}}
             if not aw and head in ("CardCmd.ApplyKeyword", "CardCmd.RemoveKeyword") and len(call_args) == 2 and \
                     re.fullmatch(r"CardKeyword\.\w+", self._expr_key(call_args[1])):
@@ -1845,6 +2089,7 @@ class Decomposer:
         return None
 
     def call(self, lhs, rhs):
+        rhs = _common_rewrite(rhs)   # BaseLib 도우미를 같은 뜻의 게임 호출로 바꾼 뒤 풀이한다
         got = self.chain_parts(rhs)
         if not got:
             return None
@@ -2155,7 +2400,7 @@ def onplay_of(body):
     return None
 
 
-def decompose(card, parents=(), class_names=(), project=None):
+def decompose(card, parents=(), class_names=(), project=None, own_power=None, whole_raw=False):
     """복제 카드 -> (블록 목록, 통계) 또는 (None, 이유).
     parents: [(이름, 본문)] 복제 클래스가 상속하는 원본 부모들 (가까운 것부터)."""
     cl = card.get("clone") or {}
@@ -2165,6 +2410,8 @@ def decompose(card, parents=(), class_names=(), project=None):
         return None, "원본 카드 클래스에서 OnPlay 메서드를 찾지 못했습니다. DLL 캐시를 다시 읽었는지 확인해 주세요."
     chain = ClassChain(body, list(parents) if cl.get("base") else [])
     d = Decomposer(card, chain, class_names, project=project)
+    d.own_power = own_power   # 파워 훅이면 Amount 는 그 파워의 중첩 수치
+    d.whole_raw = whole_raw
     names = [p["name"] for p in pm["params"]]
     want = ["choiceContext", "cardPlay"]
     text = pm["body"]
@@ -2196,7 +2443,7 @@ def decompose(card, parents=(), class_names=(), project=None):
         detail = str(exc).strip() or repr(exc).strip() or type(exc).__name__
         return None, f"원본 코드를 읽지 못했습니다 ({type(exc).__name__}): {detail}"
     blocks = [{"op": "source_step", "args": {"source": p}} for p in pre] + blocks
-    return blocks, d.stats
+    return _settle_aliases(blocks), d.stats
 
 
 def parents_from(classes, cls_name):
@@ -2214,14 +2461,14 @@ def parents_from(classes, cls_name):
     return out
 
 
-def decompose_with_classes(card, classes, project=None):
+def decompose_with_classes(card, classes, project=None, own_power=None, whole_raw=False):
     """classes: {짧은 이름: CsClass} (모드 전체)."""
     cl = card.get("clone") or {}
     orig = (cl.get("orig_class") or "").split(".")[-1]
     parents = parents_from(classes, orig)
     if cl.get("base") and parents and parents[0][0] != cl["base"]:
         parents = []
-    blocks, info = decompose(card, parents, classes, project)
+    blocks, info = decompose(card, parents, classes, project, own_power, whole_raw)
     if blocks is not None:
         # 부모 클래스 코드를 펼쳤으면 그 파일의 using 도 필요하다
         by_full = {c.full: c for c in classes.values()}

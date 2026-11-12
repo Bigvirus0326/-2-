@@ -91,8 +91,8 @@ class ExternalTabQt(QWidget):
 
         root = QVBoxLayout(self)
         bar = QHBoxLayout()
-        self._bar_button(bar, "캐릭터 카드 라이브러리…", getattr(app, "open_card_library", None),
-                         "카드 라이브러리를 쓸 수 없습니다.")
+        self._bar_button(bar, "라이브러리…", getattr(app, "open_card_library", None),
+                         "라이브러리를 쓸 수 없습니다.")
         self._bar_button(bar, "설치된 모드에서…", self.pick_installed)
         self._bar_button(bar, "모드 폴더 열기…", self.open_folder)
         self._bar_button(bar, "파일 열기 (.dll/.pck/.json)…", self.open_file)
@@ -421,6 +421,7 @@ class ExternalTabQt(QWidget):
         used = all_ids(P)
         pool = self.pool.currentData()
         added = {"card": 0, "relic": 0, "potion": 0, "power": 0}
+        new_items = []
         for kind, i in sorted(self.selected):
             src = m.items[kind][i]
             new = MI.clone_item(m, src, P, pool)
@@ -438,6 +439,7 @@ class ExternalTabQt(QWidget):
                         new[k] = pv[k]
             P[{"card": "cards", "relic": "relics", "potion": "potions", "power": "powers"}[kind]].append(new)
             added[kind] += 1
+            new_items.append(new)
         if has_code:
             self._ensure_dep(m)
         self.app.mark_dirty()
@@ -447,6 +449,8 @@ class ExternalTabQt(QWidget):
         if has_code:
             msg += f"\n\n원본 모드 '{m.id}'를 참조(필수 모드)로 추가했습니다. 게임에 원본 모드도 설치되어 있어야 합니다."
         _info(self, msg)
+        if hasattr(self.app, "rebuild_direct_code"):
+            self.app.rebuild_direct_code(new_items)
 
     # ---- 그리기 ----
     def set_kind(self, value):

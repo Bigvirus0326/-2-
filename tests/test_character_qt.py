@@ -97,3 +97,93 @@ class CharacterPanelQtTests(TestCase):
             pixmap = self.panel.preview.pixmap()
             self.assertIsNotNone(pixmap)
             self.assertFalse(pixmap.isNull())
+
+    def test_grips_resize_the_deck_and_relic_lists_with_a_floor(self):
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+
+        def drag(grip, dy):
+            def ev(kind, y):
+                return QMouseEvent(kind, QPointF(5, 5), QPointF(5, y), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+            grip.mousePressEvent(ev(QMouseEvent.Type.MouseButtonPress, 100))
+            grip.mouseMoveEvent(ev(QMouseEvent.Type.MouseMove, 100 + dy))
+            grip.mouseReleaseEvent(ev(QMouseEvent.Type.MouseButtonRelease, 100 + dy))
+
+        grips = {g.target: g for g in self.panel.findChildren(C._HeightGrip)}
+        for target in (self.panel.deck_table, self.panel.relic_list):
+            before = target.maximumHeight()
+            drag(grips[target], 200)
+            self.assertEqual(target.maximumHeight(), before + 200)
+            drag(grips[target], -10000)                  # 너무 줄이면 최소 높이에서 멈춘다
+            self.assertEqual(target.maximumHeight(), 60)
+
+    def test_a_card_dropped_on_the_deck_adds_one_copy(self):
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtGui import QDropEvent
+        from PySide6.QtCore import QMimeData
+        from cardlibqt import CARD_MIME
+        self.project["character"]["deck"] = []
+        self.panel.card_drop_fn = lambda done: done("C_ONE")
+
+        def drop(mime):
+            event = QDropEvent(QPointF(5, 5), Qt.DropAction.CopyAction, mime,
+                               Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            self.panel.deck_table.dropEvent(event)
+            return event
+
+        card = QMimeData()
+        card.setData(CARD_MIME, b"1")
+        self.assertTrue(drop(card).isAccepted())
+        self.assertEqual(self.project["character"]["deck"], [{"card": "C_ONE", "count": 1}])
+        text = QMimeData()
+        text.setText("그냥 글자")
+        self.assertFalse(drop(text).isAccepted())              # 카드가 아니면 받지 않는다
+        self.assertEqual(len(self.project["character"]["deck"]), 1)
+
+    def test_dropping_a_card_already_in_the_deck_adds_one_more(self):
+        from PySide6.QtCore import QPointF, Qt, QMimeData
+        from PySide6.QtGui import QDropEvent
+        from cardlibqt import CARD_MIME
+        self.project["character"]["deck"] = [{"card": "C_ONE", "count": 2}]
+        self.panel.card_drop_fn = lambda done: done("C_ONE")
+        mime = QMimeData()
+        mime.setData(CARD_MIME, b"1")
+        event = QDropEvent(QPointF(5, 5), Qt.DropAction.CopyAction, mime,
+                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.panel.deck_table.dropEvent(event)
+        self.assertEqual(self.project["character"]["deck"], [{"card": "C_ONE", "count": 3}])
+
+    def test_deck_rows_show_the_count_on_the_right(self):
+        self.project["character"]["deck"] = [{"card": self.project["cards"][0]["id"], "count": 5}]
+        self.panel.load(self.project)
+        index = self.panel.deck_table.model().index(0, 0)
+        self.assertEqual(self.panel.deck_table.itemDelegate()._extra_text(index), "× 5")
+
+    def test_a_relic_dropped_on_the_relic_list_joins_the_starting_relics(self):
+        from PySide6.QtCore import QPointF, Qt, QMimeData
+        from PySide6.QtGui import QDropEvent
+        from cardlibqt import CARD_MIME
+        self.project["character"]["relics"] = []
+        self.panel.relic_drop_fn = lambda done: done("R_DROP")
+        mime = QMimeData()
+        mime.setData(CARD_MIME, b"1")
+        event = QDropEvent(QPointF(5, 5), Qt.DropAction.CopyAction, mime,
+                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.panel.relic_list.dropEvent(event)
+        self.assertTrue(event.isAccepted())
+        self.assertEqual(self.project["character"]["relics"], ["R_DROP"])
+
+    def test_a_library_item_over_the_deck_shows_a_frame_until_it_leaves(self):
+        from PySide6.QtCore import QPoint, Qt, QMimeData
+        from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent
+        from cardlibqt import CARD_MIME
+        mime = QMimeData()
+        mime.setData(CARD_MIME, b"1")
+        enter = QDragEnterEvent(QPoint(5, 5), Qt.DropAction.CopyAction, mime,
+                                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.panel.deck_table.dragEnterEvent(enter)
+        self.assertTrue(self.panel.deck_table._drop_hover)
+        self.assertIn("border", self.panel.deck_table.styleSheet())
+        self.panel.deck_table.dragLeaveEvent(QDragLeaveEvent())
+        self.assertFalse(self.panel.deck_table._drop_hover)
+        self.assertEqual(self.panel.deck_table.styleSheet(), "")

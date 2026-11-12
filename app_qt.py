@@ -24,8 +24,10 @@ from findqt import FindPaletteQt
 import modimport as MI
 import ingame
 from characterqt import CharacterPanelQt
-from cardlibqt import CardLibraryQt
+from cardlibqt import ACTIVE_DRAG, KINDS, CardLibraryQt
+from types import SimpleNamespace
 from aiqt import AIWorkflowQt
+from airebuildqt import offer_batch
 from artuiqt import ArtApplyDialogQt, ArtGuideDialogQt
 from feedbackqt import FeedbackDialogQt
 from externalqt import ExternalTabQt
@@ -36,6 +38,7 @@ from fxtabqt import FxTabQt
 from gimmickqt import GimmickQt
 from itemtabqt import CardTabQt, PotionTabQt, PowerTabQt, RelicTabQt
 import modgen as M
+import blockcode as B
 import projectio as IO
 import qtkit as Q
 import updater as UP
@@ -66,6 +69,7 @@ class QtApp(Q.DockWorkspace):
     def __init__(self, settings=None, parent=None):
         super().__init__(parent)
         self.settings = settings if settings is not None else IO.load_settings()
+        B.HIDE_CODE = not self.settings.get("show_code", False)   # 처음 쓰는 사람에게 C# 코드를 보이지 않는 것이 기본
         self.views = GameViews(self.game_assets, lambda: self.project, self)   # '게임 화면' 설정 (모든 그림 칸이 같이 쓴다)
         self.project = M.default_project()
         self.project_path = ""
@@ -90,6 +94,8 @@ class QtApp(Q.DockWorkspace):
         self.log_line.connect(self._append_log)
         self.takeover_done.connect(self._finish_takeover)
         self._card_library = None
+        self._library_state = SimpleNamespace(sources={}, assets=None)   # 라이브러리 창들이 함께 쓰는 원작·파일 목록
+        self._library_windows = []
         self._art_guide = None
         self.app_dir = IO.APP_DIR
         self.takeover_failed.connect(lambda msg: (self.status("[오류] 통째로 열기 실패: " + msg, 8000),
@@ -105,6 +111,8 @@ class QtApp(Q.DockWorkspace):
         self.char_page = CharacterPanelQt(self.project, on_change=self._char_changed)
         self.add_page(self.char_page, TAB_TITLES[1])
         self.char_page.assets_fn = self.game_assets
+        self.char_page.card_drop_fn = self.drop_card_to_deck
+        self.char_page.relic_drop_fn = self.drop_relic_to_list
         self.item_pages = [CardTabQt(self.project, on_change=self._items_changed),
                            RelicTabQt(self.project, on_change=self._items_changed),
                            PotionTabQt(self.project, on_change=self._items_changed),
@@ -116,6 +124,7 @@ class QtApp(Q.DockWorkspace):
         self.gimmick_page = GimmickQt(self.project, on_change=self.mark_dirty, on_reload=self.load_all)
         self.add_page(self.gimmick_page, TAB_TITLES[6])
         self.item_pages[0].library_fn = self.open_card_library
+        self._create_library_dock()
         self.fx_page = FxTabQt(self)
         self.add_page(self.fx_page, TAB_TITLES[7])
         self.gallery_page = GalleryQt(self.project, views=self.views)
@@ -199,7 +208,7 @@ class QtApp(Q.DockWorkspace):
         add(file_menu, "열기…", self.open_dialog, "Ctrl+O")
         add(file_menu, "저장", self.save, "Ctrl+S")
         add(file_menu, "다른 이름으로 저장…", self.save_as, "Ctrl+Shift+S")
-        add(file_menu, "캐릭터 카드 라이브러리…", self.open_card_library)
+        add(file_menu, "라이브러리…", self.open_card_library)
         add(file_menu, "프로젝트 자산 모으기…", self.pack_project_assets)
         file_menu.addSeparator()
         add(file_menu, "📂 다른 모드를 통째로 열기 (바로 작업)…", self.open_external_tab)
@@ -223,17 +232,20 @@ class QtApp(Q.DockWorkspace):
         ai_menu = self.menuBar().addMenu("AI")
         add(ai_menu, "AI로 만들기 (요청 복사 · 결과 붙여넣기)…", self.open_ai)
         add(ai_menu, "AI 그림 설명서 만들기…", self.open_art_guide)
+        add(ai_menu, "직접 코드 남은 항목 한꺼번에 다시 만들기…", lambda: self.rebuild_direct_code())
         add(ai_menu, "📋 그림 설명서 바로 복사", self.quick_copy_art)
         add(ai_menu, "그림 한꺼번에 적용…", self.open_art_apply)
 
         view_menu = self.menuBar().addMenu("보기")
         for action in self.view_menu_actions():
             view_menu.addAction(action)
+        view_menu.addAction(self._library_dock.toggleViewAction())
         view_menu.addSeparator()
         add(view_menu, "떨어진 탭 되돌리기", self.dock_all)
         add(view_menu, "배치 초기화", self.reset_layout)
         view_menu.addSeparator()
         self.focus_action = check(view_menu, "편집에 집중", False, self.set_editor_layout)
+        check(view_menu, "C# 코드 보기 (고급)", self.settings.get("show_code", False), self.set_show_code)
         add(view_menu, "크게", lambda: self.zoom_step(1), "Ctrl+=")
         add(view_menu, "작게", lambda: self.zoom_step(-1), "Ctrl+-")
         add(view_menu, "기본 크기 (100%)", lambda: self.set_ui_scale(1.0), "Ctrl+0")
@@ -262,6 +274,15 @@ class QtApp(Q.DockWorkspace):
     # ---- 설정 · 배율 · 도움말 ----
     def persist_settings(self):
         IO.save_settings(self.settings)
+
+    def set_show_code(self, on):
+        """C# 코드를 화면에 보일지 (생성되는 코드에는 영향 없음). 열려 있는 항목 화면에 바로 적용한다."""
+        self.settings["show_code"] = bool(on)
+        self.persist_settings()
+        B.HIDE_CODE = not on
+        for page in self.item_pages:
+            page.apply_code_visibility()
+        self.status("C# 코드를 보입니다." if on else "C# 코드를 숨깁니다. 새로 여는 편집 창부터 적용됩니다.", 4000)
 
     def _set_update_option(self, key, on):
         self.settings[key] = bool(on)
@@ -387,12 +408,64 @@ class QtApp(Q.DockWorkspace):
         self.gallery_page.set_project(self.project)
         self.update_title()
 
+    def _create_library_dock(self):
+        """라이브러리를 메인 창의 도킹 패널로 만든다. 왼쪽·오른쪽·아래 어디든 끌어 붙일 수 있다 (처음엔 숨어 있다)."""
+        lib = CardLibraryQt(self, self.item_pages[0], None, state=self._library_state)
+        dock = QDockWidget("라이브러리", self)
+        dock.setObjectName("라이브러리")
+        dock.setWidget(lib)
+        lib.dock = dock
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        dock.hide()
+        self._card_library = lib
+        self._library_dock = dock
+
     def open_card_library(self):
-        """카드 라이브러리 창 (한 번 만들면 계속 쓴다)."""
-        if self._card_library is None:
-            self._card_library = CardLibraryQt(self, self.item_pages[0], self)
-        self._card_library.show()
-        self._card_library.raise_()
+        """라이브러리 패널을 보인다. 종류를 모두 다른 창으로 뺐다면 다른 창이 안 가진 종류로 다시 채운다."""
+        lib = self._card_library
+        if not lib.kinds:
+            held = {k for w in self._library_windows for k in w.kinds}
+            for kind, _label in KINDS:
+                if kind not in held:
+                    lib.add_kind(kind)
+        lib.refresh_groups()        # 프로젝트가 바뀌었을 수 있으니 목록을 다시 그린다
+        dock = self._library_dock
+        first_time = not dock.isVisible()
+        dock.show()
+        dock.raise_()
+        if first_time and not dock.isFloating():     # 처음 열 때는 라이브러리가 쓸 만한 크기로 펼친다
+            horizontal = self.dockWidgetArea(dock) in (Qt.DockWidgetArea.LeftDockWidgetArea,
+                                                       Qt.DockWidgetArea.RightDockWidgetArea)
+            self.resizeDocks([dock], [640 if horizontal else 420],
+                             Qt.Orientation.Horizontal if horizontal else Qt.Orientation.Vertical)
+
+    def open_library_window(self, kind, pos=None):
+        """종류 탭 하나를 따로 된 라이브러리 창으로 연다 (탭을 창 밖에 놓으면 이렇게 된다). 원작·파일 목록은 함께 쓴다."""
+        window = CardLibraryQt(self, self.item_pages[0], None, kinds=[kind], state=self._library_state)
+        if pos is not None:
+            window.move(pos)
+        self._library_windows.append(window)
+        window.show()
+        window.raise_()
+        return window
+
+    def discard_library_window(self, window):
+        """탭을 다 다른 라이브러리로 옮긴 떨어진 창을 닫고 목록에서 뺀다."""
+        if window in self._library_windows:
+            self._library_windows.remove(window)
+        window.close()
+
+    def drop_card_to_deck(self, done):
+        """라이브러리에서 끌어 놓은 카드를 가져온 뒤 done(카드 id) 을 부른다 (시작 덱용)."""
+        lib = ACTIVE_DRAG["lib"] or self._card_library
+        if lib is not None:
+            lib.add_to_deck(done)
+
+    def drop_relic_to_list(self, done):
+        """라이브러리에서 끌어 놓은 유물을 가져온 뒤 done(유물 id) 을 부른다 (시작 유물용)."""
+        lib = ACTIVE_DRAG["lib"] or self._card_library
+        if lib is not None:
+            lib.add_to_relics(done)
 
     def open_ai(self):
         AIWorkflowQt(self, paste=False).exec()
@@ -493,6 +566,15 @@ class QtApp(Q.DockWorkspace):
         self.log(f"통째로 열었습니다: {em.name} ({em.id}) — 카드 {n['cards']} · 유물 {n['relics']} · 물약 {n['potions']} · 파워 {n['powers']}")
         ImportResultsDialogQt(self, project, self._takeover_notes(project, em, n), self._open_import_card,
                               analyze_card=self._analyze_import_card, show_unresolved=self.show_unresolved).exec()
+        self.rebuild_direct_code()
+
+    def rebuild_direct_code(self, items=None):
+        """직접 코드가 남은 항목을 한꺼번에 AI 로 다시 만드는 창 (불러온 직후 자동으로, 또는 AI 메뉴에서)."""
+        def changed():
+            self.mark_dirty()
+            self.load_all()   # 새 파워·기믹·지운 것이 기믹 탭과 도감까지 보이도록 전체를 다시 채운다
+        if not offer_batch(self, self.project, items, changed) and items is None:
+            QMessageBox.information(self, IO.APP_TITLE, "직접 코드가 남은 항목이 없습니다.")
 
     def _takeover_notes(self, project, em, n):
         """가져오기 결과 창의 안내 줄 (Tk 의 _finish_takeover 와 같은 내용)."""

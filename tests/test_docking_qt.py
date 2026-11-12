@@ -24,6 +24,22 @@ OPERATIONS = ["float", "dock", "hide", "show", "select", "dock_all", "reset", "s
 
 @skipUnless(HAVE_QT, "PySide6 가 설치되어 있지 않습니다")
 class DockingQtTests(TestCase):
+    def test_dragging_a_tab_out_detaches_it_and_dropping_it_on_the_bar_reattaches_it(self):
+        from unittest import mock
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QTabBar
+        first, second = TITLES[0], TITLES[1]
+        dock = self.ws.dock_of(self.pages[second])
+        self.ws.detach_dock(dock, QPoint(300, 200))
+        self.assertTrue(dock.isFloating())
+        bar = next(b for b in self.ws.findChildren(QTabBar) if b.window() is self.ws)
+        spot = bar.mapToGlobal(bar.tabRect(0).center())
+        with mock.patch.object(Q, "QCursor") as cursor:
+            cursor.pos.return_value = spot
+            self.ws.attach_dock(dock)
+        self.assertFalse(dock.isFloating())
+        self.assertIn(dock, self.ws.tabifiedDockWidgets(self.ws.dock_of(self.pages[first])))
+
     def setUp(self):
         self.ws = Q.DockWorkspace()
         self.ws.resize(1000, 700)
@@ -126,3 +142,13 @@ class _CloseEvent:
 
     def ignore(self):
         self._accepted = False
+
+
+class WidePageDockingTests(TestCase):
+    def test_a_wide_page_does_not_force_the_window_wider_than_the_screen(self):
+        ws = Q.DockWorkspace()
+        wide = QLabel("wide")
+        wide.setMinimumWidth(1500)
+        ws.add_page(wide, "넓은 탭")
+        self.assertLess(ws.minimumSizeHint().width(), 1000)
+        ws.close()

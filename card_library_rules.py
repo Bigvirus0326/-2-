@@ -115,6 +115,19 @@ def import_project_card(target, source, card, used):
     result["cards"].append(item)
     return result
 
+def import_project_item(target, item, key, used):
+    """카드가 아닌 항목(유물·물약·파워)을 복사해 목록 key 의 끝에 넣는다. ID 가 겹치면 번호를 붙인다.
+    shortcut: 항목 안의 다른 항목 참조(파워·카드 등)는 따라가지 않는다. 참조가 필요한 항목은 import_project_card 처럼 훑어야 한다."""
+    result = copy.deepcopy(target)
+    new = copy.deepcopy(item)
+    original = new["id"]
+    suffix = 2
+    while new["id"] in used:
+        new["id"] = f"{original}_{suffix}"
+        suffix += 1
+    result.setdefault(key, []).append(new)
+    return result
+
 def _strings(node):
     if isinstance(node, str):
         yield node
